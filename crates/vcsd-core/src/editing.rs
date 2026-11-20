@@ -418,6 +418,89 @@ pub fn set_automation_mode(s: &mut ProjectState, owner_id: &str, mode: AutoMode)
     Err(not_found("track or bus", owner_id))
 }
 
+// ---------------------------------------------------------------- track folders
+//
+// Folders are `/`-separated paths on `Track::folder` (e.g. "Scene 12/Foley"),
+// so they travel with the track into manifests and handoff packages.
+
+/// Normalise a folder path: trim segments, drop empties, join with "/".
+pub fn normalize_folder(path: &str) -> String {
+    path.split('/').map(str::trim).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("/")
+}
+
+/// True when `folder` is `path` or inside it.
+pub fn in_folder(folder: &str, path: &str) -> bool {
+    !path.is_empty() && (folder == path || folder.starts_with(&format!("{path}/")))
+}
+
+/// Move tracks into `folder` ("" = top level). Returns how many changed.
+pub fn move_tracks_to_folder(s: &mut ProjectState, track_ids: &[String], folder: &str) -> Result<usize> {
+    let f = normalize_folder(folder);
+    for id in track_ids {
+        s.track(id)?;
+    }
+    let mut n = 0;
+    for id in track_ids {
+        let t = s.tracks.get_mut(id).unwrap();
+        if t.folder != f {
+            t.folder = f.clone();
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Rename/move a folder and everything under it ("Scene 12/Foley" → "Reel 1/Scene 12/Foley").
+pub fn rename_folder(s: &mut ProjectState, from: &str, to: &str) -> Result<usize> {
+    let (from, to) = (normalize_folder(from), normalize_folder(to));
+    if from.is_empty() {
+        return Err(invalid("cannot rename the top level"));
+    }
+    if in_folder(&to, &from) && to != from {
+        return Err(invalid("cannot move a folder inside itself"));
+    }
+    let mut n = 0;
+    for t in s.tracks.values_mut().filter(|t| in_folder(&t.folder, &from)) {
+        let rest = &t.folder[from.len()..];
+        t.folder = normalize_folder(&format!("{to}{rest}"));
+        n += 1;
+    }
+    if n == 0 {
+        return Err(not_found("folder", &from));
+    }
+    Ok(n)
+}
+
+/// Remove a folder level: its tracks (and subfolders) move up to the parent.
+pub fn ungroup_folder(s: &mut ProjectState, path: &str) -> Result<usize> {
+    let path = normalize_folder(path);
+    let parent = path.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    rename_folder(s, &path, &parent)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderFlag {
+    Mute,
+    Solo,
+}
+
+/// Set mute or solo on every track in a folder (and its subfolders).
+pub fn set_folder_flag(s: &mut ProjectState, path: &str, flag: FolderFlag, on: bool) -> Result<usize> {
+    let path = normalize_folder(path);
+    let mut n = 0;
+    for t in s.tracks.values_mut().filter(|t| in_folder(&t.folder, &path)) {
+        match flag {
+            FolderFlag::Mute => t.mute = on,
+            FolderFlag::Solo => t.solo = on,
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return Err(not_found("folder", &path));
+    }
+    Ok(n)
+}
+
 // ---------------------------------------------------------------- takes
 
 pub struct TakeImport<'a> {

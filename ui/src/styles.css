@@ -294,3 +294,13 @@ button.automode { min-width: 18px; font-weight: 700; }
 .automode.m-write, .automode-select.m-write { color: #ff6b61; }
 .automode.writing, .automode-select.writing { background: #6d2420 !important; color: #fff; animation: blink 0.8s infinite; }
 .strip.is-writing { box-shadow: inset 0 0 0 2px #e5534b; }
+
+/* track folders */
+:root { --folder-bg: #1c2027; }
+.folder-head { display: flex; align-items: center; gap: 4px; padding-right: 6px; border-bottom: 1px solid #23262b; background: #20252d; font-size: 11.5px; font-weight: 600; }
+.folder-head.selected { background: #283244; }
+.folder-head.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.folder-head .folder-name { flex: 1; cursor: text; }
+.folder-head .twisty { width: 18px; padding: 0; }
+.folder-name-edit { flex: 1; font-size: 11.5px; padding: 1px 4px; }
+.drag-grip { cursor: grab; }

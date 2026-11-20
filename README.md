@@ -66,6 +66,8 @@ On first launch, choose **Create demo project…** to get a fully spotted 3-scen
 | Click an automation lane / drag a breakpoint / double-click it | Add (on the line: keeps its value) / move (Shift: value only) / delete |
 | Mode button **R/T/L/W** (track/bus header or mixer strip) | Automation mode: **Read**, **Touch** (write while held, return on release), **Latch** (write from first touch, hold to stop), **Write** (whole pass, play → stop) |
 | Move a fader/pan in Touch/Latch/Write while playing | Records automation against the audio clock, heard live; committed as one undo step |
+| Folder header ▸/▾, double-click its name, M / S | Collapse (a collapsed folder shows its clips on one row), rename (subfolders follow), mute/solo everything inside |
+| Drag a track by its name onto a folder (or onto another track) | Move it into that folder; or type a path in the track inspector's *Folder* field |
 | Hold Alt while dragging | Disable frame snapping |
 | Shift-drag in the ruler | Loop range |
 
@@ -161,4 +163,5 @@ playback and recording run through real ALSA streams without sound hardware.
 (live spotting while playing, cue building, populate, replace + undo, pad performance, export,
 detached mixer); `ui/e2e/handles.cjs`, `ui/e2e/automation.cjs`, `ui/e2e/bus_automation.cjs` and
 `ui/e2e/write_automation.cjs` drag real trim/fade handles, automation breakpoints and mixer faders
-(writing Latch/Touch automation during playback) with the mouse.
+(writing Latch/Touch automation during playback) with the mouse; `ui/e2e/folders.cjs` covers track
+folders.

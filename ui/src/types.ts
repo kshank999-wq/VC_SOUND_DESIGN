@@ -121,6 +121,7 @@ export type Selection =
   | { kind: "clip"; id: string }
   | { kind: "marker"; id: string }
   | { kind: "track"; id: string }
+  | { kind: "folder"; id: string }
   | null;
 
 const CAT_KEYS = ["footsteps", "props", "hard_fx", "background", "design_fx", "dialogue", "music"] as const;

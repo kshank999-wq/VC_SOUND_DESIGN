@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { call } from "../api";
+import { allFolders } from "../folders";
 import type { EngineHook } from "../store";
 import { catLabel, type Asset, type Selection } from "../types";
 import { sampleAtTc, secs, tcAt } from "../tc";
@@ -21,6 +22,20 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span>{label}</span>
       {children}
     </label>
+  );
+}
+
+/** Folder path input with existing folders suggested. */
+function FolderEdit({ value, folders, onCommit }: { value: string; folders: string[]; onCommit: (v: string) => void }) {
+  const [v, setV] = useState(value);
+  useEffect(() => setV(value), [value]);
+  return (
+    <>
+      <input list="vcsd-folders" value={v} placeholder="(top level)" onChange={(e) => setV(e.target.value)}
+        onBlur={() => v !== value && onCommit(v)}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); e.stopPropagation(); }} />
+      <datalist id="vcsd-folders">{folders.map((f) => <option key={f} value={f} />)}</datalist>
+    </>
   );
 }
 
@@ -204,6 +219,33 @@ export function Inspector({ eng, sel, setSel, libSel, onPerform }: Props) {
         </div>
       );
     }
+  } else if (sel?.kind === "folder") {
+    const path = sel.id;
+    const kids = view.tracks.filter((t) => t.folder === path || t.folder.startsWith(path + "/"));
+    const allMuted = kids.length > 0 && kids.every((t) => t.mute);
+    const allSolo = kids.length > 0 && kids.every((t) => t.solo);
+    const clips = view.clips.filter((c) => kids.some((t) => t.id === c.track_id)).length;
+    body = (
+      <div className="pad">
+        <div className="insp-title">📁 Folder</div>
+        <Field label="Path (rename or move; subfolders follow)">
+          <FolderEdit value={path} folders={allFolders(view.tracks)} onCommit={async (v) => {
+            const r = await run("folder.rename", { from: path, to: v });
+            if (r) setSel(v.trim() ? { kind: "folder", id: v.split("/").map((x) => x.trim()).filter(Boolean).join("/") } : null);
+          }} />
+        </Field>
+        <div className="small muted">{kids.length} tracks · {clips} clips</div>
+        <div className="btns">
+          <button className={allMuted ? "on" : ""} onClick={() => run("folder.flag", { path, flag: "mute", on: !allMuted })}>{allMuted ? "Unmute all" : "Mute all"}</button>
+          <button className={allSolo ? "on" : ""} onClick={() => run("folder.flag", { path, flag: "solo", on: !allSolo })}>{allSolo ? "Unsolo all" : "Solo all"}</button>
+          <button title="Remove this folder level; its contents move up one level" onClick={() => run("folder.ungroup", { path }).then(() => setSel(null))}>Ungroup</button>
+        </div>
+        <h4>Tracks</h4>
+        <div className="list">
+          {kids.map((t) => <div key={t.id} className="inst" onClick={() => setSel({ kind: "track", id: t.id })}><span className="small ellipsis">{t.name}</span> <span className="small muted">{t.folder.slice(path.length + 1)}</span></div>)}
+        </div>
+      </div>
+    );
   } else if (sel?.kind === "track") {
     const t = view.tracks.find((x) => x.id === sel.id);
     if (t) {
@@ -221,6 +263,9 @@ export function Inspector({ eng, sel, setSel, libSel, onPerform }: Props) {
         <div className="pad">
           <div className="insp-title">Track</div>
           <Field label="Name"><Edit value={t.name} onCommit={(v) => run("track.update", { id: t.id, name: v })} /></Field>
+          <Field label="Folder (blank = top level; type a new path to create one)">
+            <FolderEdit value={t.folder} folders={allFolders(view.tracks)} onCommit={(v) => run("folder.move", { track_ids: [t.id], folder: v })} />
+          </Field>
           <div className="small muted">{t.folder} · {t.channels === 1 ? "mono" : "stereo"}</div>
           <Field label="Bus">
             <select value={t.bus_id} onChange={(e) => run("track.update", { id: t.id, bus_id: e.target.value })}>

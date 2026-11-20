@@ -499,3 +499,37 @@ fn mixer_live_override_replaces_lane() {
     let v = m.render_track_print(&t, 100, 1).unwrap().data[0];
     assert!((20.0 * (v / 0.5).log10() + 6.0).abs() < 0.01, "live value wins over the stored lane");
 }
+
+#[test]
+fn track_folders_move_rename_ungroup_and_flags() {
+    let (mut s, _r) = session("folders", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "12", "01:00:00:00", "01:00:20:00");
+    marker_tc(&mut s, "footsteps", EventType::Range, "01:00:01:00", "01:00:03:00", "walk", None);
+    marker_tc(&mut s, "props", EventType::Point, "01:00:04:00", "01:00:04:00", "door handle", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:20:00", "birds", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let folders: std::collections::BTreeSet<String> = s.state.tracks.values().map(|t| t.folder.clone()).collect();
+    assert!(folders.contains("Scene 12/Foley") && folders.contains("Scene 12/Backgrounds & Atmos"), "{folders:?}");
+    // rename a parent: subfolders follow
+    let n = s.edit("ren", |st| editing::rename_folder(st, " Scene 12 ", "Reel 1 / Scene 12")).unwrap();
+    assert_eq!(n, 3);
+    assert!(s.state.tracks.values().all(|t| t.folder.starts_with("Reel 1/Scene 12/")));
+    assert!(s.edit("loop", |st| editing::rename_folder(st, "Reel 1", "Reel 1/inner")).is_err(), "no folder inside itself");
+    // folder mute/solo hits every track below
+    s.edit("m", |st| editing::set_folder_flag(st, "Reel 1/Scene 12/Foley", editing::FolderFlag::Mute, true)).unwrap();
+    let muted: Vec<bool> = s.state.tracks.values().map(|t| t.mute).collect();
+    assert_eq!(muted.iter().filter(|m| **m).count(), 2, "only the Foley tracks");
+    // move one track to a new folder, then ungroup a level
+    let bg = s.state.tracks.values().find(|t| t.category == Category::Background).unwrap().id.clone();
+    s.edit("mv", |st| editing::move_tracks_to_folder(st, std::slice::from_ref(&bg), "Ambience//Stems/")).unwrap();
+    assert_eq!(s.state.tracks[&bg].folder, "Ambience/Stems");
+    s.edit("ug", |st| editing::ungroup_folder(st, "Reel 1")).unwrap();
+    assert!(s.state.tracks.values().filter(|t| t.id != bg).all(|t| t.folder.starts_with("Scene 12/")));
+    s.edit("top", |st| editing::move_tracks_to_folder(st, std::slice::from_ref(&bg), "")).unwrap();
+    assert_eq!(s.state.tracks[&bg].folder, "");
+    // folders travel with the handoff manifest's routing map (unchanged contract)
+    s.undo().unwrap();
+    assert_eq!(s.state.tracks[&bg].folder, "Ambience/Stems");
+}

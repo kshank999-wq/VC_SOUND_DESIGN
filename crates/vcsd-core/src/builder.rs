@@ -92,8 +92,9 @@ pub fn ensure_track(s: &mut ProjectState, cue: &Cue, policy: TrackPolicy) -> Res
     let scene_no = s.scenes.get(&cue.scene_id).map(|x| x.number.clone()).unwrap_or_default();
     let bus_id = ident.as_ref().and_then(|i| i.bus_id.clone()).unwrap_or_else(|| bus_for_category(s, &cue.category));
     let folder = match scene_key {
-        Some(_) => format!("Scene {}/{}", scene_no, cue.category.default_bus()),
-        None => format!("Global/{}", cue.category.default_bus()),
+        // bus names like "Backgrounds/Atmos" must not create a nested folder
+        Some(_) => format!("Scene {}/{}", scene_no, cue.category.default_bus().replace('/', " & ")),
+        None => format!("Global/{}", cue.category.default_bus().replace('/', " & ")),
     };
     let order = s.tracks.values().map(|t| t.order + 1).max().unwrap_or(0);
     let id = new_id("trk");

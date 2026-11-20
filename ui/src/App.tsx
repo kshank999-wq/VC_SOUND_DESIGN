@@ -35,14 +35,14 @@ export function App() {
     if (!view?.open || !rate || opened.current === view.root) return;
     opened.current = view.root ?? null;
     const sc = view.scenes[0];
-    const w = (centerRef.current?.clientWidth ?? 1000) - 230;
+    const w = (centerRef.current?.clientWidth ?? 1000) - 252;
     if (sc) setVp(zoomToRange(rate, sc.start_sample, sc.end_sample, w));
     setSel(null);
   }, [view?.open, view?.root, rate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const gotoRange = useCallback((a: number, b: number) => {
     if (!rate) return;
-    setVp(zoomToRange(rate, a, b, (centerRef.current?.clientWidth ?? 1000) - 230));
+    setVp(zoomToRange(rate, a, b, (centerRef.current?.clientWidth ?? 1000) - 252));
     setLower("timeline");
   }, [rate]);
 

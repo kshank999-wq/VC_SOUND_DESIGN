@@ -901,6 +901,28 @@ impl Engine {
                 })?;
                 Ok(json!({}))
             }
+            "folder.move" => {
+                let ids: Vec<String> = serde_json::from_value(a.get("track_ids").cloned().unwrap_or_default()).map_err(e)?;
+                let n = self.edit(g, "move to folder", |st| editing::move_tracks_to_folder(st, &ids, os(a, "folder").unwrap_or("")))?;
+                Ok(json!({"moved": n}))
+            }
+            "folder.rename" => {
+                let n = self.edit(g, "rename folder", |st| {
+                    editing::rename_folder(st, s(a, "from").map_err(Error::Invalid)?, os(a, "to").unwrap_or(""))
+                })?;
+                Ok(json!({"tracks": n}))
+            }
+            "folder.ungroup" => {
+                let n = self.edit(g, "ungroup folder", |st| editing::ungroup_folder(st, s(a, "path").map_err(Error::Invalid)?))?;
+                Ok(json!({"tracks": n}))
+            }
+            "folder.flag" => {
+                let flag = if os(a, "flag") == Some("solo") { editing::FolderFlag::Solo } else { editing::FolderFlag::Mute };
+                let n = self.edit(g, "folder mute/solo", |st| {
+                    editing::set_folder_flag(st, s(a, "path").map_err(Error::Invalid)?, flag, ob(a, "on"))
+                })?;
+                Ok(json!({"tracks": n}))
+            }
             "bus.update" => {
                 self.edit(g, "bus", |st| {
                     let id = s(a, "id").map_err(Error::Invalid)?;

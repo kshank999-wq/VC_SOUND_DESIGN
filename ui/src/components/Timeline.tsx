@@ -6,6 +6,7 @@ import { frameAtSample, sampleAtFrame, snap, tcAt, type Rate } from "../tc";
 import { applyClipDrag, clipZone, type ClipEdit, type ClipZone } from "../clipEdit";
 import { formatValue, neutral, posToValue, valueAt, valueToPos, type AutoPoint, type Param } from "../automation";
 import { ModeButton, type AutoMode } from "./AutoControl";
+import { folderTree, parentOf } from "../folders";
 
 export interface Viewport {
   start: number; // first visible sample
@@ -16,7 +17,7 @@ const RULER = 26;
 const SCENES = 20;
 const LANE = 24;
 const TRACK = 54;
-const HEAD_W = 230;
+const HEAD_W = 252;
 
 type Hit = { x: number; y: number; w: number; h: number; kind: "clip" | "marker" | "auto"; id: string };
 
@@ -27,13 +28,16 @@ const PARAM_LABEL: Record<Param, string> = { volume_db: "Volume", pan: "Pan" };
 const BUS_H = 30; // bus header row height
 /** Anything automation can be attached to: a track or a bus (incl. master). */
 interface Owner { id: string; name: string; color: string; pan: number }
+const FOLDER_H = 24; // folder header row height
+const INDENT = 12; // px per folder level
 type Row =
-  | { kind: "track"; t: Track; y: number; h: number }
+  | { kind: "folder"; path: string; name: string; depth: number; collapsed: boolean; trackIds: string[]; y: number; h: number }
+  | { kind: "track"; t: Track; depth: number; y: number; h: number }
   | { kind: "bus"; b: Bus; first: boolean; y: number; h: number }
   | { kind: "auto"; owner: Owner; param: Param; y: number; h: number };
 
 /** Track rows, each followed by its automation lanes when open (y relative to the first track). */
-function buildRows(tracks: Track[], buses: Bus[], open: Set<string>): Row[] {
+function buildRows(tracks: Track[], buses: Bus[], open: Set<string>, collapsed: Set<string>): Row[] {
   const rows: Row[] = [];
   let y = 0;
   const lanes = (owner: Owner) => {
@@ -43,8 +47,14 @@ function buildRows(tracks: Track[], buses: Bus[], open: Set<string>): Row[] {
       y += AUTO;
     }
   };
-  for (const t of tracks) {
-    rows.push({ kind: "track", t, y, h: TRACK });
+  for (const item of folderTree(tracks, collapsed)) {
+    if (item.kind === "folder") {
+      rows.push({ ...item, y, h: FOLDER_H });
+      y += FOLDER_H;
+      continue;
+    }
+    const t = item.track;
+    rows.push({ kind: "track", t, depth: item.depth, y, h: TRACK });
     y += TRACK;
     lanes({ id: t.id, name: t.name, color: catColor(t.category), pan: t.pan });
   }
@@ -59,6 +69,21 @@ function buildRows(tracks: Track[], buses: Bus[], open: Set<string>): Row[] {
 }
 
 const AUTO_KEY = "vcsd.automationLanes";
+const FOLDER_KEY = "vcsd.collapsedFolders";
+function loadSet(key: string): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(key) ?? "[]"));
+  } catch {
+    return new Set();
+  }
+}
+function saveSet(key: string, v: Set<string>) {
+  try {
+    localStorage.setItem(key, JSON.stringify([...v]));
+  } catch {
+    /* storage unavailable */
+  }
+}
 function loadOpen(): Set<string> {
   try {
     return new Set(JSON.parse(localStorage.getItem(AUTO_KEY) ?? "[]"));
@@ -123,6 +148,15 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
   const drag = useRef<Drag | null>(null);
   const hover = useRef<{ id: string; zone: ClipZone } | null>(null);
   const [autoOpen, setAutoOpen] = useState<Set<string>>(loadOpen);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => loadSet(FOLDER_KEY));
+  const toggleFolder = (path: string) =>
+    setCollapsed((o) => {
+      const n = new Set(o);
+      if (n.has(path)) n.delete(path);
+      else n.add(path);
+      saveSet(FOLDER_KEY, n);
+      return n;
+    });
   const toggleAuto = (id: string) =>
     setAutoOpen((o) => {
       const n = new Set(o);
@@ -138,7 +172,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
   const [, force] = useState(0);
   const lanes = view?.lanes ?? [];
   const tracks = view?.tracks ?? [];
-  const rows = buildRows(tracks, view?.buses ?? [], autoOpen);
+  const rows = buildRows(tracks, view?.buses ?? [], autoOpen, collapsed);
   const rowsH = rows.reduce((a, r) => a + r.h, 0);
   const contentH = RULER + SCENES + lanes.length * LANE + rowsH + 40;
   const stateRef = useRef({ view, tx, vp, sel, scrollY, size, rate, livePosition, rows });
@@ -301,6 +335,27 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
         trackY.set(r.t.id, tracksTop + r.y);
         ctx.fillStyle = sel?.kind === "track" && sel.id === r.t.id ? C("--track-sel") : C("--track-bg");
         ctx.fillRect(0, tracksTop + r.y, W, TRACK - 1);
+      }
+      for (const r of st.rows) {
+        if (r.kind !== "folder") continue;
+        const top = tracksTop + r.y;
+        ctx.fillStyle = sel?.kind === "folder" && sel.id === r.path ? C("--track-sel") : C("--folder-bg");
+        ctx.fillRect(0, top, W, FOLDER_H - 1);
+        if (r.collapsed) {
+          // summary of everything inside: one thin bar per clip, in track colours
+          const ids = new Set(r.trackIds);
+          ctx.globalAlpha = 0.75;
+          for (const c of view.clips) {
+            if (!ids.has(c.track_id) || c.muted) continue;
+            const a = X(c.timeline_start);
+            const z = X(c.timeline_start + c.length);
+            if (z < 0 || a > W) continue;
+            const tr = view.tracks.find((t) => t.id === c.track_id)!;
+            ctx.fillStyle = catColor(tr.category);
+            ctx.fillRect(a, top + 7, Math.max(1.5, z - a), FOLDER_H - 14);
+          }
+          ctx.globalAlpha = 1;
+        }
       }
       for (const r of st.rows) {
         if (r.kind !== "bus") continue;
@@ -671,6 +726,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
         else {
           const ra = rowAt(y);
           if (ra?.row.kind === "track") setSel({ kind: "track", id: ra.row.t.id });
+          else if (ra?.row.kind === "folder") setSel({ kind: "folder", id: ra.row.path });
           else setSel(null);
         }
       }
@@ -834,8 +890,10 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
             );
           })}
           {rows.map((r) =>
-            r.kind === "track" ? (
-              <TrackHead key={r.t.id} t={r.t} eng={eng} selected={sel?.kind === "track" && sel.id === r.t.id} onSelect={() => setSel({ kind: "track", id: r.t.id })}
+            r.kind === "folder" ? (
+              <FolderHead key={"f:" + r.path} row={r} eng={eng} selected={sel?.kind === "folder" && sel.id === r.path} onSelect={() => setSel({ kind: "folder", id: r.path })} onToggle={() => toggleFolder(r.path)} />
+            ) : r.kind === "track" ? (
+              <TrackHead key={r.t.id} t={r.t} depth={r.depth} eng={eng} selected={sel?.kind === "track" && sel.id === r.t.id} onSelect={() => setSel({ kind: "track", id: r.t.id })}
                 autoOpen={autoOpen.has(r.t.id)} hasAuto={((view.automation ?? []) as AutoPoint[]).some((p) => p.owner_id === r.t.id)} onToggleAuto={() => toggleAuto(r.t.id)} />
             ) : r.kind === "bus" ? (
               <BusHead key={r.b.id} b={r.b} eng={eng} first={r.first} autoOpen={autoOpen.has(r.b.id)}
@@ -885,16 +943,84 @@ function AutoHead({ owner, param, eng, points }: { owner: Owner; param: Param; e
   );
 }
 
-function TrackHead({ t, eng, selected, onSelect, autoOpen, hasAuto, onToggleAuto }: { t: Track; eng: EngineHook; selected: boolean; onSelect: () => void; autoOpen: boolean; hasAuto: boolean; onToggleAuto: () => void }) {
+const DRAG_TYPE = "application/x-vcsd-track";
+
+/** Folder header: collapse, inline rename, folder mute/solo, drop target for tracks. */
+function FolderHead({ row, eng, selected, onSelect, onToggle }: { row: Extract<Row, { kind: "folder" }>; eng: EngineHook; selected: boolean; onSelect: () => void; onToggle: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [over, setOver] = useState(false);
+  const kids = (eng.view?.tracks ?? []).filter((t) => row.trackIds.includes(t.id));
+  const allMuted = kids.length > 0 && kids.every((t) => t.mute);
+  const allSolo = kids.length > 0 && kids.every((t) => t.solo);
+  const rename = (name: string) => {
+    setEditing(false);
+    const clean = name.replace(/\//g, "-").trim();
+    if (!clean || clean === row.name) return;
+    const parent = parentOf(row.path);
+    eng.run("folder.rename", { from: row.path, to: parent ? `${parent}/${clean}` : clean });
+  };
+  return (
+    <div
+      className={"folder-head" + (selected ? " selected" : "") + (over ? " drop" : "")}
+      style={{ height: FOLDER_H, paddingLeft: 4 + row.depth * INDENT }}
+      onMouseDown={onSelect}
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes(DRAG_TYPE)) {
+          e.preventDefault();
+          setOver(true);
+        }
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        setOver(false);
+        const id = e.dataTransfer.getData(DRAG_TYPE);
+        if (id) eng.run("folder.move", { track_ids: [id], folder: row.path });
+      }}
+    >
+      <button className="tiny twisty" title={row.collapsed ? "Expand" : "Collapse"} onClick={onToggle}>{row.collapsed ? "▸" : "▾"}</button>
+      {editing ? (
+        <input className="folder-name-edit" autoFocus defaultValue={row.name} onFocus={(e) => e.target.select()} onMouseDown={(e) => e.stopPropagation()} onBlur={(e) => rename(e.target.value)}
+          onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditing(false); }} />
+      ) : (
+        <span className="ellipsis folder-name" title={`${row.path} — double-click to rename`} onDoubleClick={() => setEditing(true)}>📁 {row.name}</span>
+      )}
+      <span className="small muted">{row.trackIds.length}</span>
+      <button className={"tiny" + (allMuted ? " on-mute" : "")} title="Mute everything in this folder" onClick={() => eng.run("folder.flag", { path: row.path, flag: "mute", on: !allMuted })}>M</button>
+      <button className={"tiny" + (allSolo ? " on-solo" : "")} title="Solo everything in this folder" onClick={() => eng.run("folder.flag", { path: row.path, flag: "solo", on: !allSolo })}>S</button>
+    </div>
+  );
+}
+
+function TrackHead({ t, depth, eng, selected, onSelect, autoOpen, hasAuto, onToggleAuto }: { t: Track; depth: number; eng: EngineHook; selected: boolean; onSelect: () => void; autoOpen: boolean; hasAuto: boolean; onToggleAuto: () => void }) {
   const meter = eng.tx?.meters[t.id] ?? 0;
   const db = meter > 0 ? 20 * Math.log10(meter) : -90;
   const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
   const upd = (a: object) => eng.run("track.update", { id: t.id, ...a });
   return (
-    <div className={"track-head" + (selected ? " selected" : "")} style={{ height: TRACK }} onMouseDown={onSelect}>
+    <div
+      className={"track-head" + (selected ? " selected" : "")}
+      style={{ height: TRACK, paddingLeft: 6 + depth * INDENT }}
+      onMouseDown={onSelect}
+      onDragOver={(e) => e.dataTransfer.types.includes(DRAG_TYPE) && e.preventDefault()}
+      onDrop={(e) => {
+        // dropping on a track moves the dragged track into that track's folder
+        const id = e.dataTransfer.getData(DRAG_TYPE);
+        if (id && id !== t.id) eng.run("folder.move", { track_ids: [id], folder: t.folder });
+      }}
+    >
       <div className="th-row">
         <span className="swatch" style={{ background: catColor(t.category) }} />
-        <span className="ellipsis th-name" title={`${t.name}\n${t.folder}`}>{t.name}</span>
+        <span
+          className="ellipsis th-name drag-grip"
+          title={`${t.name}\n${t.folder || "(top level)"}\nDrag onto a folder or track to move it`}
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.setData(DRAG_TYPE, t.id);
+            e.dataTransfer.effectAllowed = "move";
+          }}
+        >
+          {t.name}
+        </span>
         <button className={"tiny" + (t.mute ? " on-mute" : "")} title="Mute" onClick={() => upd({ mute: !t.mute })}>M</button>
         <button className={"tiny" + (t.solo ? " on-solo" : "")} title="Solo" onClick={() => upd({ solo: !t.solo })}>S</button>
         <button className={"tiny" + (t.armed ? " on-rec" : "")} title="Arm for recording" onClick={() => upd({ armed: !t.armed })}>●</button>
