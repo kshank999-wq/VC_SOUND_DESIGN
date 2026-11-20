@@ -1,0 +1,3 @@
+target/
+*.vcsd.tmp
+/demo_project/
