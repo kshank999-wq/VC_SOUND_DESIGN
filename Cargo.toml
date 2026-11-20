@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vcsd-core", "crates/vcsd-engine", "crates/vcsd-cli", "crates/vcsd-app"]
+members = ["crates/vcsd-core", "crates/vcsd-plugins", "crates/vcsd-engine", "crates/vcsd-cli", "crates/vcsd-app", "crates/vcsd-testplug"]
 
 [workspace.package]
 version = "0.1.0"

@@ -80,6 +80,8 @@ pub struct Shared {
     /// Live automation values while a fader is being written (monitoring).
     overrides: Mutex<HashMap<(String, vcsd_core::AutomationParam), f32>>,
     overrides_version: AtomicU64,
+    /// Hosted plugins for insert slots.
+    plugins: Mutex<Option<Arc<dyn vcsd_core::mixer::PluginHost>>>,
 }
 
 fn now_ms() -> u64 {
@@ -150,6 +152,7 @@ impl Player {
             device_warning: Mutex::new(None),
             overrides: Mutex::new(HashMap::new()),
             overrides_version: AtomicU64::new(1),
+            plugins: Mutex::new(None),
         });
         let (prod, cons) = rtrb::RingBuffer::<Block>::new(RING_BLOCKS);
         let consumer = Arc::new(Mutex::new(Consumer { ring: cons, cur: None, idx: 0 }));
@@ -197,6 +200,11 @@ impl Player {
     pub fn clear_overrides(&self) {
         self.shared.overrides.lock().unwrap().clear();
         self.shared.overrides_version.fetch_add(1, SeqCst);
+    }
+
+    /// Plugin host used by playback (set once by the engine).
+    pub fn set_plugins(&self, host: Arc<dyn vcsd_core::mixer::PluginHost>) {
+        *self.shared.plugins.lock().unwrap() = Some(host);
     }
 
     pub fn clear_cache(&self) {
@@ -291,7 +299,8 @@ fn render_thread(sh: Arc<Shared>, mut prod: rtrb::Producer<Block>) {
             thread::sleep(Duration::from_millis(10));
             continue;
         };
-        let mixer = Mixer::with_cache(&snap, RenderOptions { exclude_temp_refs: false, honor_solo: true }, sh.cache.clone());
+        let mixer = Mixer::with_cache(&snap, RenderOptions { exclude_temp_refs: false, honor_solo: true }, sh.cache.clone())
+            .with_plugins(sh.plugins.lock().unwrap().clone());
         let mut ov_seen = 0u64; // force an override sync for the new mixer
         loop {
             if sh.shutdown.load(Relaxed) {

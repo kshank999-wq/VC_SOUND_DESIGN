@@ -95,6 +95,9 @@ pub struct Prefs {
     /// MIDI input to connect at startup; None = no MIDI.
     #[serde(default)]
     pub midi_port: Option<String>,
+    /// Extra folders searched for VST3 plugins (besides the standard ones).
+    #[serde(default)]
+    pub plugin_folders: Vec<String>,
     /// Window/panel layout owned by the UI (opaque JSON object).
     #[serde(default)]
     pub ui_layout: serde_json::Value,

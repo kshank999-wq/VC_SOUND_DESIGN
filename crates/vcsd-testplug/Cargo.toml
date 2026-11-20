@@ -1,0 +1,13 @@
+[package]
+name = "vcsd-testplug"
+description = "A tiny VST3 plugin (gain + latency-reporting delay) used to test VC Sound Design's plugin host. Not shipped."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vst3 = "0.3.0"

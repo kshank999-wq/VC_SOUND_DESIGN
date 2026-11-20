@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type { EngineHook } from "../store";
 import { catColor, type Bus, type Track } from "../types";
 import { ModeSelect, useAutoControl, type AutoMode } from "./AutoControl";
+import { InsertRack } from "./Plugins";
 
 function Meter({ v }: { v: number }) {
   const db = v > 0 ? 20 * Math.log10(v) : -90;
@@ -93,6 +94,7 @@ function Strip({ t, eng }: { t: Track; eng: EngineHook }) {
       <div className="strip-name" title={t.name}>{t.name.split(" • ").slice(1).join(" • ") || t.name}</div>
       <AutoBadge eng={eng} id={t.id} />
       <div className="small muted ellipsis">{t.folder.split("/")[0]}</div>
+      <InsertRack eng={eng} ownerId={t.id} inserts={t.inserts} compact />
       <PanKnob value={pan.display} onBegin={pan.begin} onMove={pan.move} onEnd={pan.end} title="pan" />
       <div className="strip-mid">
         <Fader db={vol.display} onBegin={vol.begin} onMove={vol.move} onEnd={vol.end} />
@@ -121,6 +123,7 @@ function BusStrip({ b, eng }: { b: Bus; eng: EngineHook }) {
       <div className="strip-name">{b.name}</div>
       <AutoBadge eng={eng} id={b.id} />
       <div className="small muted">{b.parent_id ? "stem bus" : "master"}</div>
+      <InsertRack eng={eng} ownerId={b.id} inserts={b.inserts ?? []} compact />
       <PanKnob value={bal.display} onBegin={bal.begin} onMove={bal.move} onEnd={bal.end} title="balance (automation only)" />
       <div className="strip-mid">
         <Fader db={vol.display} onBegin={vol.begin} onMove={vol.move} onEnd={vol.end} />

@@ -9,8 +9,11 @@
 pub mod demo;
 pub mod devices;
 pub mod player;
+pub mod rack;
 pub mod recorder;
 pub mod serve;
+
+pub use vcsd_plugins;
 
 use player::Player;
 use serde_json::{json, Value};
@@ -76,6 +79,12 @@ pub struct Engine {
     midi_port: Mutex<Option<String>>,
     midi_error: Mutex<Option<String>>,
     midi_last: Mutex<Option<(Instant, Vec<u8>)>>,
+    /// Running plugin instances for insert slots (shared with playback).
+    pub rack: Arc<rack::Rack>,
+    plugin_cache: Mutex<vcsd_plugins::scan::Cache>,
+    plugin_report: Mutex<Option<vcsd_plugins::scan::Report>>,
+    /// How plugin bundles are opened while scanning (a child process by default).
+    pub plugin_scanner: Mutex<vcsd_plugins::scan::Runner>,
 }
 
 // ---------------------------------------------------------------- arg helpers
@@ -171,6 +180,15 @@ impl Engine {
         let prefs = prefs_path.as_deref().map(devices::Prefs::load).unwrap_or_default();
         let player = Player::start();
         player.set_output_device(prefs.output_device.clone());
+        let rack = Arc::new(rack::Rack::new());
+        player.set_plugins(rack.clone());
+        // last scan's results, so projects open with their plugins without rescanning
+        let plugin_cache = prefs_path.as_deref().map(|p| vcsd_plugins::scan::Cache::load(&plugin_cache_path(p))).unwrap_or_default();
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut known: Vec<vcsd_plugins::PluginInfo> = plugin_cache.bundles.values().flat_map(|e| e.plugins.clone()).collect();
+        #[cfg(target_os = "macos")]
+        known.extend(vcsd_plugins::au::list());
+        rack.set_catalog(&known);
         let midi_pref = prefs.midi_port.clone();
         let e = Arc::new(Engine {
             inner: Mutex::new(Inner {
@@ -193,6 +211,10 @@ impl Engine {
             midi_port: Mutex::new(None),
             midi_error: Mutex::new(None),
             midi_last: Mutex::new(None),
+            rack,
+            plugin_cache: Mutex::new(plugin_cache),
+            plugin_report: Mutex::new(None),
+            plugin_scanner: Mutex::new(vcsd_plugins::scan::Runner::current_exe()),
         });
         if let Some(port) = midi_pref {
             // a missing controller at startup is reported, not fatal
@@ -250,6 +272,45 @@ impl Engine {
         }
     }
 
+    fn plugin_dirs(&self) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let extra = self.prefs.lock().unwrap().plugin_folders.iter().map(PathBuf::from).collect();
+        (vcsd_plugins::scan::default_vst3_dirs(), extra)
+    }
+
+    /// Scan plugin folders (only new/changed bundles unless `force`) and update the catalog.
+    pub fn rescan(&self, force: bool) {
+        let (std_dirs, extra) = self.plugin_dirs();
+        let dirs: Vec<PathBuf> = std_dirs.into_iter().chain(extra).collect();
+        let runner = self.plugin_scanner.lock().unwrap().clone();
+        let mut cache = self.plugin_cache.lock().unwrap();
+        let rep = vcsd_plugins::scan::scan(&dirs, &mut cache, &runner, force);
+        if let Some(p) = &self.prefs_path {
+            let _ = cache.save(&plugin_cache_path(p));
+        }
+        self.rack.set_catalog(&rep.plugins);
+        *self.plugin_report.lock().unwrap() = Some(rep);
+        // slots whose plugin just appeared get loaded
+        let mut g = self.inner.lock().unwrap();
+        if g.session.is_some() {
+            self.publish(&mut g);
+        }
+    }
+
+    fn plugins_json(&self) -> Value {
+        let (std_dirs, extra) = self.plugin_dirs();
+        let rep = self.plugin_report.lock().unwrap().clone().unwrap_or_default();
+        let (fx, other): (Vec<_>, Vec<_>) = rep.plugins.into_iter().partition(|p| p.is_effect());
+        json!({
+            "plugins": fx,
+            "instruments": other.len(),
+            "failed": rep.failed,
+            "bundles": rep.bundles,
+            "scanned": rep.scanned,
+            "folders": {"standard": std_dirs, "extra": extra},
+            "formats": if cfg!(target_os = "macos") { json!(["vst3", "au"]) } else { json!(["vst3"]) },
+        })
+    }
+
     /// Devices, ports, saved choices and what is actually active.
     pub fn devices_json(&self) -> Value {
         let mut v = self.device_status_json();
@@ -293,6 +354,10 @@ impl Engine {
 
     fn publish(&self, g: &mut Inner) {
         g.version += 1;
+        if let Some(sess) = &g.session {
+            // instances exist before playback sees the new slots
+            self.rack.sync(&sess.state);
+        }
         let snap = g.session.as_ref().map(|s| Arc::new(s.state.clone()));
         self.player.set_project(snap, g.version);
         if let Some(sess) = &g.session {
@@ -493,6 +558,7 @@ impl Engine {
             }
             "project.save" => {
                 let sess = g.session.as_mut().ok_or("no project open")?;
+                self.rack.capture(&mut sess.state);
                 sess.save().map_err(e)?;
                 if let Some(r) = &sess.root {
                     let _ = std::fs::write(bindings_file(r), serde_json::to_vec_pretty(&g.spotter.bindings).unwrap_or_default());
@@ -1496,11 +1562,17 @@ impl Engine {
                 Ok(json!({"path": path.display().to_string()}))
             }
             "qa.run" => {
-                Ok(serde_json::to_value(qa::run(Self::st(g)?, &qa::QaOptions { verify_hashes: ob(a, "hashes"), exclude_temp_refs: true }))
-                    .map_err(e)?)
+                let st = Self::st(g)?;
+                let mut issues = qa::run(st, &qa::QaOptions { verify_hashes: ob(a, "hashes"), exclude_temp_refs: true });
+                issues.extend(self.rack.qa(st));
+                Ok(serde_json::to_value(issues).map_err(e)?)
             }
             "export.run" => {
+                if let Some(sess) = g.session.as_mut() {
+                    self.rack.capture(&mut sess.state);
+                }
                 let st = Self::st(g)?;
+                let plugin_qa = self.rack.qa(st);
                 let mut o = ExportOptions::new(ExportProfile::parse(os(a, "profile").unwrap_or("resolve")).map_err(e)?, &today());
                 o.handle_samples = oi(a, "handles_ms").unwrap_or(0) * st.project.sample_rate as i64 / 1000;
                 o.force = ob(a, "force");
@@ -1510,8 +1582,13 @@ impl Engine {
                 if let Some(sc) = os(a, "scene_id") {
                     o.range = ExportRange::Scene(sc.into());
                 }
+                // exports render through their own (offline) plugin instances
+                if !rack::plugin_slots(st).is_empty() {
+                    o.plugins = Some(vcsd_core::mixer::PluginHostRef(Arc::new(self.rack.offline_copy(st))));
+                }
                 let root = g.session.as_ref().and_then(|x| x.root.clone());
-                let r = self.edit(g, "export", |st| export::export(st, root.as_deref(), &o))?;
+                let mut r = self.edit(g, "export", |st| export::export(st, root.as_deref(), &o))?;
+                r.qa.extend(plugin_qa);
                 if let Some(sess) = g.session.as_mut() {
                     let _ = sess.save();
                 }
@@ -1534,6 +1611,149 @@ impl Engine {
                 let r = self.edit(g, "import script breakdown", |st| integrations::import_film_studio(st, &text))?;
                 Ok(serde_json::to_value(r).map_err(e)?)
             }
+            // ------------------------------------------------ plugins
+            "plugins.list" => {
+                if self.plugin_report.lock().unwrap().is_none() {
+                    drop(guard);
+                    self.rescan(false);
+                }
+                Ok(self.plugins_json())
+            }
+            "plugins.scan" => {
+                drop(guard);
+                self.rescan(ob(a, "force"));
+                Ok(self.plugins_json())
+            }
+            "plugins.folders" => {
+                let v: Vec<String> = serde_json::from_value(a.get("folders").cloned().unwrap_or_default()).map_err(e)?;
+                drop(guard);
+                self.prefs.lock().unwrap().plugin_folders = v.into_iter().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect();
+                self.save_prefs()?;
+                self.rescan(false);
+                Ok(self.plugins_json())
+            }
+            "insert.add" => {
+                let pid = s(a, "plugin_id")?;
+                let info = self.rack.info(pid).ok_or_else(|| format!("plugin '{pid}' not found — rescan plugins"))?;
+                if !info.is_effect() {
+                    return Err(format!("{} is an instrument, not an effect", info.name));
+                }
+                let slot = PluginInsert {
+                    id: ids::new_id("ins"),
+                    plugin_id: info.id.clone(),
+                    format: info.format.clone(),
+                    name: info.name.clone(),
+                    vendor: info.vendor.clone(),
+                    path: info.path.clone(),
+                    bypass: false,
+                    state: None,
+                    params: Default::default(),
+                };
+                let id = slot.id.clone();
+                let at = oi(a, "index");
+                self.edit(g, &format!("insert {}", info.name), |st| {
+                    with_inserts(st, insert_owner(a)?, |v| {
+                        let i = at.map(|i| (i.max(0) as usize).min(v.len())).unwrap_or(v.len());
+                        v.insert(i, Insert::Plugin(slot));
+                        Ok(())
+                    })
+                })?;
+                let status = self.rack.status()[&id].clone();
+                Ok(json!({"id": id, "status": status}))
+            }
+            "insert.remove" => {
+                self.edit(g, "remove insert", |st| {
+                    with_inserts(st, insert_owner(a)?, |v| {
+                        let i = insert_index(v, a)?;
+                        v.remove(i);
+                        Ok(())
+                    })
+                })?;
+                Ok(json!({}))
+            }
+            "insert.move" => {
+                let to = i(a, "to")?;
+                self.edit(g, "move insert", |st| {
+                    with_inserts(st, insert_owner(a)?, |v| {
+                        let from = insert_index(v, a)?;
+                        let x = v.remove(from);
+                        v.insert((to.max(0) as usize).min(v.len()), x);
+                        Ok(())
+                    })
+                })?;
+                Ok(json!({}))
+            }
+            "insert.bypass" => {
+                let on = ob(a, "bypass");
+                self.edit(g, if on { "bypass plugin" } else { "enable plugin" }, |st| {
+                    with_inserts(st, insert_owner(a)?, |v| {
+                        let i = insert_index(v, a)?;
+                        match &mut v[i] {
+                            Insert::Plugin(p) => {
+                                p.bypass = on;
+                                Ok(())
+                            }
+                            _ => Err(Error::Invalid("only plugin inserts can be bypassed".into())),
+                        }
+                    })
+                })?;
+                Ok(json!({}))
+            }
+            "plugin.params" => {
+                let id = s(a, "id")?;
+                let st = Self::st(g)?;
+                let slot =
+                    rack::plugin_slots(st).into_iter().find(|(p, ..)| p.id == id).map(|(p, ..)| p.clone()).ok_or("no such plugin slot")?;
+                let inst = self.rack.instance(id);
+                Ok(json!({
+                    "id": id, "name": slot.name, "vendor": slot.vendor, "format": slot.format, "bypass": slot.bypass,
+                    "loaded": inst.is_some(),
+                    "error": self.rack.status().get(id).and_then(|x| x.get("error")).cloned(),
+                    "latency": inst.as_ref().map(|i| i.latency()).unwrap_or(0),
+                    "params": inst.as_ref().map(|i| i.params()).unwrap_or_default(),
+                }))
+            }
+            "plugin.param" => {
+                let id = s(a, "id")?.to_string();
+                let pid = i(a, "param_id")? as u32;
+                let v = a.get("value").and_then(|v| v.as_f64()).ok_or("missing number argument 'value'")?.clamp(0.0, 1.0);
+                let inst = self.rack.instance(&id).ok_or("plugin is not loaded")?;
+                let before = inst.params().into_iter().find(|x| x.id == pid).map(|x| x.value);
+                inst.set_param(pid, v)?; // heard straight away
+                self.rack.mark_applied(&id, pid, v);
+                // `commit: false` while dragging; the final value is recorded (undoable)
+                if a.get("commit").and_then(|x| x.as_bool()).unwrap_or(true) {
+                    let set = |st: &mut ProjectState, val: Option<f64>, only_if_absent: bool| -> vcsd_core::Result<()> {
+                        for ins in st.tracks.values_mut().map(|t| &mut t.inserts).chain(st.buses.values_mut().map(|b| &mut b.inserts)) {
+                            for x in ins.iter_mut() {
+                                if let Insert::Plugin(p) = x {
+                                    if p.id == id {
+                                        if let Some(val) = val {
+                                            if !(only_if_absent && p.params.contains_key(&pid)) {
+                                                p.params.insert(pid, val);
+                                            }
+                                        }
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                        Err(Error::NotFound(id.clone()))
+                    };
+                    // first app edit of this parameter: remember where it was, so undo returns there
+                    if let Some(sess) = g.session.as_mut() {
+                        set(&mut sess.state, before, true).map_err(e)?;
+                        if let Some(b) = before {
+                            self.rack.mark_applied(&id, pid, b);
+                        }
+                    }
+                    self.edit(g, "plugin parameter", |st| set(st, Some(v), false))?;
+                    self.rack.mark_applied(&id, pid, v);
+                }
+                let p = inst.params().into_iter().find(|x| x.id == pid);
+                Ok(json!({"param": p}))
+            }
+
             "tc.parse" => {
                 let st = Self::st(g)?;
                 Ok(json!({"sample": st.tb().sample_at_tc(s(a, "tc")?).map_err(e)?}))
@@ -1611,8 +1831,8 @@ fn state_json(g: &Inner, eng: &Engine) -> ApiResult {
         .filter(|x| st.clips.values().any(|c| c.asset_id == x.id) || x.kind == AssetKind::Recorded)
         .map(asset_json)
         .collect();
-    let _ = eng;
     Ok(json!({
+        "plugins": eng.rack.status(),
         "open": true,
         "version": g.version,
         "root": sess.root.as_ref().map(|r| r.display().to_string()),
@@ -1644,4 +1864,37 @@ fn state_json(g: &Inner, eng: &Engine) -> ApiResult {
         "bindings": g.spotter.bindings,
         "qa": { "errors": 0 },
     }))
+}
+
+fn plugin_cache_path(prefs: &Path) -> PathBuf {
+    prefs.with_file_name("plugins.json")
+}
+
+fn insert_owner(a: &Value) -> vcsd_core::Result<&str> {
+    os(a, "owner_id")
+        .or_else(|| os(a, "track_id"))
+        .or_else(|| os(a, "bus_id"))
+        .ok_or_else(|| Error::Invalid("missing owner_id (track or bus)".into()))
+}
+
+/// Insert position from `id` (plugin slots) or `index`.
+fn insert_index(v: &[Insert], a: &Value) -> vcsd_core::Result<usize> {
+    if let Some(id) = os(a, "id") {
+        return v.iter().position(|x| x.as_plugin().is_some_and(|p| p.id == id)).ok_or_else(|| Error::NotFound(id.into()));
+    }
+    let i = oi(a, "index").ok_or_else(|| Error::Invalid("missing insert id or index".into()))?;
+    if i < 0 || i as usize >= v.len() {
+        return Err(Error::Invalid(format!("no insert at {i}")));
+    }
+    Ok(i as usize)
+}
+
+fn with_inserts<T>(st: &mut ProjectState, owner: &str, f: impl FnOnce(&mut Vec<Insert>) -> vcsd_core::Result<T>) -> vcsd_core::Result<T> {
+    if let Some(t) = st.tracks.get_mut(owner) {
+        return f(&mut t.inserts);
+    }
+    match st.buses.get_mut(owner) {
+        Some(b) => f(&mut b.inserts),
+        None => Err(Error::NotFound(owner.into())),
+    }
 }

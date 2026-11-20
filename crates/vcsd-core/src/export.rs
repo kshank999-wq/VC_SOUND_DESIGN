@@ -66,6 +66,8 @@ pub struct ExportOptions {
     /// Defaults to true for final deliverables (spec §15.2).
     pub exclude_temp_refs: bool,
     pub out_dir: Option<PathBuf>,
+    /// Hosted plugins for the render (None: plugin slots pass through, with a QA warning).
+    pub plugins: Option<crate::mixer::PluginHostRef>,
 }
 
 impl ExportOptions {
@@ -79,6 +81,7 @@ impl ExportOptions {
             force: false,
             exclude_temp_refs: profile != ExportProfile::QuickReview,
             out_dir: None,
+            plugins: None,
         }
     }
 }
@@ -195,7 +198,8 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
     let dir = unique_dir(base);
     std::fs::create_dir_all(&dir)?;
     let st: &ProjectState = s;
-    let mixer = Mixer::new(st, RenderOptions { exclude_temp_refs: o.exclude_temp_refs, honor_solo: false });
+    let mixer = Mixer::new(st, RenderOptions { exclude_temp_refs: o.exclude_temp_refs, honor_solo: false })
+        .with_plugins(o.plugins.as_ref().map(|p| p.0.clone()));
     let mut w = Writer { dir: dir.clone(), files: vec![], s: st, format: o.format, qa: vec![] };
     let tb = st.tb();
     let prefix = safe_name(&st.project.name);

@@ -6,12 +6,15 @@
  ui/ (React + TypeScript)  ──  Tauri IPC `api(cmd,args)`  ─┐
                             ──  HTTP /api/<cmd> (browser) ─┤
                                                            ▼
- crates/vcsd-engine   Engine::call — JSON command API (~70 commands)
+ crates/vcsd-engine   Engine::call — JSON command API (~80 commands)
                       player.rs   render thread ─rtrb─▶ cpal device callback (or clocked null device)
+                      rack.rs     plugin instances for insert slots (synced from the project on every edit)
                       recorder.rs input capture → BWF take at the heard position
                       MIDI (midir) → live spotting / pad performance
                       devices.rs  device/port enumeration, per-user prefs (output, input, MIDI, UI layout)
                       serve.rs    browser mode + token-protected loopback media server (Range)
+                                                           ▼
+ crates/vcsd-plugins  VST3 host (all platforms), Audio Unit host (macOS), out-of-process scanner
                                                            ▼
  crates/vcsd-core     model, timecode, mixer, editing, reports, export … (UI-agnostic)
 ```
@@ -30,6 +33,20 @@
   thread only when they change), and on release/stop commits the pass as one undoable edit:
   replace the span, thin with Douglas–Peucker (0.25 dB / 0.01 pan), hold idle controls as steps,
   and ramp back to the existing automation over 50 ms. Loop wraps split a pass into segments.
+- **Plugin hosting.** Insert slots hold VST3 plugins (macOS, Windows, Linux) and Audio Units
+  (macOS). The project stores each slot's plugin id, its state (captured on save and export) and
+  any parameter values set from the app, so undo works and a project opens on another computer
+  with its settings. A plugin that isn't installed there keeps its state, passes audio through and
+  is reported by QA. Scanning runs each new or changed bundle in a child process
+  (`<app> --vcsd-plugin-scan <bundle>`), so a plugin that crashes or hangs while loading is listed
+  as failed. Results are cached by modification time. Instances run on the render thread, never in
+  the device callback, and exports use separate offline instances. The core mixer only sees a
+  `PluginHost` trait.
+- **Plugin delay compensation by reading ahead.** The timeline can be read at any position, so a
+  chain reporting `L` samples of latency is fed its input `L` samples early instead of delaying
+  everything else. When a chain doesn't continue from where it left off (locate, loop, a second
+  export pass), it is pre-rolled with the `L` samples before so the first output isn't silence.
+  Tested sample-exact against a real VST3 on track and master buses.
 - **Spotting and performance timestamps come from the engine,** not from the UI: a keypress or
   MIDI note is stamped with the heard transport position.
 - **Media in the webview.** Desktop builds stream picture from a loopback HTTP server with a random
@@ -99,11 +116,18 @@
 - Reconform needs an explicit change list. EDL/XML change-list parsing is not done yet.
 - Script import is the JSON contract only. The PDF/text fallback is not done yet.
 - XLSX export (optional in the spec) is not done.
+- Plugins are edited with the app's generic parameter panel. Plugins' own editor windows (VST3
+  `IPlugView`, AU Cocoa views) are not embedded yet.
+- Plugin parameters can't be automated yet (track/bus volume and pan can).
+- Inserts are effects only: instruments, sidechain inputs and MIDI to plugins are not routed.
 
 ## Roadmap
 
-1. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
-2. **Distribution:** cloud-HSM Windows signing (`signCommand`), a beta update channel, and delta updates.
-3. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).
-4. **Interchange spike:** AAF/OTIO against a pinned Resolve version, implemented as an `InterchangeAdapter` that reports what it loses.
-5. **AI:** optical-flow or pose models for footfall detection behind the existing trait, plus an opt-in cloud provider with consent and retention controls.
+1. **Plugins, next steps:** plugins' own editor windows (a native child window per editor; on
+   Linux an `IRunLoop` on the GTK main loop), parameter automation lanes, and a test pass with
+   common commercial plugins on each OS.
+2. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
+3. **Distribution:** cloud-HSM Windows signing (`signCommand`), a beta update channel, and delta updates.
+4. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).
+5. **Interchange spike:** AAF/OTIO against a pinned Resolve version, implemented as an `InterchangeAdapter` that reports what it loses.
+6. **AI:** optical-flow or pose models for footfall detection behind the existing trait, plus an opt-in cloud provider with consent and retention controls.

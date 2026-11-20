@@ -533,3 +533,136 @@ fn track_folders_move_rename_ungroup_and_flags() {
     s.undo().unwrap();
     assert_eq!(s.state.tracks[&bg].folder, "Ambience/Stems");
 }
+
+/// A stand-in plugin: delays by `LAT` samples (and reports it) and halves the level.
+/// Per slot: delay line, write index, next expected position.
+type Line = (Vec<f32>, usize, i64);
+
+struct DelayHost {
+    lines: std::sync::Mutex<std::collections::HashMap<String, Line>>,
+}
+const LAT: i64 = 1000;
+
+impl mixer::PluginHost for DelayHost {
+    fn process(&self, slot: &PluginInsert, buf: &mut wav::AudioBuffer, pos: i64) -> std::result::Result<(), String> {
+        let ch = buf.channels as usize;
+        let mut lines = self.lines.lock().unwrap();
+        let (line, w, next) = lines.entry(slot.id.clone()).or_insert_with(|| (vec![0.0; LAT as usize * ch], 0, pos));
+        if *next != pos {
+            // discontinuity: flush, like a real plugin reset
+            line.iter_mut().for_each(|v| *v = 0.0);
+        }
+        for f in 0..buf.frames() {
+            for c in 0..ch {
+                let i = (*w * ch) + c;
+                let out = line[i];
+                line[i] = buf.data[f * ch + c];
+                buf.data[f * ch + c] = out * 0.5;
+            }
+            *w = (*w + 1) % LAT as usize;
+        }
+        *next = pos + buf.frames() as i64;
+        Ok(())
+    }
+    fn latency(&self, _slot: &PluginInsert) -> i64 {
+        LAT
+    }
+    fn continues_at(&self, slot: &PluginInsert) -> Option<i64> {
+        self.lines.lock().unwrap().get(&slot.id).map(|l| l.2)
+    }
+}
+
+fn plugin_slot(id: &str) -> Insert {
+    Insert::Plugin(PluginInsert {
+        id: id.into(),
+        plugin_id: "vst3:test".into(),
+        format: "vst3".into(),
+        name: "Test Delay".into(),
+        vendor: String::new(),
+        path: String::new(),
+        bypass: false,
+        state: None,
+        params: Default::default(),
+    })
+}
+
+#[test]
+fn plugin_latency_is_compensated_and_blocks_match_offline() {
+    let (mut s, _r) = session("plug", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:01:00", "01:00:01:00", "glass smash", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let n = 48_000 * 3;
+    let dry = Mixer::new(&s.state, RenderOptions::default()).render_master(0, n).unwrap();
+    assert!(dry.peak() > 0.01);
+
+    // one plugin on every track, one on the master: 2 × LAT of latency in the path
+    for (i, t) in s.state.tracks.values_mut().enumerate() {
+        t.inserts = vec![plugin_slot(&format!("t{i}"))];
+    }
+    let master = mixer::master_bus(&s.state).unwrap().id.clone();
+    s.state.buses.get_mut(&master).unwrap().inserts = vec![plugin_slot("m")];
+    let host = || -> std::sync::Arc<dyn mixer::PluginHost> { std::sync::Arc::new(DelayHost { lines: Default::default() }) };
+
+    // offline, in one go: the delayed audio still lands on the original samples
+    let wet = Mixer::new(&s.state, RenderOptions::default()).with_plugins(Some(host())).render_master(0, n).unwrap();
+    let max = dry.data.iter().zip(&wet.data).map(|(d, w)| (d * 0.25 - w).abs()).fold(0.0f32, f32::max);
+    assert!(max < 1e-6, "compensated: wet == dry × ¼, sample-aligned (max diff {max})");
+
+    // starting right at a sound (a locate): the chains are pre-rolled, so the
+    // onset is there instead of `LAT` samples of silence
+    let onset = (0..dry.frames()).find(|&f| dry.data[f * 2].abs() > 1e-4).unwrap() as i64;
+    let from = onset - 10;
+    let a = Mixer::new(&s.state, RenderOptions::default()).render_master(from, 4000).unwrap();
+    let b = Mixer::new(&s.state, RenderOptions::default()).with_plugins(Some(host())).render_master(from, 4000).unwrap();
+    let max = a.data.iter().zip(&b.data).map(|(d, w)| (d * 0.25 - w).abs()).fold(0.0f32, f32::max);
+    assert!(max < 1e-6, "pre-rolled after a jump (max diff {max})");
+
+    // in transport-sized blocks the plugins see one continuous stream
+    let m = Mixer::new(&s.state, RenderOptions::default()).with_plugins(Some(host()));
+    let mut blocks = vec![];
+    for b in (0..n).step_by(512) {
+        blocks.extend(m.render_master(b as i64, 512.min(n - b)).unwrap().data);
+    }
+    let max = wet.data.iter().zip(&blocks).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(max < 1e-6, "block render == offline render (max diff {max})");
+    assert!(m.warnings.borrow().is_empty());
+
+    // bypass removes both the processing and the compensation
+    for t in s.state.tracks.values_mut() {
+        if let Insert::Plugin(p) = &mut t.inserts[0] {
+            p.bypass = true;
+        }
+    }
+    let half = Mixer::new(&s.state, RenderOptions::default()).with_plugins(Some(host())).render_master(0, n).unwrap();
+    let max = dry.data.iter().zip(&half.data).map(|(d, w)| (d * 0.5 - w).abs()).fold(0.0f32, f32::max);
+    assert!(max < 1e-6, "only the master plugin left (max diff {max})");
+
+    // without a host (e.g. CLI export) the slots pass audio through and say so
+    let m = Mixer::new(&s.state, RenderOptions::default());
+    let thru = m.render_master(0, n).unwrap();
+    assert_eq!(thru.data, dry.data);
+    assert!(m.warnings.borrow().iter().any(|w| w.contains("Test Delay") && w.contains("passed through")));
+}
+
+#[test]
+fn plugin_slots_round_trip_through_the_project_file() {
+    let mut ins = plugin_slot("x");
+    if let Insert::Plugin(p) = &mut ins {
+        p.params.insert(7, 0.25);
+    }
+    let v = serde_json::to_value(&ins).unwrap();
+    assert_eq!(v["type"], "plugin");
+    assert_eq!(v["plugin_id"], "vst3:test");
+    assert_eq!(v["params"]["7"], 0.25);
+    let back: Insert = serde_json::from_value(v).unwrap();
+    assert_eq!(back.as_plugin().unwrap(), ins.as_plugin().unwrap());
+    // older fields are optional
+    let min: Insert = serde_json::from_value(
+        serde_json::json!({"type": "plugin", "id": "a", "plugin_id": "au:aufx:dely:appl", "format": "au", "name": "AUDelay"}),
+    )
+    .unwrap();
+    assert!(min.as_plugin().unwrap().state.is_none());
+}

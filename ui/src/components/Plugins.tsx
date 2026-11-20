@@ -1,0 +1,349 @@
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { call } from "../api";
+import type { EngineHook } from "../store";
+import type { Insert, PluginInfo, PluginParam, PluginSlot } from "../types";
+
+interface Catalog {
+  plugins: PluginInfo[];
+  instruments: number;
+  failed: { path: string; error: string }[];
+  bundles: number;
+  scanned: number;
+  folders: { standard: string[]; extra: string[] };
+  formats: string[];
+}
+
+// ---------------------------------------------------------------- shared state
+
+/** Scanned plugins, shared by every browser/rack in the window. */
+let catalog: Catalog | null = null;
+let loading: Promise<Catalog> | null = null;
+const catalogSubs = new Set<() => void>();
+
+function loadCatalog(cmd = "plugins.list", args: object = {}): Promise<Catalog> {
+  loading = call<Catalog>(cmd, args)
+    .then((c) => {
+      catalog = c;
+      catalogSubs.forEach((f) => f());
+      return c;
+    })
+    .finally(() => {
+      loading = null;
+      catalogSubs.forEach((f) => f());
+    });
+  catalogSubs.forEach((f) => f());
+  return loading;
+}
+
+function useCatalog(): { catalog: Catalog | null; busy: boolean } {
+  const c = useSyncExternalStore((cb) => (catalogSubs.add(cb), () => catalogSubs.delete(cb)), () => catalog);
+  const busy = useSyncExternalStore((cb) => (catalogSubs.add(cb), () => catalogSubs.delete(cb)), () => loading !== null);
+  useEffect(() => {
+    if (!catalog && !loading) loadCatalog().catch(() => {});
+  }, []);
+  return { catalog: c, busy };
+}
+
+/** Open plugin windows (slot ids), any number at once. */
+let editors: string[] = [];
+const editorSubs = new Set<() => void>();
+// plugin windows float above the app but below modal dialogs (z 100):
+// z = 60 + position in the stacking order
+let stack: string[] = [];
+const stackSubs = new Set<() => void>();
+function raise(slotId: string) {
+  if (stack[stack.length - 1] === slotId) return;
+  stack = [...stack.filter((x) => x !== slotId), slotId];
+  stackSubs.forEach((f) => f());
+}
+export function openPluginEditor(slotId: string) {
+  if (!editors.includes(slotId)) {
+    editors = [...editors, slotId];
+    editorSubs.forEach((f) => f());
+  }
+  raise(slotId);
+}
+function closePluginEditor(slotId: string) {
+  editors = editors.filter((x) => x !== slotId);
+  stack = stack.filter((x) => x !== slotId);
+  editorSubs.forEach((f) => f());
+}
+
+/** Find a plugin slot and its owner (track or bus) in the project. */
+function findSlot(eng: EngineHook, id: string): { slot: PluginSlot; owner: string; ownerName: string; index: number; count: number } | null {
+  const v = eng.view;
+  if (!v?.open) return null;
+  for (const o of [...v.tracks, ...v.buses]) {
+    const i = (o.inserts ?? []).findIndex((x) => x.type === "plugin" && x.id === id);
+    if (i >= 0) return { slot: o.inserts[i] as PluginSlot, owner: o.id, ownerName: o.name, index: i, count: o.inserts.length };
+  }
+  return null;
+}
+
+const isPlugin = (i: Insert): i is PluginSlot => i.type === "plugin";
+
+// ---------------------------------------------------------------- insert rack
+
+/** Plugin slots of one track or bus: status, bypass, order, remove, add. */
+export function InsertRack({ eng, ownerId, inserts, compact }: { eng: EngineHook; ownerId: string; inserts: Insert[]; compact?: boolean }) {
+  const [picking, setPicking] = useState(false);
+  const status = eng.view?.plugins ?? {};
+  const slots = inserts.map((ins, index) => ({ ins, index })).filter((x): x is { ins: PluginSlot; index: number } => isPlugin(x.ins));
+  return (
+    <div className={"fx-rack" + (compact ? " compact" : "")}>
+      {slots.map(({ ins, index }) => {
+        const st = status[ins.id];
+        const missing = st && !st.loaded;
+        const pos = slots.findIndex((x) => x.index === index);
+        return (
+          <div key={ins.id} className={"fx-slot" + (ins.bypass ? " bypassed" : "") + (missing ? " missing" : "")}>
+            {!compact && (
+              <button className={"tiny fx-power" + (ins.bypass ? "" : " on")} title={ins.bypass ? "Bypassed — click to enable" : "Click to bypass"}
+                onClick={() => eng.run("insert.bypass", { owner_id: ownerId, id: ins.id, bypass: !ins.bypass })}>⏻</button>
+            )}
+            <span className="fx-name ellipsis" onClick={() => openPluginEditor(ins.id)}
+              title={`${ins.name}${ins.vendor ? " — " + ins.vendor : ""} (${ins.format.toUpperCase()})${ins.bypass ? " · bypassed" : ""}${missing ? "\n⚠ " + st.error : ""}${st?.latency ? `\nlatency ${st.latency} samples (compensated)` : ""}\nclick to open`}>
+              {missing ? "⚠ " : ""}{ins.name}
+            </span>
+            {!compact && st?.latency ? <span className="small muted mono">{st.latency}</span> : null}
+            {!compact && (
+              <>
+                <button className="tiny" disabled={pos === 0} title="Move up (earlier in the chain)" onClick={() => eng.run("insert.move", { owner_id: ownerId, id: ins.id, to: slots[pos - 1].index })}>↑</button>
+                <button className="tiny" disabled={pos === slots.length - 1} title="Move down" onClick={() => eng.run("insert.move", { owner_id: ownerId, id: ins.id, to: slots[pos + 1].index })}>↓</button>
+              </>
+            )}
+            {!compact && <button className="tiny" title="Remove" onClick={() => { closePluginEditor(ins.id); eng.run("insert.remove", { owner_id: ownerId, id: ins.id }); }}>✕</button>}
+          </div>
+        );
+      })}
+      <button className="tiny fx-add" title="Insert a VST3/AU effect" onClick={() => setPicking(true)}>{compact ? "+ FX" : "+ Add plugin…"}</button>
+      {picking && (
+        <PluginBrowser
+          onClose={() => setPicking(false)}
+          onPick={async (p) => {
+            setPicking(false);
+            const r = await eng.run<{ id: string; status: { loaded: boolean; error: string | null } }>("insert.add", { owner_id: ownerId, plugin_id: p.id });
+            if (r?.status && !r.status.loaded) eng.toast(`${p.name}: ${r.status.error}`, "error");
+            else if (r) openPluginEditor(r.id);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- browser
+
+/** Installed effects: search, rescan, extra folders. With `onPick`, choosing one inserts it. */
+export function PluginBrowser({ onPick, onClose }: { onPick?: (p: PluginInfo) => void; onClose: () => void }) {
+  const { catalog: c, busy } = useCatalog();
+  const [q, setQ] = useState("");
+  const [fmt, setFmt] = useState("all");
+  const [showFolders, setShowFolders] = useState(false);
+  const [showFailed, setShowFailed] = useState(false);
+  const [folders, setFolders] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const run = (p: Promise<unknown>) => { setErr(null); p.catch((e) => setErr(String(e?.message ?? e))); };
+
+  const groups = useMemo(() => {
+    const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+    const list = (c?.plugins ?? []).filter((p) => (fmt === "all" || p.format === fmt) && words.every((w) => `${p.name} ${p.vendor} ${p.category}`.toLowerCase().includes(w)));
+    const m = new Map<string, PluginInfo[]>();
+    for (const p of list) m.set(p.vendor || "Unknown vendor", [...(m.get(p.vendor || "Unknown vendor") ?? []), p]);
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [c, q, fmt]);
+  const count = groups.reduce((n, g) => n + g[1].length, 0);
+
+  return (
+    <div className="modal-bg" onMouseDown={onClose}>
+      <div className="modal plugin-browser" onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+        <div className="panel-title">{onPick ? "Insert plugin" : "Plugins"}</div>
+        <div className="row">
+          <input autoFocus placeholder="Search name, vendor or type (eq, reverb…)" value={q} onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && onPick && count === 1) onPick(groups[0][1][0]); if (e.key === "Escape") onClose(); }} />
+          {(c?.formats.length ?? 0) > 1 && (
+            <select value={fmt} onChange={(e) => setFmt(e.target.value)}>
+              <option value="all">All formats</option>
+              {c!.formats.map((f) => <option key={f} value={f}>{f.toUpperCase()}</option>)}
+            </select>
+          )}
+        </div>
+        <div className="plugin-list">
+          {!c && busy && <div className="muted pad">Scanning plugins… (each new plugin is opened once, in a separate process)</div>}
+          {c && count === 0 && (
+            <div className="muted pad">
+              {c.plugins.length ? "Nothing matches." : "No effect plugins found. Install VST3 plugins in the standard folder, or add the folder they're in below."}
+            </div>
+          )}
+          {groups.map(([vendor, ps]) => (
+            <div key={vendor}>
+              <div className="plugin-vendor">{vendor}</div>
+              {ps.map((p) => (
+                <div key={p.id} className={"plugin-item" + (onPick ? " pickable" : "")} onClick={() => onPick?.(p)} title={p.path || p.id}>
+                  <span className="ellipsis">{p.name}</span>
+                  <span className="small muted ellipsis">{p.category.replace(/^Fx\|?/, "").replace(/\|/g, " · ")}</span>
+                  <span className="badge">{p.format.toUpperCase()}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        {c && (
+          <div className="small muted">
+            {c.plugins.length} effects in {c.bundles} bundle{c.bundles === 1 ? "" : "s"}
+            {c.instruments ? ` · ${c.instruments} instruments hidden` : ""}
+            {c.failed.length > 0 && <> · <a onClick={() => setShowFailed(!showFailed)}>{c.failed.length} failed to load</a></>}
+          </div>
+        )}
+        {showFailed && c && (
+          <div className="plugin-failed small">
+            {c.failed.map((f) => <div key={f.path}><span className="mono">{f.path}</span> — {f.error}</div>)}
+          </div>
+        )}
+        {showFolders && c && (
+          <div className="plugin-folders small">
+            <div className="muted">Always searched:</div>
+            {c.folders.standard.map((f) => <div key={f} className="mono ellipsis">{f}</div>)}
+            <div className="muted">Also search (one folder per line):</div>
+            <textarea rows={3} value={folders ?? c.folders.extra.join("\n")} onChange={(e) => setFolders(e.target.value)} />
+            <div className="btns">
+              <button disabled={busy || folders === null} onClick={() => run(loadCatalog("plugins.folders", { folders: (folders ?? "").split("\n") }).then(() => setFolders(null)))}>Save & scan</button>
+            </div>
+          </div>
+        )}
+        {err && <div className="err small">{err}</div>}
+        <div className="btns">
+          <button disabled={busy} title="Look for new or updated plugins" onClick={() => run(loadCatalog("plugins.scan"))}>{busy ? "Scanning…" : "Rescan"}</button>
+          <button disabled={busy} title="Open every plugin again (after a plugin update that didn't change its files' dates)" onClick={() => run(loadCatalog("plugins.scan", { force: true }))}>Full rescan</button>
+          <button className={showFolders ? "on" : ""} onClick={() => setShowFolders(!showFolders)}>Folders…</button>
+          <span className="spacer" />
+          <button onClick={onClose}>{onPick ? "Cancel" : "Close"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- plugin window
+
+interface ParamsReply { id: string; name: string; vendor: string; format: string; bypass: boolean; loaded: boolean; error: string | null; latency: number; params: PluginParam[] }
+
+function ParamRow({ p, onLive, onCommit }: { p: PluginParam; onLive: (v: number) => void; onCommit: (v: number) => void }) {
+  const [live, setLive] = useState<number | null>(null);
+  const v = live ?? p.value;
+  const step = p.step_count > 0 ? 1 / p.step_count : 0.001;
+  const commit = () => {
+    if (live !== null) onCommit(live);
+    setLive(null);
+  };
+  return (
+    <div className="param-row" title={p.read_only ? "read-only" : "double-click: default"}>
+      <span className="param-name ellipsis">{p.title}</span>
+      <input type="range" min={0} max={1} step={step} value={v} disabled={p.read_only}
+        onChange={(e) => { const nv = Number(e.target.value); setLive(nv); onLive(nv); }}
+        onPointerUp={commit} onKeyUp={commit} onBlur={commit}
+        onDoubleClick={() => onCommit(p.default)} />
+      <span className="param-val mono ellipsis">{p.display}{p.units && !p.display.endsWith(p.units) ? " " + p.units : ""}</span>
+    </div>
+  );
+}
+
+function PluginEditor({ eng, slotId, index, onClose }: { eng: EngineHook; slotId: string; index: number; onClose: () => void }) {
+  const [d, setD] = useState<ParamsReply | null>(null);
+  const [filter, setFilter] = useState("");
+  const [pos, setPos] = useState<{ x: number; y: number }>({ x: Math.max(20, window.innerWidth - 400 - index * 28), y: 70 + index * 28 });
+  const drag = useRef<{ dx: number; dy: number } | null>(null);
+  const inflight = useRef(false);
+  const queued = useRef<{ id: number; v: number } | null>(null);
+  const found = findSlot(eng, slotId);
+  const version = eng.view?.version;
+  const z = 60 + Math.max(0, useSyncExternalStore((cb) => (stackSubs.add(cb), () => stackSubs.delete(cb)), () => stack.indexOf(slotId)));
+
+  const load = () => call<ParamsReply>("plugin.params", { id: slotId }).then(setD).catch(() => setD(null));
+  useEffect(() => {
+    load();
+  }, [slotId, version]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // the slot was removed (or undone away): close — once we've seen it (the
+  // project view can lag a moment behind the insert that opened this window)
+  const seen = useRef(false);
+  useEffect(() => {
+    if (found) seen.current = true;
+    else if (seen.current && eng.view?.open) onClose();
+  }, [found, eng.view?.open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // live values while dragging: at most one request in flight, latest value wins
+  const sendLive = (id: number, v: number) => {
+    queued.current = { id, v };
+    if (inflight.current) return;
+    const pump = async () => {
+      inflight.current = true;
+      while (queued.current) {
+        const q = queued.current;
+        queued.current = null;
+        try {
+          const r = await call<{ param: PluginParam | null }>("plugin.param", { id: slotId, param_id: q.id, value: q.v, commit: false });
+          if (r.param) setD((x) => (x ? { ...x, params: x.params.map((p) => (p.id === r.param!.id ? { ...r.param!, value: p.value } : p)) } : x));
+        } catch {
+          /* shown on commit */
+        }
+      }
+      inflight.current = false;
+    };
+    pump();
+  };
+  const commit = async (id: number, v: number) => {
+    queued.current = null;
+    await eng.run("plugin.param", { id: slotId, param_id: id, value: v });
+    load();
+  };
+
+  const params = (d?.params ?? []).filter((p) => !p.is_bypass && (!filter || p.title.toLowerCase().includes(filter.toLowerCase())));
+  const sr = eng.view?.open ? eng.view.project.sample_rate : 48000;
+  return (
+    <div className="plugin-window" style={{ left: pos.x, top: pos.y, zIndex: z }} onKeyDown={(e) => e.stopPropagation()} onMouseDown={() => raise(slotId)}>
+      <div className="panel-title plugin-head"
+        onPointerDown={(e) => { if ((e.target as HTMLElement).tagName === "BUTTON") return; (e.target as HTMLElement).setPointerCapture(e.pointerId); drag.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y }; }}
+        onPointerMove={(e) => drag.current && setPos({ x: Math.max(0, Math.min(window.innerWidth - 120, e.clientX - drag.current.dx)), y: Math.max(0, Math.min(window.innerHeight - 40, e.clientY - drag.current.dy)) })}
+        onPointerUp={() => (drag.current = null)}>
+        <span className="ellipsis">{d?.name ?? found?.slot.name ?? "Plugin"} <span className="muted small">· {found?.ownerName}</span></span>
+        <span className="spacer" />
+        {found && (
+          <button className={"tiny fx-power" + (found.slot.bypass ? "" : " on")} title={found.slot.bypass ? "Bypassed" : "Active — click to bypass"}
+            onClick={() => eng.run("insert.bypass", { owner_id: found.owner, id: slotId, bypass: !found.slot.bypass })}>⏻</button>
+        )}
+        {found && (
+          <button className="tiny" title="Remove this plugin from the chain (undoable)"
+            onClick={() => { onClose(); eng.run("insert.remove", { owner_id: found.owner, id: slotId }, `Removed ${found.slot.name}`); }}>Remove</button>
+        )}
+        <button className="tiny" title="Close" onClick={onClose}>✕</button>
+      </div>
+      <div className="plugin-body">
+        <div className="small muted">
+          {d?.vendor ? d.vendor + " · " : ""}{(d?.format ?? found?.slot.format ?? "").toUpperCase()}
+          {d?.latency ? ` · latency ${d.latency} samples (${((d.latency / sr) * 1000).toFixed(1)} ms), compensated` : ""}
+        </div>
+        {d && !d.loaded && (
+          <div className="warn-box small">
+            ⚠ {d.error ?? "Not loaded."} Its settings are kept with the project and it passes audio through until it's available.
+          </div>
+        )}
+        {d?.loaded && (
+          <>
+            {d.params.length > 10 && <input placeholder={`Filter ${d.params.length} parameters`} value={filter} onChange={(e) => setFilter(e.target.value)} />}
+            <div className="param-list">
+              {params.map((p) => <ParamRow key={p.id} p={p} onLive={(v) => sendLive(p.id, v)} onCommit={(v) => commit(p.id, v)} />)}
+              {d.params.length === 0 && <div className="muted small">This plugin has no parameters the host can show.</div>}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Mount once per window: renders every open plugin window. */
+export function PluginEditors({ eng }: { eng: EngineHook }) {
+  const ids = useSyncExternalStore((cb) => (editorSubs.add(cb), () => editorSubs.delete(cb)), () => editors);
+  return <>{ids.map((id, i) => <PluginEditor key={id} eng={eng} slotId={id} index={i} onClose={() => closePluginEditor(id)} />)}</>;
+}

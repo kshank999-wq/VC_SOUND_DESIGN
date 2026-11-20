@@ -661,7 +661,8 @@ pub enum AutomationParam {
     Pan,
 }
 
-/// Built-in insert processors (spec §12: EQ, dynamics, filters initially).
+/// Insert processors: built-in EQ, dynamics and filters (spec §12), or a
+/// hosted VST3/AU plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Insert {
@@ -670,6 +671,60 @@ pub enum Insert {
     LowPass { hz: f32, q: f32 },
     Peak { hz: f32, q: f32, db: f32 },
     Compressor { threshold_db: f32, ratio: f32, attack_ms: f32, release_ms: f32, makeup_db: f32 },
+    Plugin(PluginInsert),
+}
+
+/// A third-party plugin in an insert slot. Everything needed to recreate it
+/// on another machine travels with the project; if the plugin is not
+/// installed there, the slot is kept (state intact) and passed through.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PluginInsert {
+    /// Slot id (unique in the project).
+    pub id: String,
+    /// Scanner id: `vst3:<class id>` or `au:<type>:<subtype>:<manufacturer>`.
+    pub plugin_id: String,
+    pub format: String,
+    pub name: String,
+    #[serde(default)]
+    pub vendor: String,
+    /// Where it was found when inserted (a hint; the id is what matters).
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub bypass: bool,
+    /// Opaque plugin state (base64), captured when the project is saved.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Parameter values set from the app (normalised 0–1), applied after `state`.
+    #[serde(default, with = "param_map")]
+    pub params: std::collections::BTreeMap<u32, f64>,
+}
+
+/// Parameter ids as JSON object keys. (Serde can't parse numeric keys inside
+/// an internally tagged enum such as [`Insert`], so this is done by hand.)
+mod param_map {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: Serializer>(m: &BTreeMap<u32, f64>, s: S) -> Result<S::Ok, S::Error> {
+        m.iter().map(|(k, v)| (k.to_string(), *v)).collect::<BTreeMap<String, f64>>().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<u32, f64>, D::Error> {
+        BTreeMap::<String, f64>::deserialize(d)?
+            .into_iter()
+            .map(|(k, v)| k.parse().map(|k| (k, v)).map_err(|_| serde::de::Error::custom(format!("bad parameter id '{k}'"))))
+            .collect()
+    }
+}
+
+impl Insert {
+    pub fn as_plugin(&self) -> Option<&PluginInsert> {
+        match self {
+            Insert::Plugin(p) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------- takes / performance

@@ -137,7 +137,40 @@ struct InsertState {
     env: f32,
 }
 
-fn process_inserts(inserts: &[Insert], states: &mut Vec<InsertState>, buf: &mut AudioBuffer) {
+/// Runs hosted (VST3/AU) plugins for the mixer. Lives outside the core so
+/// offline tools keep working without one: plugin slots then pass audio
+/// through and the render reports it.
+pub trait PluginHost: Send + Sync {
+    /// Process `buf` (interleaved, `buf.channels`) in place. `pos` is the
+    /// timeline sample of the first frame; a jump in `pos` resets the plugin.
+    fn process(&self, slot: &PluginInsert, buf: &mut AudioBuffer, pos: i64) -> std::result::Result<(), String>;
+    /// Latency the plugin reports, in samples (compensated by reading ahead).
+    fn latency(&self, slot: &PluginInsert) -> i64;
+    /// Where the slot's stream continues from (None: fresh or unknown). Used to
+    /// pre-roll a latent chain after a jump so its first output isn't silence.
+    fn continues_at(&self, _slot: &PluginInsert) -> Option<i64> {
+        None
+    }
+}
+
+/// Shareable handle to a [`PluginHost`] (e.g. in [`crate::export::ExportOptions`]).
+#[derive(Clone)]
+pub struct PluginHostRef(pub Arc<dyn PluginHost>);
+
+impl std::fmt::Debug for PluginHostRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PluginHost")
+    }
+}
+
+fn process_inserts(
+    inserts: &[Insert],
+    states: &mut Vec<InsertState>,
+    buf: &mut AudioBuffer,
+    pos: i64,
+    host: Option<&dyn PluginHost>,
+    warn: &dyn Fn(String),
+) {
     let sr = buf.sample_rate as f32;
     let ch = buf.channels as usize;
     if states.len() != inserts.len() {
@@ -145,6 +178,19 @@ fn process_inserts(inserts: &[Insert], states: &mut Vec<InsertState>, buf: &mut 
     }
     for (ins, st) in inserts.iter().zip(states.iter_mut()) {
         match ins {
+            Insert::Plugin(p) => {
+                if p.bypass {
+                    continue;
+                }
+                match host {
+                    Some(h) => {
+                        if let Err(e) = h.process(p, buf, pos) {
+                            warn(format!("plugin '{}' passed through: {e}", p.name));
+                        }
+                    }
+                    None => warn(format!("plugin '{}' passed through: plugins are not available in this render", p.name)),
+                }
+            }
             Insert::Gain { db } => {
                 let g = db_to_lin(*db);
                 buf.data.iter_mut().for_each(|v| *v *= g);
@@ -240,6 +286,8 @@ pub struct Mixer<'a> {
     pub warnings: RefCell<Vec<String>>,
     /// Optional path remapping root for relocated media (unused when None).
     pub media_override: Option<&'a Path>,
+    /// Hosted plugins (None: plugin slots pass audio through).
+    pub plugins: Option<Arc<dyn PluginHost>>,
 }
 
 /// Breakpoint lookup for monotonically increasing sample positions: linear
@@ -298,7 +346,32 @@ impl<'a> Mixer<'a> {
             dsp: RefCell::new(HashMap::new()),
             warnings: RefCell::new(vec![]),
             media_override: None,
+            plugins: None,
         }
+    }
+
+    /// Process plugin inserts with `host`.
+    pub fn with_plugins(mut self, host: Option<Arc<dyn PluginHost>>) -> Self {
+        self.plugins = host;
+        self
+    }
+
+    /// Total latency of the active plugins in an insert chain.
+    pub fn chain_latency(&self, inserts: &[Insert]) -> i64 {
+        let Some(h) = &self.plugins else { return 0 };
+        inserts.iter().filter_map(Insert::as_plugin).filter(|p| !p.bypass).map(|p| h.latency(p).max(0)).sum()
+    }
+
+    /// A latent chain that doesn't continue from `pos` must be pre-rolled.
+    fn needs_preroll(&self, inserts: &[Insert], pos: i64) -> bool {
+        let Some(h) = &self.plugins else { return false };
+        inserts.iter().filter_map(Insert::as_plugin).find(|p| !p.bypass).is_some_and(|p| h.continues_at(p) != Some(pos))
+    }
+
+    fn run_inserts(&self, key: String, inserts: &[Insert], buf: &mut AudioBuffer, pos: i64) {
+        let mut dsp = self.dsp.borrow_mut();
+        let st = dsp.entry(key).or_default();
+        process_inserts(inserts, st, buf, pos, self.plugins.as_deref(), &|w| self.warn(w));
     }
 
     /// Clear DSP state (call on locate / transport jump).
@@ -464,14 +537,21 @@ impl<'a> Mixer<'a> {
             self.render_clip_into(&clip, &mut buf, start)?;
             return Ok(buf);
         }
-        for c in self.clips_on(track_id, start, frames as i64) {
-            self.render_clip_into(c, &mut buf, start)?;
+        // plugin delay compensation: feed the chain `lat` samples early so its
+        // output lines up with `start` (the timeline can be read ahead freely)
+        let lat = self.chain_latency(&t.inserts);
+        if lat > 0 && self.needs_preroll(&t.inserts, start + lat) {
+            // fill the chain's delay with the audio just before (output discarded)
+            let mut pre = AudioBuffer::silent(buf.sample_rate, buf.channels, lat as usize);
+            for c in self.clips_on(track_id, start, lat) {
+                self.render_clip_into(c, &mut pre, start)?;
+            }
+            self.run_inserts(format!("t:{track_id}"), &t.inserts, &mut pre, start);
         }
-        {
-            let mut dsp = self.dsp.borrow_mut();
-            let st = dsp.entry(format!("t:{track_id}")).or_default();
-            process_inserts(&t.inserts, st, &mut buf);
+        for c in self.clips_on(track_id, start + lat, frames as i64) {
+            self.render_clip_into(c, &mut buf, start + lat)?;
         }
+        self.run_inserts(format!("t:{track_id}"), &t.inserts, &mut buf, start + lat);
         let mut vol = self.cursor(track_id, AutomationParam::VolumeDb, 0.0);
         let ch = buf.channels as usize;
         let base = db_to_lin(t.gain_db);
@@ -533,21 +613,28 @@ impl<'a> Mixer<'a> {
         if bus.mute {
             return Ok(out);
         }
+        // inputs are rendered `lat` early so the bus plugins' output lines up
+        let lat = self.chain_latency(&bus.inserts);
         let mut tracks: Vec<&Track> = self.s.tracks.values().filter(|t| t.bus_id == bus_id && self.track_audible(t)).collect();
         tracks.sort_by_key(|t| (t.order, t.id.clone()));
-        for t in tracks {
-            out.add(&self.render_track_stereo(&t.id, start, frames)?);
-        }
         let mut kids: Vec<&Bus> = self.s.buses.values().filter(|b| b.parent_id.as_deref() == Some(bus_id)).collect();
         kids.sort_by_key(|b| (b.order, b.id.clone()));
-        for k in kids {
-            out.add(&self.render_bus(&k.id, start, frames)?);
+        let inputs = |at: i64, n: usize, out: &mut AudioBuffer| -> Result<()> {
+            for t in &tracks {
+                out.add(&self.render_track_stereo(&t.id, at, n)?);
+            }
+            for k in &kids {
+                out.add(&self.render_bus(&k.id, at, n)?);
+            }
+            Ok(())
+        };
+        if lat > 0 && self.needs_preroll(&bus.inserts, start + lat) {
+            let mut pre = AudioBuffer::silent(self.s.project.sample_rate, 2, lat as usize);
+            inputs(start, lat as usize, &mut pre)?;
+            self.run_inserts(format!("b:{bus_id}"), &bus.inserts, &mut pre, start);
         }
-        {
-            let mut dsp = self.dsp.borrow_mut();
-            let st = dsp.entry(format!("b:{bus_id}")).or_default();
-            process_inserts(&bus.inserts, st, &mut out);
-        }
+        inputs(start + lat, frames, &mut out)?;
+        self.run_inserts(format!("b:{bus_id}"), &bus.inserts, &mut out, start + lat);
         let g = db_to_lin(bus.gain_db);
         let mut vol = self.cursor(bus_id, AutomationParam::VolumeDb, 0.0);
         let mut pan = self.cursor(bus_id, AutomationParam::Pan, 0.0);

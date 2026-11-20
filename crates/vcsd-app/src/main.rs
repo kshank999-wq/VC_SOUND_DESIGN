@@ -32,6 +32,8 @@ fn build_info(app: tauri::AppHandle, updates: tauri::State<'_, Updates>) -> serd
 }
 
 fn main() {
+    // started as the out-of-process plugin scanner: scan one bundle and exit
+    vcsd_engine::vcsd_plugins::scan::child_main();
     let engine = Engine::new();
     // Loopback media server (token-protected, Range-capable) for the picture viewer.
     if let Err(err) = vcsd_engine::serve::start_media_server(engine.clone()) {

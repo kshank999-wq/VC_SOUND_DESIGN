@@ -1,3 +1,4 @@
+import { InsertRack } from "./Plugins";
 import { useEffect, useState } from "react";
 import { call } from "../api";
 import { allFolders } from "../folders";
@@ -251,12 +252,14 @@ export function Inspector({ eng, sel, setSel, libSel, onPerform }: Props) {
     if (t) {
       const hp = t.inserts.find((i) => i.type === "high_pass") as { hz: number } | undefined;
       const comp = t.inserts.some((i) => i.type === "compressor");
+      // built-ins first, then plugin slots (kept as they are)
       const setInserts = (hpHz: number | null, compOn: boolean) =>
         run("track.update", {
           id: t.id,
           inserts: [
             ...(hpHz ? [{ type: "high_pass", hz: hpHz, q: 0.707 }] : []),
             ...(compOn ? [{ type: "compressor", threshold_db: -18, ratio: 3, attack_ms: 5, release_ms: 80, makeup_db: 2 }] : []),
+            ...t.inserts.filter((i) => i.type === "plugin"),
           ],
         });
       body = (
@@ -278,6 +281,7 @@ export function Inspector({ eng, sel, setSel, libSel, onPerform }: Props) {
           <h4>Inserts</h4>
           <label className="small"><input type="checkbox" checked={!!hp} onChange={(e) => setInserts(e.target.checked ? 80 : null, comp)} /> High-pass {hp ? `${hp.hz} Hz` : ""}</label>
           <label className="small"><input type="checkbox" checked={comp} onChange={(e) => setInserts(hp?.hz ?? null, e.target.checked)} /> Compressor (−18 dB, 3:1)</label>
+          <InsertRack eng={eng} ownerId={t.id} inserts={t.inserts} />
         </div>
       );
     }

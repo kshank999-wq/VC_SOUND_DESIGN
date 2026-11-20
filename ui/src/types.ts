@@ -40,14 +40,26 @@ export type Insert =
   | { type: "high_pass"; hz: number; q: number }
   | { type: "low_pass"; hz: number; q: number }
   | { type: "peak"; hz: number; q: number; db: number }
-  | { type: "compressor"; threshold_db: number; ratio: number; attack_ms: number; release_ms: number; makeup_db: number };
+  | { type: "compressor"; threshold_db: number; ratio: number; attack_ms: number; release_ms: number; makeup_db: number }
+  | PluginSlot;
+/** A hosted VST3/AU plugin in an insert slot. */
+export interface PluginSlot {
+  type: "plugin"; id: string; plugin_id: string; format: string; name: string; vendor: string; path: string;
+  bypass: boolean; state: string | null; params: Record<string, number>;
+}
+export interface PluginInfo { id: string; format: string; name: string; vendor: string; version: string; category: string; path: string }
+export interface PluginParam {
+  id: number; title: string; units: string; step_count: number; default: number; value: number; display: string;
+  automatable: boolean; read_only: boolean; is_bypass: boolean;
+}
+export interface PluginStatus { loaded: boolean; error: string | null; latency: number }
 export interface Track {
   id: string; name: string; scene_id: string | null; identity_id: string | null; category: Category; bus_id: string;
   channels: number; order: number; folder: string; gain_db: number; pan: number; mute: boolean; solo: boolean; armed: boolean;
   inserts: Insert[];
   automation_mode?: "read" | "touch" | "latch" | "write";
 }
-export interface Bus { id: string; name: string; order: number; parent_id: string | null; gain_db: number; mute: boolean; stem: boolean; automation_mode?: "read" | "touch" | "latch" | "write" }
+export interface Bus { id: string; name: string; order: number; parent_id: string | null; gain_db: number; mute: boolean; stem: boolean; inserts: Insert[]; automation_mode?: "read" | "touch" | "latch" | "write" }
 export interface HistoryEntry { asset_id: string; origin: string; at: number }
 export interface Clip {
   id: string; track_id: string; cue_id: string | null; asset_id: string; timeline_start: number; source_offset: number;
@@ -94,6 +106,8 @@ export interface ProjectView {
   script: ScriptLine[];
   exports: { id: string; profile: string; output_dir: string; file_count: number; qa_errors: number; qa_warnings: number }[];
   bindings: Record<string, Binding>;
+  /** Live plugin instances by slot id. */
+  plugins?: Record<string, PluginStatus>;
 }
 export interface TransportState {
   playing: boolean;

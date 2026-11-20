@@ -226,6 +226,15 @@ enum Cmd {
         #[arg(long, default_value = "ui/dist")]
         ui: PathBuf,
     },
+    /// List installed VST3 (and on macOS, Audio Unit) effects
+    Plugins {
+        /// Open every bundle again instead of using the scan cache
+        #[arg(long)]
+        rescan: bool,
+        /// Show failed bundles and plugin ids
+        #[arg(long, short)]
+        verbose: bool,
+    },
 }
 
 fn today() -> String {
@@ -676,6 +685,32 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{line}");
             }
         }
+        Cmd::Plugins { rescan, verbose } => {
+            let engine = vcsd_engine::Engine::new();
+            let v = engine.call("plugins.scan", serde_json::json!({"force": rescan})).map_err(Error::Invalid)?;
+            for p in v["plugins"].as_array().into_iter().flatten() {
+                let s = |k: &str| p[k].as_str().unwrap_or("").to_string();
+                print!("{:<5} {:<32} {:<24} {}", s("format"), s("name"), s("vendor"), s("category"));
+                if verbose {
+                    print!("  {}  {}", s("id"), s("path"));
+                }
+                println!();
+            }
+            let failed = v["failed"].as_array().map(|a| a.len()).unwrap_or(0);
+            println!(
+                "{} effects in {} bundles ({} scanned now, {} failed){}",
+                v["plugins"].as_array().map(|a| a.len()).unwrap_or(0),
+                v["bundles"],
+                v["scanned"],
+                failed,
+                if failed > 0 && !verbose { " — use -v for details" } else { "" }
+            );
+            if verbose {
+                for f in v["failed"].as_array().into_iter().flatten() {
+                    println!("failed: {}: {}", f["path"].as_str().unwrap_or(""), f["error"].as_str().unwrap_or(""));
+                }
+            }
+        }
         Cmd::Serve { dir, port, ui } => {
             let engine = vcsd_engine::Engine::new();
             if let Some(d) = dir {
@@ -689,6 +724,8 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn main() -> ExitCode {
+    // `vcsd --vcsd-plugin-scan <bundle>`: the out-of-process plugin scanner
+    vcsd_engine::vcsd_plugins::scan::child_main();
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

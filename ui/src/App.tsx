@@ -12,6 +12,7 @@ import { Mixer } from "./components/Mixer";
 import { Pads } from "./components/Pads";
 import { ImportDialog, Welcome, type ImportKind } from "./components/Dialogs";
 import { DevicesDialog } from "./components/Devices";
+import { PluginBrowser, PluginEditors } from "./components/Plugins";
 import { UpdatesDialog, useUpdates } from "./components/Updates";
 import { getLayout, resetLayout, saveLayout } from "./layout";
 import { DEFAULTS, LIMITS } from "./layoutModel";
@@ -42,6 +43,7 @@ export function App() {
   const [perform, setPerform] = useState<string | null>(null);
   const [tcEdit, setTcEdit] = useState<string | null>(null);
   const [devices, setDevices] = useState(false);
+  const [plugins, setPlugins] = useState(false);
   const updates = useUpdates(eng);
   const [showUpdates, setShowUpdates] = useState(false);
   const centerRef = useRef<HTMLDivElement>(null);
@@ -169,6 +171,7 @@ export function App() {
               {updates.enabled && <div onClick={() => setShowUpdates(true)}>Check for updates…{updates.phase === "available" ? " ●" : ""}</div>}
               {updates.info && <div className="muted small" style={{ cursor: "default" }}>Version {updates.info.version}</div>}
               <div onClick={() => setDevices(true)}>Audio & MIDI devices…</div>
+              <div onClick={() => setPlugins(true)}>Plugins…</div>
               <hr />
               <div onClick={() => run("project.close")}>Close project</div>
             </div>
@@ -251,6 +254,8 @@ export function App() {
       </footer>
       <ImportDialog kind={imp} eng={eng} onClose={() => setImp(null)} />
       {devices && <DevicesDialog eng={eng} onClose={() => setDevices(false)} />}
+      {plugins && <PluginBrowser onClose={() => setPlugins(false)} />}
+      <PluginEditors eng={eng} />
       {showUpdates && <UpdatesDialog u={updates} onClose={() => setShowUpdates(false)} />}
       {updates.phase === "available" && !showUpdates && (
         <button className="update-pill" onClick={() => setShowUpdates(true)}>Update {updates.update?.version} available</button>
@@ -299,6 +304,7 @@ export function MixerWindow() {
     <div className="mixer-window">
       <div className="panel-title">Mixer — {eng.view?.open ? eng.view.project.name : ""} <span className="mono muted">{eng.rate && tcAt(eng.rate, eng.livePosition())}</span></div>
       <Mixer eng={eng} detached />
+      <PluginEditors eng={eng} />
     </div>
   );
 }
