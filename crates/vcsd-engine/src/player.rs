@@ -77,6 +77,9 @@ pub struct Shared {
     pub output_pref: Mutex<Option<String>>,
     /// Why the requested device is not the one in use, if it isn't.
     pub device_warning: Mutex<Option<String>>,
+    /// Live automation values while a fader is being written (monitoring).
+    overrides: Mutex<HashMap<(String, vcsd_core::AutomationParam), f32>>,
+    overrides_version: AtomicU64,
 }
 
 fn now_ms() -> u64 {
@@ -145,6 +148,8 @@ impl Player {
             seek_ms: AtomicU64::new(0),
             output_pref: Mutex::new(None),
             device_warning: Mutex::new(None),
+            overrides: Mutex::new(HashMap::new()),
+            overrides_version: AtomicU64::new(1),
         });
         let (prod, cons) = rtrb::RingBuffer::<Block>::new(RING_BLOCKS);
         let consumer = Arc::new(Mutex::new(Consumer { ring: cons, cur: None, idx: 0 }));
@@ -177,6 +182,21 @@ impl Player {
     pub fn set_output_device(&self, name: Option<String>) {
         *self.shared.output_pref.lock().unwrap() = name;
         let _ = self.out_tx.send(OutputCmd::Open(self.shared.project_rate.load(SeqCst)));
+    }
+
+    /// Set (Some) or release (None) the live value of an automation lane.
+    pub fn set_override(&self, owner_id: &str, param: vcsd_core::AutomationParam, value: Option<f32>) {
+        let mut o = self.shared.overrides.lock().unwrap();
+        match value {
+            Some(v) => o.insert((owner_id.to_string(), param), v),
+            None => o.remove(&(owner_id.to_string(), param)),
+        };
+        self.shared.overrides_version.fetch_add(1, SeqCst);
+    }
+
+    pub fn clear_overrides(&self) {
+        self.shared.overrides.lock().unwrap().clear();
+        self.shared.overrides_version.fetch_add(1, SeqCst);
     }
 
     pub fn clear_cache(&self) {
@@ -272,6 +292,7 @@ fn render_thread(sh: Arc<Shared>, mut prod: rtrb::Producer<Block>) {
             continue;
         };
         let mixer = Mixer::with_cache(&snap, RenderOptions { exclude_temp_refs: false, honor_solo: true }, sh.cache.clone());
+        let mut ov_seen = 0u64; // force an override sync for the new mixer
         loop {
             if sh.shutdown.load(Relaxed) {
                 return;
@@ -287,6 +308,13 @@ fn render_thread(sh: Arc<Shared>, mut prod: rtrb::Producer<Block>) {
                 src.clear();
                 phase = 0.0;
                 mixer.reset();
+            }
+            let ov = sh.overrides_version.load(Relaxed);
+            if ov != ov_seen {
+                if let Ok(o) = sh.overrides.try_lock() {
+                    *mixer.overrides.borrow_mut() = o.clone();
+                    ov_seen = ov;
+                }
             }
             let playing = sh.playing.load(Relaxed);
             let previewing = sh.preview_active.load(Relaxed);

@@ -116,6 +116,7 @@ pub fn ensure_track(s: &mut ProjectState, cue: &Cue, policy: TrackPolicy) -> Res
             armed: false,
             frozen_asset_id: None,
             inserts: vec![],
+            automation_mode: AutoMode::Read,
         },
     );
     Ok((id, true))

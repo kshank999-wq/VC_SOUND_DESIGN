@@ -432,3 +432,70 @@ fn bus_and_master_automation() {
     let old: AutomationPoint = serde_json::from_str(r#"{"id":"aut_1","track_id":"trk_1","param":"pan","sample":0,"value":0.5}"#).unwrap();
     assert_eq!(old.owner_id, "trk_1");
 }
+
+#[test]
+fn automation_write_pass_commit() {
+    let (mut s, _r) = session("wpass", "24", "01:00:00:00");
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    let bus = s.state.buses.values().find(|b| b.name == "Foley").unwrap().id.clone();
+    let sr = 48_000i64;
+    let ramp = 2400;
+    // existing lane: flat -3 dB with points at 0 and 8 s
+    s.edit("a", |st| editing::set_automation(st, &bus, AutomationParam::VolumeDb, 0, -3.0)).unwrap();
+    s.edit("a", |st| editing::set_automation(st, &bus, AutomationParam::VolumeDb, 8 * sr, -3.0)).unwrap();
+    // a pass from 2 s to 4 s: linear fade -3 → -15 captured every 10 ms, then holds
+    let mut cap = vec![];
+    for k in 0..=100 {
+        let t = 2 * sr + k * 480;
+        let v = if t < 3 * sr { -3.0 - 12.0 * ((t - 2 * sr) as f32 / sr as f32) } else { -15.0 };
+        cap.push((t, v));
+    }
+    let n = s.edit("pass", |st| editing::write_automation_pass(st, &bus, AutomationParam::VolumeDb, &cap, 2 * sr, 4 * sr, ramp)).unwrap();
+    assert!(n <= 7, "101 captured values thinned to a few breakpoints, got {n}");
+    let at = |st: &ProjectState, t: i64| editing::automation_value_at(st, &bus, AutomationParam::VolumeDb, t);
+    assert!((at(&s.state, sr) + 3.0).abs() < 0.01, "untouched before the pass");
+    assert!((at(&s.state, 2 * sr + sr / 2) + 9.0).abs() < 0.3, "ramp captured: {}", at(&s.state, 2 * sr + sr / 2));
+    assert!((at(&s.state, 7 * sr / 2) + 15.0).abs() < 0.01, "held to the end of the pass");
+    assert!((at(&s.state, 4 * sr + ramp) + 3.0).abs() < 0.01, "returns to the prior automation after the ramp");
+    assert!((at(&s.state, 6 * sr) + 3.0).abs() < 0.01);
+    // one undo removes the whole pass
+    s.undo().unwrap();
+    assert!((at(&s.state, 7 * sr / 2) + 3.0).abs() < 0.01);
+    // pan pass on an empty lane of a track-less bus starts from neutral
+    let n = s.edit("pan", |st| editing::write_automation_pass(st, &bus, AutomationParam::Pan, &[(sr, 0.5)], sr, 2 * sr, ramp)).unwrap();
+    assert_eq!(n, 4, "ramp in from centre, hold, ramp back");
+    assert!((editing::automation_value_at(&s.state, &bus, AutomationParam::Pan, 3 * sr)).abs() < 1e-6);
+    s.edit("mode", |st| editing::set_automation_mode(st, &bus, AutoMode::Latch)).unwrap();
+    assert_eq!(s.state.buses[&bus].automation_mode, AutoMode::Latch);
+}
+
+#[test]
+fn mixer_live_override_replaces_lane() {
+    let (mut s, root) = session("ovr", "24", "01:00:00:00");
+    let src = root.join("Audio/Imported/const.wav");
+    wav::write(&src, &wav::AudioBuffer { sample_rate: 48_000, channels: 1, data: vec![0.5; 48_000] }, wav::SampleFormat::Float32, None)
+        .unwrap();
+    s.edit("imp", |st| {
+        library::import_wav(
+            st,
+            &src,
+            library::AssetMeta {
+                kind: AssetKind::Placeholder,
+                category: Some(Category::HardFx),
+                loopable: Some(false),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    scene(&mut s, "1", "01:00:00:00", "01:00:01:00");
+    marker_tc(&mut s, "fx", EventType::Range, "01:00:00:00", "01:00:00:12", "const", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let t = s.state.tracks.values().next().unwrap().id.clone();
+    s.edit("a", |st| editing::set_automation(st, &t, AutomationParam::VolumeDb, 0, -20.0)).unwrap();
+    let m = Mixer::new(&s.state, RenderOptions::default());
+    m.overrides.borrow_mut().insert((t.clone(), AutomationParam::VolumeDb), -6.0);
+    let v = m.render_track_print(&t, 100, 1).unwrap().data[0];
+    assert!((20.0 * (v / 0.5).log10() + 6.0).abs() < 0.01, "live value wins over the stored lane");
+}

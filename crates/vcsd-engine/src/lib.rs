@@ -36,7 +36,24 @@ pub enum InputMode {
     Perform,
 }
 
+/// One contiguous stretch of captured control values.
+#[derive(Debug, Clone)]
+struct Segment {
+    start: i64,
+    samples: Vec<(i64, f32)>,
+}
+
+/// An automation write pass on one lane (Touch / Latch / Write).
+#[derive(Debug, Clone)]
+struct Pass {
+    mode: AutoMode,
+    touching: bool,
+    done: Vec<Segment>,
+    cur: Segment,
+}
+
 struct Inner {
+    passes: HashMap<(String, AutomationParam), Pass>,
     session: Option<Session>,
     version: u64,
     spotter: LiveSpotter,
@@ -157,6 +174,7 @@ impl Engine {
         let midi_pref = prefs.midi_port.clone();
         let e = Arc::new(Engine {
             inner: Mutex::new(Inner {
+                passes: HashMap::new(),
                 session: None,
                 version: 0,
                 spotter: LiveSpotter::new(),
@@ -300,6 +318,8 @@ impl Engine {
         g.session = Some(sess);
         g.perf = None;
         g.peaks.clear();
+        g.passes.clear();
+        self.player.clear_overrides();
         self.player.stop();
         self.player.clear_cache();
         self.player.locate(0);
@@ -321,6 +341,74 @@ impl Engine {
 
     fn st(g: &Inner) -> std::result::Result<&ProjectState, String> {
         g.session.as_ref().map(|s| &s.state).ok_or_else(|| "no project open".to_string())
+    }
+
+    fn owner_mode_gain(st: &ProjectState, owner: &str) -> Option<(AutoMode, f32)> {
+        st.tracks.get(owner).map(|t| (t.automation_mode, t.gain_db)).or_else(|| st.buses.get(owner).map(|b| (b.automation_mode, b.gain_db)))
+    }
+
+    /// Start Write-mode passes for every lane of every owner in Write mode.
+    fn arm_write_passes(&self, g: &mut Inner, pos: i64) {
+        let Some(sess) = &g.session else { return };
+        let st = &sess.state;
+        let owners: Vec<String> = st
+            .tracks
+            .values()
+            .filter(|t| t.automation_mode == AutoMode::Write)
+            .map(|t| t.id.clone())
+            .chain(st.buses.values().filter(|b| b.automation_mode == AutoMode::Write).map(|b| b.id.clone()))
+            .collect();
+        for o in owners {
+            for param in [AutomationParam::VolumeDb, AutomationParam::Pan] {
+                let v = editing::automation_value_at(st, &o, param, pos);
+                g.passes.insert(
+                    (o.clone(), param),
+                    Pass { mode: AutoMode::Write, touching: false, done: vec![], cur: Segment { start: pos, samples: vec![(pos, v)] } },
+                );
+                self.player.set_override(&o, param, Some(v));
+            }
+        }
+    }
+
+    /// Commit every open pass up to `end` as ONE undoable edit, release overrides.
+    fn commit_passes(&self, g: &mut Inner, end: i64) -> std::result::Result<usize, String> {
+        if g.passes.is_empty() {
+            return Ok(0);
+        }
+        let passes: Vec<((String, AutomationParam), Pass)> = g.passes.drain().collect();
+        for ((o, p), _) in &passes {
+            self.player.set_override(o, *p, None);
+        }
+        let Some(sess) = g.session.as_mut() else { return Ok(0) };
+        let ramp = (sess.state.project.sample_rate / 20) as i64; // 50 ms
+        let n = sess
+            .edit("write automation", |st| {
+                let mut n = 0;
+                for ((o, param), pass) in &passes {
+                    let mut segs = pass.done.clone();
+                    let mut cur = pass.cur.clone();
+                    if let Some(&(_, v)) = cur.samples.last() {
+                        let stop = end.max(cur.samples.last().unwrap().0);
+                        cur.samples.push((stop, v));
+                    }
+                    segs.push(cur);
+                    for sg in segs {
+                        let Some(&(last_t, _)) = sg.samples.last() else { continue };
+                        n += editing::write_automation_pass(st, o, *param, &sg.samples, sg.start, last_t, ramp)?;
+                    }
+                }
+                Ok(n)
+            })
+            .map_err(e)?;
+        self.publish(g);
+        Ok(n)
+    }
+
+    /// Stop the transport, committing any automation being written.
+    fn stop_transport(&self, g: &mut Inner) -> std::result::Result<usize, String> {
+        let end = self.player.position();
+        self.player.stop();
+        self.commit_passes(g, end)
     }
 
     fn heard(&self) -> i64 {
@@ -842,6 +930,65 @@ impl Engine {
                 })?;
                 Ok(json!({"id": id}))
             }
+            "automation.mode" => {
+                let mode: AutoMode = serde_json::from_value(a.get("mode").cloned().unwrap_or(json!("read"))).map_err(e)?;
+                let owner = auto_owner(a)?.to_string();
+                self.edit(g, "automation mode", |st| editing::set_automation_mode(st, &owner, mode))?;
+                Ok(json!({}))
+            }
+            "automation.touch" => {
+                // Control moves from faders/pans. `value` is the CONTROL value:
+                // absolute fader dB for volume (stored relative to the fader), pan -1..1.
+                let owner = auto_owner(a)?.to_string();
+                let param = auto_param(a);
+                let phase = os(a, "phase").unwrap_or("move");
+                let st = Self::st(g)?;
+                let (mode, gain) = Self::owner_mode_gain(st, &owner).ok_or("unknown track or bus")?;
+                let st_rate = st.project.sample_rate;
+                let raw = of(a, "value").ok_or("missing value")?;
+                let v = editing::clamp_automation(param, if param == AutomationParam::VolumeDb { raw - gain } else { raw });
+                if mode == AutoMode::Read || !self.player.is_playing() {
+                    return Ok(json!({"capturing": false}));
+                }
+                let pos = self.heard();
+                let key = (owner.clone(), param);
+                let pass = g.passes.entry(key.clone()).or_insert_with(|| Pass {
+                    mode,
+                    touching: false,
+                    done: vec![],
+                    cur: Segment { start: pos, samples: vec![] },
+                });
+                // loop wrap: close the segment and start a new one at the new position
+                if pass.cur.samples.last().is_some_and(|&(t, _)| pos + 4800 < t) {
+                    let seg = std::mem::replace(&mut pass.cur, Segment { start: pos, samples: vec![] });
+                    pass.done.push(seg);
+                }
+                // An idle control is held: after a gap, step (not ramp) to the new value.
+                let gap = (st_rate as i64) * 60 / 1000;
+                if let Some(&(lt, lv)) = pass.cur.samples.last() {
+                    if pos - lt > gap && (lv - v).abs() > f32::EPSILON {
+                        pass.cur.samples.push((pos - 1, lv));
+                    }
+                }
+                pass.cur.samples.push((pos, v));
+                match phase {
+                    "begin" => pass.touching = true,
+                    "end" => pass.touching = false,
+                    _ => {}
+                }
+                let release = phase == "end" && pass.mode == AutoMode::Touch;
+                self.player.set_override(&owner, param, Some(v));
+                if release {
+                    // Touch: commit this lane now and return to the existing automation
+                    let one = g.passes.remove(&key).unwrap();
+                    let mut rest = std::mem::take(&mut g.passes);
+                    g.passes.insert(key, one);
+                    let r = self.commit_passes(g, pos);
+                    g.passes = std::mem::take(&mut rest);
+                    r?;
+                }
+                Ok(json!({"capturing": true, "value": v}))
+            }
             "automation.update" => {
                 self.edit(g, "move automation point", |st| {
                     let id = s(a, "id").map_err(Error::Invalid)?;
@@ -927,23 +1074,38 @@ impl Engine {
 
             // ------------------------------------------------ transport
             "transport.play" => {
-                self.player.play(oi(a, "from"));
+                let from = oi(a, "from").unwrap_or_else(|| self.player.position());
+                if self.player.is_playing() {
+                    self.stop_transport(g)?;
+                }
+                self.player.play(Some(from));
+                self.arm_write_passes(g, from);
                 Ok(json!({}))
             }
             "transport.stop" => {
-                self.player.stop();
-                Ok(json!({}))
+                let n = self.stop_transport(g)?;
+                Ok(json!({"automation_points_written": n}))
             }
             "transport.toggle" => {
                 if self.player.is_playing() {
-                    self.player.stop()
+                    self.stop_transport(g)?;
                 } else {
-                    self.player.play(None)
+                    let from = self.player.position();
+                    self.player.play(None);
+                    self.arm_write_passes(g, from);
                 }
                 Ok(json!({"playing": self.player.is_playing()}))
             }
             "transport.locate" => {
-                self.player.locate(i(a, "sample")?);
+                let to = i(a, "sample")?;
+                if self.player.is_playing() && !g.passes.is_empty() {
+                    let end = self.player.position();
+                    self.commit_passes(g, end)?;
+                    self.player.locate(to);
+                    self.arm_write_passes(g, to);
+                } else {
+                    self.player.locate(to);
+                }
                 Ok(json!({}))
             }
             "transport.step" => {
@@ -951,7 +1113,7 @@ impl Engine {
                 let tb = st.tb();
                 let n = oi(a, "frames").unwrap_or(1);
                 let to = tb.sample_at_frame(tb.frame_at(self.player.position()) + n);
-                self.player.stop();
+                self.stop_transport(g)?;
                 self.player.locate(to);
                 Ok(json!({"position": to}))
             }
@@ -967,6 +1129,11 @@ impl Engine {
                 v["version"] = json!(g.version);
                 v["recording"] = json!(self.recording.lock().unwrap().as_ref().map(|r| r.device.clone()));
                 v["mode"] = json!(g.mode);
+                v["writing"] = json!(g
+                    .passes
+                    .iter()
+                    .map(|((o, p), pass)| json!({"owner_id": o, "param": p, "mode": pass.mode, "touching": pass.touching, "value": pass.cur.samples.last().map(|x| x.1)}))
+                    .collect::<Vec<_>>());
                 v["perf_triggers"] = json!(g.perf.as_ref().map(|p| p.len()));
                 v["open_spots"] = json!(g.spotter.bindings.keys().filter(|k| g.spotter.is_open(k)).collect::<Vec<_>>());
                 Ok(v)

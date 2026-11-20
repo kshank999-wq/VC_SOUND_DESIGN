@@ -297,6 +297,127 @@ pub fn clear_automation(s: &mut ProjectState, owner_id: &str, param: Option<Auto
     Ok(before - s.automation.len())
 }
 
+/// Value a lane has at `at` (linear between breakpoints, held at the ends),
+/// or the neutral value when the lane is empty.
+pub fn automation_value_at(s: &ProjectState, owner_id: &str, param: AutomationParam, at: i64) -> f32 {
+    let mut pts: Vec<&AutomationPoint> = s.automation.values().filter(|p| p.owner_id == owner_id && p.param == param).collect();
+    pts.sort_by_key(|p| p.sample);
+    let neutral = match param {
+        AutomationParam::Pan => s.tracks.get(owner_id).map(|t| t.pan).unwrap_or(0.0),
+        AutomationParam::VolumeDb => 0.0,
+    };
+    match pts.as_slice() {
+        [] => neutral,
+        [first, ..] if at <= first.sample => first.value,
+        [.., last] if at >= last.sample => last.value,
+        _ => {
+            let i = pts.windows(2).position(|w| at >= w[0].sample && at < w[1].sample).unwrap_or(0);
+            let (a, b) = (pts[i], pts[i + 1]);
+            a.value + (b.value - a.value) * ((at - a.sample) as f32 / (b.sample - a.sample).max(1) as f32)
+        }
+    }
+}
+
+/// Douglas–Peucker thinning in value space: drop points that a straight line
+/// between their neighbours reproduces within `tol`.
+fn thin(points: &[(i64, f32)], tol: f32) -> Vec<(i64, f32)> {
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+    let mut stack = vec![(0usize, points.len() - 1)];
+    while let Some((a, b)) = stack.pop() {
+        let (sa, va) = points[a];
+        let (sb, vb) = points[b];
+        let mut worst = (0.0f32, 0usize);
+        for (k, &(sk, vk)) in points.iter().enumerate().take(b).skip(a + 1) {
+            let t = (sk - sa) as f32 / (sb - sa).max(1) as f32;
+            let err = (vk - (va + (vb - va) * t)).abs();
+            if err > worst.0 {
+                worst = (err, k);
+            }
+        }
+        if worst.0 > tol {
+            keep[worst.1] = true;
+            stack.push((a, worst.1));
+            stack.push((worst.1, b));
+        }
+    }
+    points.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
+}
+
+/// Commit one recorded automation pass (fader/pan moves captured during
+/// playback in Touch/Latch/Write). `samples` are `(timeline sample, value)` in
+/// capture order. The lane is replaced over `[start, end]`; the value before
+/// the pass is kept up to `start - ramp`, the recording is thinned, the last
+/// value holds to `end`, and the lane ramps back to its previous automation by
+/// `end + ramp`. Returns the number of breakpoints written.
+pub fn write_automation_pass(
+    s: &mut ProjectState,
+    owner_id: &str,
+    param: AutomationParam,
+    samples: &[(i64, f32)],
+    start: i64,
+    end: i64,
+    ramp: i64,
+) -> Result<usize> {
+    check_owner(s, owner_id)?;
+    if samples.is_empty() || end < start {
+        return Ok(0);
+    }
+    let ramp = ramp.max(0);
+    let before = automation_value_at(s, owner_id, param, start - ramp);
+    let after = automation_value_at(s, owner_id, param, end + ramp);
+    let had_points = s.automation.values().any(|p| p.owner_id == owner_id && p.param == param);
+    s.automation.retain(|_, p| !(p.owner_id == owner_id && p.param == param && p.sample >= start - ramp && p.sample <= end + ramp));
+    // capture → monotonic, deduplicated, clamped, within the pass
+    let mut rec: Vec<(i64, f32)> = vec![];
+    for &(t, v) in samples {
+        let t = t.clamp(start, end);
+        let v = clamp_automation(param, v);
+        match rec.last_mut() {
+            Some(l) if l.0 >= t => l.1 = v,
+            _ => rec.push((t, v)),
+        }
+    }
+    if rec[0].0 > start {
+        rec.insert(0, (start, rec[0].1));
+    }
+    let last = rec[rec.len() - 1].1;
+    if rec[rec.len() - 1].0 < end {
+        rec.push((end, last));
+    }
+    let tol = if param == AutomationParam::Pan { 0.01 } else { 0.25 };
+    let mut out = thin(&rec, tol);
+    if ramp > 0 {
+        if had_points || (before - out[0].1).abs() > tol {
+            out.insert(0, (start - ramp, before));
+        }
+        out.push((end + ramp, after));
+    }
+    let n = out.len();
+    for (t, v) in out {
+        let id = new_id("aut");
+        s.automation.insert(id.clone(), AutomationPoint { id, owner_id: owner_id.into(), param, sample: t, value: v });
+    }
+    Ok(n)
+}
+
+/// Set the automation mode of a track or bus.
+pub fn set_automation_mode(s: &mut ProjectState, owner_id: &str, mode: AutoMode) -> Result<()> {
+    if let Some(t) = s.tracks.get_mut(owner_id) {
+        t.automation_mode = mode;
+        return Ok(());
+    }
+    if let Some(b) = s.buses.get_mut(owner_id) {
+        b.automation_mode = mode;
+        return Ok(());
+    }
+    Err(not_found("track or bus", owner_id))
+}
+
 // ---------------------------------------------------------------- takes
 
 pub struct TakeImport<'a> {

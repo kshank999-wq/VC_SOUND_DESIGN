@@ -25,6 +25,11 @@
   seek epoch and per-frame timeline positions, so stale audio is discarded on locate and the heard
   position (minus output latency) is exact. The render thread renders at project rate and
   resamples to the device rate.
+- **Automation writing.** In Touch/Latch/Write, control moves go to the engine, which stamps
+  them with the heard position, monitors them live through mixer overrides (synced to the render
+  thread only when they change), and on release/stop commits the pass as one undoable edit:
+  replace the span, thin with Douglas–Peucker (0.25 dB / 0.01 pan), hold idle controls as steps,
+  and ramp back to the existing automation over 50 ms. Loop wraps split a pass into segments.
 - **Spotting and performance timestamps come from the engine,** not from the UI: a keypress or
   MIDI note is stamped with the heard transport position.
 - **Media in the webview.** Desktop builds stream picture from a loopback HTTP server with a random
@@ -98,7 +103,7 @@
 ## Roadmap
 
 1. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
-2. **App polish:** write/latch automation from faders, track folders, persisted window layout, signed installers and auto-update.
+2. **App polish:** track folders, persisted window layout, signed installers and auto-update.
 3. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).
 4. **Interchange spike:** AAF/OTIO against a pinned Resolve version, implemented as an `InterchangeAdapter` that reports what it loses.
 5. **AI:** optical-flow or pose models for footfall detection behind the existing trait, plus an opt-in cloud provider with consent and retention controls.

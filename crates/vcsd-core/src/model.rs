@@ -528,6 +528,8 @@ pub struct Bus {
     pub stem: bool,
     #[serde(default)]
     pub inserts: Vec<Insert>,
+    #[serde(default)]
+    pub automation_mode: AutoMode,
 }
 
 fn yes() -> bool {
@@ -562,6 +564,8 @@ pub struct Track {
     pub frozen_asset_id: Option<String>,
     #[serde(default)]
     pub inserts: Vec<Insert>,
+    #[serde(default)]
+    pub automation_mode: AutoMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -635,7 +639,22 @@ pub struct AutomationPoint {
     pub value: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// How a track/bus responds to its controls during playback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoMode {
+    /// Play existing automation; control moves change the static setting.
+    #[default]
+    Read,
+    /// Write while a control is held; on release return to the existing automation.
+    Touch,
+    /// Start writing on first touch and keep the last value until stop.
+    Latch,
+    /// Write the control value for the whole pass, from play to stop.
+    Write,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomationParam {
     VolumeDb,

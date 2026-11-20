@@ -5,6 +5,7 @@ import { catColor, catKey, type Bus, type Clip, type Marker, type Selection, typ
 import { frameAtSample, sampleAtFrame, snap, tcAt, type Rate } from "../tc";
 import { applyClipDrag, clipZone, type ClipEdit, type ClipZone } from "../clipEdit";
 import { formatValue, neutral, posToValue, valueAt, valueToPos, type AutoPoint, type Param } from "../automation";
+import { ModeButton, type AutoMode } from "./AutoControl";
 
 export interface Viewport {
   start: number; // first visible sample
@@ -495,6 +496,20 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
             newHits.push({ x: px - 6, y: py - 6 - scrollY, w: 12, h: 12, kind: "auto", id: p.id });
           }
         }
+        const wr = st.tx?.writing?.find((w) => w.owner_id === r.owner.id && w.param === r.param);
+        if (wr && wr.value !== null) {
+          // being written right now: live value at the playhead
+          const wx = X(st.livePosition());
+          const wy = autoY(r.param, wr.value, top);
+          ctx.fillStyle = "rgba(229,83,75,0.25)";
+          ctx.fillRect(0, top, W, AUTO - 1);
+          ctx.fillStyle = "#ff5a4f";
+          ctx.beginPath();
+          ctx.arc(wx, wy, 5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.font = "10px var(--mono)";
+          ctx.fillText(`● ${wr.mode.toUpperCase()} ${formatValue(r.param, wr.value)}`, Math.min(wx + 8, W - 120), top + 12);
+        }
         if (d?.kind === "auto" && d.autoPreview && d.autoTop === r.y) {
           const label = `${formatValue(r.param, d.autoPreview.value)} @ ${tcAt(rate, d.autoPreview.sample)}`;
           ctx.font = "11px var(--mono)";
@@ -852,6 +867,7 @@ function BusHead({ b, eng, first, autoOpen, hasAuto, onToggleAuto }: { b: Bus; e
       <div className="meter-h"><div style={{ width: pct + "%" }} className={db > -1 ? "hot" : ""} /></div>
       <button className={"tiny" + (b.mute ? " on-mute" : "")} title="Mute bus" onClick={() => eng.run("bus.update", { id: b.id, mute: !b.mute })}>M</button>
       <button className={"tiny" + (autoOpen ? " on" : "") + (hasAuto ? " has-auto" : "")} title={(autoOpen ? "Hide" : "Show") + " bus automation" + (hasAuto ? " (has automation)" : "")} onClick={onToggleAuto}>A</button>
+      <ModeButton eng={eng} ownerId={b.id} mode={(b.automation_mode ?? "read") as AutoMode} />
     </div>
   );
 }
@@ -883,6 +899,7 @@ function TrackHead({ t, eng, selected, onSelect, autoOpen, hasAuto, onToggleAuto
         <button className={"tiny" + (t.solo ? " on-solo" : "")} title="Solo" onClick={() => upd({ solo: !t.solo })}>S</button>
         <button className={"tiny" + (t.armed ? " on-rec" : "")} title="Arm for recording" onClick={() => upd({ armed: !t.armed })}>●</button>
         <button className={"tiny" + (autoOpen ? " on" : "") + (hasAuto ? " has-auto" : "")} title={(autoOpen ? "Hide" : "Show") + " automation lanes" + (hasAuto ? " (has automation)" : "")} onClick={onToggleAuto}>A</button>
+        <ModeButton eng={eng} ownerId={t.id} mode={(t.automation_mode ?? "read") as AutoMode} />
       </div>
       <div className="th-row">
         <input

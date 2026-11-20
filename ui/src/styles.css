@@ -285,3 +285,12 @@ button.tiny.has-auto:not(.on) { color: #ffd24a; }
 .bus-head .meter-h { max-width: 50px; }
 .auto-badge { font-size: 9.5px; line-height: 13px; padding: 0 5px; border-radius: 6px; background: #4a3d12; color: #ffd24a; }
 .auto-badge.off { background: none; }
+
+/* automation modes */
+button.automode { min-width: 18px; font-weight: 700; }
+.automode.m-read, .automode-select.m-read { color: #8fd18f; }
+.automode.m-touch, .automode-select.m-touch { color: #f1c232; }
+.automode.m-latch, .automode-select.m-latch { color: #f39c4a; }
+.automode.m-write, .automode-select.m-write { color: #ff6b61; }
+.automode.writing, .automode-select.writing { background: #6d2420 !important; color: #fff; animation: blink 0.8s infinite; }
+.strip.is-writing { box-shadow: inset 0 0 0 2px #e5534b; }

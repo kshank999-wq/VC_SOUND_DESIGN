@@ -380,6 +380,7 @@ pub fn import_score(s: &mut ProjectState, json_path: &Path) -> Result<String> {
             armed: false,
             frozen_asset_id: None,
             inserts: vec![],
+            automation_mode: AutoMode::Read,
         },
     );
     let clip_id = new_id("clp");

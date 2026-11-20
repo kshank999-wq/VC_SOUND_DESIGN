@@ -45,8 +45,9 @@ export interface Track {
   id: string; name: string; scene_id: string | null; identity_id: string | null; category: Category; bus_id: string;
   channels: number; order: number; folder: string; gain_db: number; pan: number; mute: boolean; solo: boolean; armed: boolean;
   inserts: Insert[];
+  automation_mode?: "read" | "touch" | "latch" | "write";
 }
-export interface Bus { id: string; name: string; order: number; parent_id: string | null; gain_db: number; mute: boolean; stem: boolean }
+export interface Bus { id: string; name: string; order: number; parent_id: string | null; gain_db: number; mute: boolean; stem: boolean; automation_mode?: "read" | "touch" | "latch" | "write" }
 export interface HistoryEntry { asset_id: string; origin: string; at: number }
 export interface Clip {
   id: string; track_id: string; cue_id: string | null; asset_id: string; timeline_start: number; source_offset: number;
@@ -112,6 +113,7 @@ export interface TransportState {
   mode: "spot" | "perform";
   perf_triggers: number | null;
   open_spots: string[];
+  writing?: { owner_id: string; param: "volume_db" | "pan"; mode: string; touching: boolean; value: number | null }[];
 }
 export interface QaIssue { severity: "error" | "warning" | "info"; code: string; message: string; entity?: string }
 export type Selection =

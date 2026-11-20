@@ -34,6 +34,7 @@ pub fn create_default_buses(s: &mut ProjectState) {
             mute: false,
             stem: false,
             inserts: vec![],
+            automation_mode: AutoMode::Read,
         },
     );
     for (i, name) in ["Dialogue Reference", "Foley", "Hard FX", "Backgrounds/Atmos", "Design FX", "Music/Score"].iter().enumerate() {
@@ -49,6 +50,7 @@ pub fn create_default_buses(s: &mut ProjectState) {
                 mute: false,
                 stem: true,
                 inserts: vec![],
+                automation_mode: AutoMode::Read,
             },
         );
     }
@@ -71,7 +73,17 @@ pub fn add_bus(s: &mut ProjectState, name: &str, parent: Option<&str>) -> Result
     let order = s.buses.len() as u32;
     s.buses.insert(
         id.clone(),
-        Bus { id: id.clone(), name: name.into(), order, parent_id: Some(parent), gain_db: 0.0, mute: false, stem: true, inserts: vec![] },
+        Bus {
+            id: id.clone(),
+            name: name.into(),
+            order,
+            parent_id: Some(parent),
+            gain_db: 0.0,
+            mute: false,
+            stem: true,
+            inserts: vec![],
+            automation_mode: AutoMode::Read,
+        },
     );
     Ok(id)
 }
@@ -221,6 +233,9 @@ pub struct Mixer<'a> {
     cache: SourceCache,
     /// Peak level of the last rendered block per track/bus id (for meters).
     pub meters: RefCell<HashMap<String, f32>>,
+    /// Live automation values `(owner_id, param) → value` that override the
+    /// stored lane while a write pass is touching it (monitoring).
+    pub overrides: RefCell<HashMap<(String, AutomationParam), f32>>,
     dsp: RefCell<HashMap<String, Vec<InsertState>>>,
     pub warnings: RefCell<Vec<String>>,
     /// Optional path remapping root for relocated media (unused when None).
@@ -234,17 +249,22 @@ struct AutoCursor<'p> {
     points: Vec<&'p AutomationPoint>,
     i: usize,
     default: f32,
+    /// Live value overriding the lane (automation being written right now).
+    live: Option<f32>,
 }
 
 impl<'p> AutoCursor<'p> {
     fn new(mut points: Vec<&'p AutomationPoint>, default: f32) -> Self {
         points.sort_by_key(|p| (p.sample, p.id.clone()));
-        Self { points, i: 0, default }
+        Self { points, i: 0, default, live: None }
     }
     fn is_empty(&self) -> bool {
-        self.points.is_empty()
+        self.points.is_empty() && self.live.is_none()
     }
     fn at(&mut self, s: i64) -> f32 {
+        if let Some(v) = self.live {
+            return v;
+        }
         let p = &self.points;
         if p.is_empty() {
             return self.default;
@@ -274,6 +294,7 @@ impl<'a> Mixer<'a> {
             opts,
             cache: Arc::new(Mutex::new(HashMap::new())),
             meters: RefCell::new(HashMap::new()),
+            overrides: RefCell::new(HashMap::new()),
             dsp: RefCell::new(HashMap::new()),
             warnings: RefCell::new(vec![]),
             media_override: None,
@@ -451,10 +472,7 @@ impl<'a> Mixer<'a> {
             let st = dsp.entry(format!("t:{track_id}")).or_default();
             process_inserts(&t.inserts, st, &mut buf);
         }
-        let mut vol = AutoCursor::new(
-            self.s.automation.values().filter(|p| p.owner_id == track_id && p.param == AutomationParam::VolumeDb).collect(),
-            0.0,
-        );
+        let mut vol = self.cursor(track_id, AutomationParam::VolumeDb, 0.0);
         let ch = buf.channels as usize;
         let base = db_to_lin(t.gain_db);
         if vol.is_empty() {
@@ -488,10 +506,7 @@ impl<'a> Mixer<'a> {
         let t = self.s.track(track_id)?;
         let print = self.render_track_print(track_id, start, frames)?;
         let mut out = AudioBuffer::silent(self.s.project.sample_rate, 2, frames);
-        let mut pans = AutoCursor::new(
-            self.s.automation.values().filter(|p| p.owner_id == track_id && p.param == AutomationParam::Pan).collect(),
-            t.pan,
-        );
+        let mut pans = self.cursor(track_id, AutomationParam::Pan, t.pan);
         let ch = print.channels as usize;
         for f in 0..frames {
             let pan = pans.at(start + f as i64);
@@ -557,7 +572,9 @@ impl<'a> Mixer<'a> {
     }
 
     fn cursor(&self, owner_id: &str, param: AutomationParam, default: f32) -> AutoCursor<'a> {
-        AutoCursor::new(self.s.automation.values().filter(|p| p.owner_id == owner_id && p.param == param).collect(), default)
+        let mut c = AutoCursor::new(self.s.automation.values().filter(|p| p.owner_id == owner_id && p.param == param).collect(), default);
+        c.live = self.overrides.borrow().get(&(owner_id.to_string(), param)).copied();
+        c
     }
 
     pub fn render_master(&self, start: i64, frames: usize) -> Result<AudioBuffer> {
