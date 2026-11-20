@@ -452,7 +452,7 @@ impl<'a> Mixer<'a> {
             process_inserts(&t.inserts, st, &mut buf);
         }
         let mut vol = AutoCursor::new(
-            self.s.automation.values().filter(|p| p.track_id == track_id && p.param == AutomationParam::VolumeDb).collect(),
+            self.s.automation.values().filter(|p| p.owner_id == track_id && p.param == AutomationParam::VolumeDb).collect(),
             0.0,
         );
         let ch = buf.channels as usize;
@@ -489,7 +489,7 @@ impl<'a> Mixer<'a> {
         let print = self.render_track_print(track_id, start, frames)?;
         let mut out = AudioBuffer::silent(self.s.project.sample_rate, 2, frames);
         let mut pans = AutoCursor::new(
-            self.s.automation.values().filter(|p| p.track_id == track_id && p.param == AutomationParam::Pan).collect(),
+            self.s.automation.values().filter(|p| p.owner_id == track_id && p.param == AutomationParam::Pan).collect(),
             t.pan,
         );
         let ch = print.channels as usize;
@@ -534,11 +534,30 @@ impl<'a> Mixer<'a> {
             process_inserts(&bus.inserts, st, &mut out);
         }
         let g = db_to_lin(bus.gain_db);
-        if (g - 1.0).abs() > 1e-9 {
-            out.data.iter_mut().for_each(|v| *v *= g);
+        let mut vol = self.cursor(bus_id, AutomationParam::VolumeDb, 0.0);
+        let mut pan = self.cursor(bus_id, AutomationParam::Pan, 0.0);
+        if vol.is_empty() && pan.is_empty() {
+            if (g - 1.0).abs() > 1e-9 {
+                out.data.iter_mut().for_each(|v| *v *= g);
+            }
+        } else {
+            // bus automation: volume relative to the bus fader, pan as stereo balance
+            for f in 0..frames {
+                let t = start + f as i64;
+                let db = vol.at(t);
+                let gv = if db <= -96.0 { 0.0 } else { g * db_to_lin(db) };
+                let p = pan.at(t);
+                let (bl, br) = if p <= 0.0 { (1.0, 1.0 + p) } else { (1.0 - p, 1.0) };
+                out.data[f * 2] *= gv * bl;
+                out.data[f * 2 + 1] *= gv * br;
+            }
         }
         self.meters.borrow_mut().insert(bus_id.to_string(), out.peak());
         Ok(out)
+    }
+
+    fn cursor(&self, owner_id: &str, param: AutomationParam, default: f32) -> AutoCursor<'a> {
+        AutoCursor::new(self.s.automation.values().filter(|p| p.owner_id == owner_id && p.param == param).collect(), default)
     }
 
     pub fn render_master(&self, start: i64, frames: usize) -> Result<AudioBuffer> {

@@ -6,7 +6,8 @@ export type Param = "volume_db" | "pan";
 
 export interface AutoPoint {
   id: string;
-  track_id: string;
+  /** Track or bus id. */
+  owner_id: string;
   param: Param;
   sample: number;
   value: number;

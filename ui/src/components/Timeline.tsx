@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { call } from "../api";
 import type { EngineHook } from "../store";
-import { catColor, catKey, type Clip, type Marker, type Selection, type Track } from "../types";
+import { catColor, catKey, type Bus, type Clip, type Marker, type Selection, type Track } from "../types";
 import { frameAtSample, sampleAtFrame, snap, tcAt, type Rate } from "../tc";
 import { applyClipDrag, clipZone, type ClipEdit, type ClipZone } from "../clipEdit";
 import { formatValue, neutral, posToValue, valueAt, valueToPos, type AutoPoint, type Param } from "../automation";
@@ -23,22 +23,37 @@ const AUTO = 56; // automation lane height
 const PARAMS: Param[] = ["volume_db", "pan"];
 const PARAM_LABEL: Record<Param, string> = { volume_db: "Volume", pan: "Pan" };
 
-type Row = { kind: "track"; t: Track; y: number; h: number } | { kind: "auto"; t: Track; param: Param; y: number; h: number };
+const BUS_H = 30; // bus header row height
+/** Anything automation can be attached to: a track or a bus (incl. master). */
+interface Owner { id: string; name: string; color: string; pan: number }
+type Row =
+  | { kind: "track"; t: Track; y: number; h: number }
+  | { kind: "bus"; b: Bus; first: boolean; y: number; h: number }
+  | { kind: "auto"; owner: Owner; param: Param; y: number; h: number };
 
 /** Track rows, each followed by its automation lanes when open (y relative to the first track). */
-function buildRows(tracks: Track[], open: Set<string>): Row[] {
+function buildRows(tracks: Track[], buses: Bus[], open: Set<string>): Row[] {
   const rows: Row[] = [];
   let y = 0;
+  const lanes = (owner: Owner) => {
+    if (!open.has(owner.id)) return;
+    for (const param of PARAMS) {
+      rows.push({ kind: "auto", owner, param, y, h: AUTO });
+      y += AUTO;
+    }
+  };
   for (const t of tracks) {
     rows.push({ kind: "track", t, y, h: TRACK });
     y += TRACK;
-    if (open.has(t.id)) {
-      for (const param of PARAMS) {
-        rows.push({ kind: "auto", t, param, y, h: AUTO });
-        y += AUTO;
-      }
-    }
+    lanes({ id: t.id, name: t.name, color: catColor(t.category), pan: t.pan });
   }
+  // buses: stem buses in mixer order, master last
+  const ordered = [...buses.filter((b) => b.parent_id), ...buses.filter((b) => !b.parent_id)];
+  ordered.forEach((b, i) => {
+    rows.push({ kind: "bus", b, first: i === 0, y, h: BUS_H });
+    y += BUS_H;
+    lanes({ id: b.id, name: b.name, color: b.parent_id ? "#9aa7b8" : "#e6c86e", pan: 0 });
+  });
   return rows;
 }
 
@@ -122,7 +137,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
   const [, force] = useState(0);
   const lanes = view?.lanes ?? [];
   const tracks = view?.tracks ?? [];
-  const rows = buildRows(tracks, autoOpen);
+  const rows = buildRows(tracks, view?.buses ?? [], autoOpen);
   const rowsH = rows.reduce((a, r) => a + r.h, 0);
   const contentH = RULER + SCENES + lanes.length * LANE + rowsH + 40;
   const stateRef = useRef({ view, tx, vp, sel, scrollY, size, rate, livePosition, rows });
@@ -286,6 +301,16 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
         ctx.fillStyle = sel?.kind === "track" && sel.id === r.t.id ? C("--track-sel") : C("--track-bg");
         ctx.fillRect(0, tracksTop + r.y, W, TRACK - 1);
       }
+      for (const r of st.rows) {
+        if (r.kind !== "bus") continue;
+        const top = tracksTop + r.y;
+        if (r.first) {
+          ctx.fillStyle = C("--sep");
+          ctx.fillRect(0, top - 1, W, 2);
+        }
+        ctx.fillStyle = r.b.parent_id ? C("--bus-bg") : C("--master-bg");
+        ctx.fillRect(0, top, W, BUS_H - 1);
+      }
       const clipsByTrack = view.clips;
       for (const c of clipsByTrack) {
         const ty = trackY.get(c.track_id);
@@ -423,19 +448,19 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
         const refV = r.param === "pan" ? 0 : 0;
         ctx.fillStyle = "rgba(255,255,255,0.08)";
         ctx.fillRect(0, Math.round(autoY(r.param, refV, top)), W, 1);
-        let pts = autoPts.filter((p) => p.track_id === r.t.id && p.param === r.param);
+        let pts = autoPts.filter((p) => p.owner_id === r.owner.id && p.param === r.param);
         if (d?.kind === "auto" && d.autoPreview && pts.some((p) => p.id === d.id)) {
           const pv = d.autoPreview;
           pts = pts.filter((p) => p.id === d.id || p.sample !== pv.sample).map((p) => (p.id === d.id ? { ...p, sample: pv.sample, value: pv.value } : p));
         }
         pts.sort((a, b) => a.sample - b.sample);
-        const col = catColor(r.t.category);
+        const col = r.owner.color;
         ctx.strokeStyle = col;
         ctx.lineWidth = 1.5;
         if (!pts.length) {
           ctx.setLineDash([3, 4]);
           ctx.globalAlpha = 0.45;
-          const yy = autoY(r.param, neutral(r.param, r.t.pan), top);
+          const yy = autoY(r.param, neutral(r.param, r.owner.pan), top);
           ctx.beginPath();
           ctx.moveTo(0, yy);
           ctx.lineTo(W, yy);
@@ -557,7 +582,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
     const r = rows.find((r) => cy >= r.y && cy < r.y + r.h);
     return r ? { row: r, top: RULER + SCENES + lanes.length * LANE + r.y - scrollY } : null;
   };
-  const autoPoints = (trackId: string, param: Param) => ((view?.automation ?? []) as AutoPoint[]).filter((p) => p.track_id === trackId && p.param === param);
+  const autoPoints = (ownerId: string, param: Param) => ((view?.automation ?? []) as AutoPoint[]).filter((p) => p.owner_id === ownerId && p.param === param);
 
   /** Topmost hit under a point; clips get a few px of grab slop past their
    *  edges so trim handles are easy to catch. */
@@ -601,14 +626,14 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
         drag.current = { kind: "auto", id: ph.id, x0: x, s0: s, moved: false, delta: 0, cur: s, autoTop: row.y };
       } else {
         // add a breakpoint: on the line keep its value, elsewhere take the pointer's
-        const pts = autoPoints(row.t.id, row.param);
+        const pts = autoPoints(row.owner.id, row.param);
         const sample = e.altKey ? Math.round(s) : snapS(s);
-        const lineV = valueAt(pts, sample, neutral(row.param, row.t.pan));
+        const lineV = valueAt(pts, sample, neutral(row.param, row.owner.pan));
         const value = Math.abs(autoY(row.param, lineV, ra.top) - y) <= 4 ? lineV : autoVal(row.param, y, ra.top);
         // listeners attach right away; the new point's id arrives asynchronously
         const pending: Drag = { kind: "auto", id: "", x0: x, s0: s, moved: false, delta: 0, cur: s, autoTop: row.y };
         drag.current = pending;
-        run<{ id: string }>("automation.set", { track_id: row.t.id, param: row.param === "pan" ? "pan" : "volume_db", sample, value }).then((r) => {
+        run<{ id: string }>("automation.set", { owner_id: row.owner.id, param: row.param === "pan" ? "pan" : "volume_db", sample, value }).then((r) => {
           if (r) pending.id = r.id;
         });
       }
@@ -630,7 +655,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
         if (lane) drag.current = { kind: "newRange", laneId: lane.id, x0: x, s0: snapS(s), moved: false, delta: 0, cur: snapS(s) };
         else {
           const ra = rowAt(y);
-          if (ra) setSel({ kind: "track", id: ra.row.t.id });
+          if (ra?.row.kind === "track") setSel({ kind: "track", id: ra.row.t.id });
           else setSel(null);
         }
       }
@@ -796,9 +821,12 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
           {rows.map((r) =>
             r.kind === "track" ? (
               <TrackHead key={r.t.id} t={r.t} eng={eng} selected={sel?.kind === "track" && sel.id === r.t.id} onSelect={() => setSel({ kind: "track", id: r.t.id })}
-                autoOpen={autoOpen.has(r.t.id)} hasAuto={((view.automation ?? []) as AutoPoint[]).some((p) => p.track_id === r.t.id)} onToggleAuto={() => toggleAuto(r.t.id)} />
+                autoOpen={autoOpen.has(r.t.id)} hasAuto={((view.automation ?? []) as AutoPoint[]).some((p) => p.owner_id === r.t.id)} onToggleAuto={() => toggleAuto(r.t.id)} />
+            ) : r.kind === "bus" ? (
+              <BusHead key={r.b.id} b={r.b} eng={eng} first={r.first} autoOpen={autoOpen.has(r.b.id)}
+                hasAuto={((view.automation ?? []) as AutoPoint[]).some((p) => p.owner_id === r.b.id)} onToggleAuto={() => toggleAuto(r.b.id)} />
             ) : (
-              <AutoHead key={r.t.id + r.param} t={r.t} param={r.param} eng={eng} points={autoPoints(r.t.id, r.param)} />
+              <AutoHead key={r.owner.id + r.param} owner={r.owner} param={r.param} eng={eng} points={autoPoints(r.owner.id, r.param)} />
             ),
           )}
         </div>
@@ -813,15 +841,30 @@ function frameLabel(rate: Rate, vp: Viewport) {
   return f < 1 ? `${(1 / f).toFixed(1)} px/frame` : `${f.toFixed(1)} frames/px`;
 }
 
-function AutoHead({ t, param, eng, points }: { t: Track; param: Param; eng: EngineHook; points: AutoPoint[] }) {
-  const v = valueAt(points, eng.livePosition(), neutral(param, t.pan));
+function BusHead({ b, eng, first, autoOpen, hasAuto, onToggleAuto }: { b: Bus; eng: EngineHook; first: boolean; autoOpen: boolean; hasAuto: boolean; onToggleAuto: () => void }) {
+  const meter = (b.parent_id ? eng.tx?.meters[b.id] : eng.tx?.master_peak) ?? 0;
+  const db = meter > 0 ? 20 * Math.log10(meter) : -90;
+  const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+  return (
+    <div className={"bus-head" + (b.parent_id ? "" : " master") + (first ? " first" : "")} style={{ height: BUS_H }}>
+      <span className="ellipsis th-name" title={b.parent_id ? "Stem bus" : "Master bus"}>{b.parent_id ? "⇢ " : "◆ "}{b.name}</span>
+      <span className="small mono muted">{b.gain_db > 0 ? "+" : ""}{b.gain_db.toFixed(1)}</span>
+      <div className="meter-h"><div style={{ width: pct + "%" }} className={db > -1 ? "hot" : ""} /></div>
+      <button className={"tiny" + (b.mute ? " on-mute" : "")} title="Mute bus" onClick={() => eng.run("bus.update", { id: b.id, mute: !b.mute })}>M</button>
+      <button className={"tiny" + (autoOpen ? " on" : "") + (hasAuto ? " has-auto" : "")} title={(autoOpen ? "Hide" : "Show") + " bus automation" + (hasAuto ? " (has automation)" : "")} onClick={onToggleAuto}>A</button>
+    </div>
+  );
+}
+
+function AutoHead({ owner, param, eng, points }: { owner: Owner; param: Param; eng: EngineHook; points: AutoPoint[] }) {
+  const v = valueAt(points, eng.livePosition(), neutral(param, owner.pan));
   return (
     <div className="auto-head" style={{ height: AUTO }}>
-      <span className="small">{PARAM_LABEL[param]}{param === "volume_db" && <span className="muted"> (vs fader)</span>}</span>
+      <span className="small">{param === "pan" && owner.id.startsWith("bus_") ? "Balance" : PARAM_LABEL[param]}{param === "volume_db" && <span className="muted"> (vs fader)</span>}</span>
       <span className="mono small auto-val">{formatValue(param, v)}</span>
       <span className="small muted">{points.length} pt</span>
       <button className="tiny" disabled={!points.length} title={`Clear ${PARAM_LABEL[param].toLowerCase()} automation`}
-        onClick={() => confirm(`Remove all ${points.length} ${PARAM_LABEL[param].toLowerCase()} points on "${t.name}"?`) && eng.run("automation.clear", { track_id: t.id, param: param === "pan" ? "pan" : "volume_db" })}>×</button>
+        onClick={() => confirm(`Remove all ${points.length} ${PARAM_LABEL[param].toLowerCase()} points on "${owner.name}"?`) && eng.run("automation.clear", { owner_id: owner.id, param: param === "pan" ? "pan" : "volume_db" })}>×</button>
     </div>
   );
 }

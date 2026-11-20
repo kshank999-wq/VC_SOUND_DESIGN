@@ -13,8 +13,8 @@ test("value ↔ position round-trips and spans the lane", () => {
 
 test("interpolation matches the engine (linear, held at the ends)", () => {
   const pts: AutoPoint[] = [
-    { id: "b", track_id: "t", param: "volume_db", sample: 48000, value: -20 },
-    { id: "a", track_id: "t", param: "volume_db", sample: 0, value: 0 },
+    { id: "b", owner_id: "t", param: "volume_db", sample: 48000, value: -20 },
+    { id: "a", owner_id: "t", param: "volume_db", sample: 0, value: 0 },
   ];
   assert.equal(valueAt(pts, -5, 0), 0);
   assert.equal(valueAt(pts, 24000, 0), -10);

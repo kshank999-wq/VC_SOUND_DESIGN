@@ -50,12 +50,21 @@ function Fader({ db, onSet }: { db: number; onSet: (v: number) => void }) {
   );
 }
 
+/** Shown when a strip's level/pan is driven by automation (the fader alone doesn't tell you). */
+function AutoBadge({ eng, id }: { eng: EngineHook; id: string }) {
+  const pts = (eng.view?.automation ?? []).filter((p) => p.owner_id === id);
+  if (!pts.length) return <div className="auto-badge off">&nbsp;</div>;
+  const kinds = [...new Set(pts.map((p) => (p.param === "pan" ? "pan" : "vol")))].join("+");
+  return <div className="auto-badge" title={`${pts.length} automation points (${kinds})`}>A {kinds}</div>;
+}
+
 function Strip({ t, eng }: { t: Track; eng: EngineHook }) {
   const upd = (a: object) => eng.run("track.update", { id: t.id, ...a });
   return (
     <div className="strip">
       <div className="strip-color" style={{ background: catColor(t.category) }} />
       <div className="strip-name" title={t.name}>{t.name.split(" • ").slice(1).join(" • ") || t.name}</div>
+      <AutoBadge eng={eng} id={t.id} />
       <div className="small muted ellipsis">{t.folder.split("/")[0]}</div>
       <input className="pan" type="range" min={-1} max={1} step={0.05} defaultValue={t.pan} key={t.pan} title={`pan ${t.pan.toFixed(2)}`} onMouseUp={(e) => upd({ pan: Number((e.target as HTMLInputElement).value) })} onDoubleClick={() => upd({ pan: 0 })} />
       <div className="strip-mid">
@@ -79,6 +88,7 @@ function BusStrip({ b, eng }: { b: Bus; eng: EngineHook }) {
   return (
     <div className={"strip bus" + (b.parent_id ? "" : " master")}>
       <div className="strip-name">{b.name}</div>
+      <AutoBadge eng={eng} id={b.id} />
       <div className="small muted">{b.parent_id ? "stem bus" : "master"}</div>
       <div className="strip-mid">
         <Fader db={b.gain_db} onSet={(v) => upd({ gain_db: v })} />

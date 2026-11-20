@@ -275,3 +275,13 @@ tr.missing td { color: #ff8a84; }
 .auto-head { display: flex; align-items: center; gap: 6px; padding: 0 6px 0 22px; border-bottom: 1px solid #23262b; background: #1a1d21; }
 .auto-head .auto-val { margin-left: auto; color: #cfe0ff; }
 button.tiny.has-auto:not(.on) { color: #ffd24a; }
+
+/* bus rows */
+:root { --bus-bg: #191b1f; --master-bg: #1e1d18; }
+.bus-head { display: flex; align-items: center; gap: 5px; padding: 0 6px; border-bottom: 1px solid #23262b; background: #1d2024; font-size: 11.5px; }
+.bus-head.first { border-top: 2px solid var(--sep); }
+.bus-head.master { background: #24221b; }
+.bus-head .th-name { flex: 1; }
+.bus-head .meter-h { max-width: 50px; }
+.auto-badge { font-size: 9.5px; line-height: 13px; padding: 0 5px; border-radius: 6px; background: #4a3d12; color: #ffd24a; }
+.auto-badge.off { background: none; }

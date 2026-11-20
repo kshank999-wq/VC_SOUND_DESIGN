@@ -102,6 +102,10 @@ fn mode(m: &str) -> VariationMode {
         _ => VariationMode::RoundRobin,
     }
 }
+/// Automation owner: `owner_id`, or `track_id` / `bus_id` for clarity.
+fn auto_owner(a: &Value) -> std::result::Result<&str, String> {
+    os(a, "owner_id").or_else(|| os(a, "bus_id")).or_else(|| os(a, "track_id")).ok_or_else(|| "missing owner_id (track or bus)".to_string())
+}
 fn auto_param(a: &Value) -> AutomationParam {
     if os(a, "param") == Some("pan") {
         AutomationParam::Pan
@@ -830,7 +834,7 @@ impl Engine {
                 let id = self.edit(g, "add automation point", |st| {
                     editing::set_automation(
                         st,
-                        s(a, "track_id").map_err(Error::Invalid)?,
+                        auto_owner(a).map_err(Error::Invalid)?,
                         auto_param(a),
                         i(a, "sample").map_err(Error::Invalid)?,
                         of(a, "value").unwrap_or(0.0),
@@ -853,7 +857,7 @@ impl Engine {
             "automation.clear" => {
                 let n = self.edit(g, "clear automation", |st| {
                     let p = os(a, "param").map(|_| auto_param(a));
-                    editing::clear_automation(st, s(a, "track_id").map_err(Error::Invalid)?, p)
+                    editing::clear_automation(st, auto_owner(a).map_err(Error::Invalid)?, p)
                 })?;
                 Ok(json!({"removed": n}))
             }

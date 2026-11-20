@@ -626,7 +626,10 @@ impl ClipInstance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutomationPoint {
     pub id: String,
-    pub track_id: String,
+    /// Track or bus (incl. the master bus) this breakpoint automates.
+    /// Projects saved before bus automation used `track_id`.
+    #[serde(alias = "track_id")]
+    pub owner_id: String,
     pub param: AutomationParam,
     pub sample: i64,
     pub value: f32,

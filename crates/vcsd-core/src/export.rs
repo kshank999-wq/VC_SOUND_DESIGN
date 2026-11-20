@@ -503,9 +503,20 @@ fn license_manifest(s: &ProjectState) -> serde_json::Value {
 fn routing_map(s: &ProjectState) -> serde_json::Value {
     let mut buses: Vec<&Bus> = s.buses.values().collect();
     buses.sort_by_key(|b| (b.order, b.id.clone()));
+    let tb = s.tb();
+    // Automation is already baked into the rendered audio; it is listed here
+    // so the receiving engineer can see (and rebuild) the moves.
+    let automation = |owner: &str| {
+        let mut pts: Vec<&AutomationPoint> = s.automation.values().filter(|p| p.owner_id == owner).collect();
+        pts.sort_by_key(|p| (p.sample, p.id.clone()));
+        pts.iter()
+            .map(|p| serde_json::json!({"param": p.param, "tc": tb.tc_at(p.sample), "sample": p.sample, "value": p.value, "unit": if p.param == AutomationParam::Pan { "pan -1..1" } else { "dB relative to fader" }}))
+            .collect::<Vec<_>>()
+    };
     serde_json::json!({
-        "buses": buses.iter().map(|b| serde_json::json!({"bus_id": b.id, "name": b.name, "parent": b.parent_id.as_ref().and_then(|p| s.buses.get(p)).map(|p| p.name.clone()), "gain_db": b.gain_db, "inserts": b.inserts, "stem": b.stem})).collect::<Vec<_>>(),
-        "tracks": s.tracks.values().map(|t| serde_json::json!({"track_id": t.id, "name": t.name, "bus": s.buses.get(&t.bus_id).map(|b| b.name.clone()), "folder": t.folder, "channels": t.channels, "gain_db": t.gain_db, "pan": t.pan, "mute": t.mute, "inserts": t.inserts})).collect::<Vec<_>>(),
+        "note": "Volume/pan automation is rendered into stems, tracks and mix; breakpoints are listed per track and bus for reference.",
+        "buses": buses.iter().map(|b| serde_json::json!({"bus_id": b.id, "name": b.name, "parent": b.parent_id.as_ref().and_then(|p| s.buses.get(p)).map(|p| p.name.clone()), "gain_db": b.gain_db, "inserts": b.inserts, "stem": b.stem, "automation": automation(&b.id)})).collect::<Vec<_>>(),
+        "tracks": s.tracks.values().map(|t| serde_json::json!({"track_id": t.id, "name": t.name, "bus": s.buses.get(&t.bus_id).map(|b| b.name.clone()), "folder": t.folder, "channels": t.channels, "gain_db": t.gain_db, "pan": t.pan, "mute": t.mute, "inserts": t.inserts, "automation": automation(&t.id)})).collect::<Vec<_>>(),
     })
 }
 

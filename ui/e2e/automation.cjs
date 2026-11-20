@@ -22,9 +22,9 @@ const OUT = process.argv[3] || null;
 
   const st0 = await api("state.get");
   const track = st0.tracks[0];
-  await api("automation.clear", { track_id: track.id });
+  await api("automation.clear", { owner_id: track.id });
   const pts = async (param) =>
-    ((await api("state.get")).automation || []).filter((x) => x.track_id === track.id && x.param === param).sort((a, b) => a.sample - b.sample);
+    ((await api("state.get")).automation || []).filter((x) => x.owner_id === track.id && x.param === param).sort((a, b) => a.sample - b.sample);
 
   // open the lanes from the track header
   const head = p.locator(".track-head", { hasText: track.name }).first();

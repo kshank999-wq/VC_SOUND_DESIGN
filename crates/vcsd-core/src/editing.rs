@@ -253,16 +253,24 @@ pub fn clamp_automation(param: AutomationParam, v: f32) -> f32 {
     }
 }
 
-/// Add a breakpoint (or update the one already at exactly `sample`).
-pub fn set_automation(s: &mut ProjectState, track_id: &str, param: AutomationParam, sample: i64, value: f32) -> Result<String> {
-    s.track(track_id)?;
+fn check_owner(s: &ProjectState, owner_id: &str) -> Result<()> {
+    if s.tracks.contains_key(owner_id) || s.buses.contains_key(owner_id) {
+        Ok(())
+    } else {
+        Err(not_found("track or bus", owner_id))
+    }
+}
+
+/// Add a breakpoint on a track or bus (or update the one already at exactly `sample`).
+pub fn set_automation(s: &mut ProjectState, owner_id: &str, param: AutomationParam, sample: i64, value: f32) -> Result<String> {
+    check_owner(s, owner_id)?;
     let value = clamp_automation(param, value);
-    if let Some(p) = s.automation.values_mut().find(|p| p.track_id == track_id && p.param == param && p.sample == sample) {
+    if let Some(p) = s.automation.values_mut().find(|p| p.owner_id == owner_id && p.param == param && p.sample == sample) {
         p.value = value;
         return Ok(p.id.clone());
     }
     let id = new_id("aut");
-    s.automation.insert(id.clone(), AutomationPoint { id: id.clone(), track_id: track_id.into(), param, sample, value });
+    s.automation.insert(id.clone(), AutomationPoint { id: id.clone(), owner_id: owner_id.into(), param, sample, value });
     Ok(id)
 }
 
@@ -270,7 +278,7 @@ pub fn set_automation(s: &mut ProjectState, track_id: &str, param: AutomationPar
 /// breakpoint of the same lane, that one is replaced (no duplicates).
 pub fn move_automation(s: &mut ProjectState, id: &str, sample: i64, value: f32) -> Result<()> {
     let p = s.automation.get(id).ok_or_else(|| not_found("automation point", id))?.clone();
-    s.automation.retain(|k, q| k == id || !(q.track_id == p.track_id && q.param == p.param && q.sample == sample));
+    s.automation.retain(|k, q| k == id || !(q.owner_id == p.owner_id && q.param == p.param && q.sample == sample));
     let q = s.automation.get_mut(id).unwrap();
     q.sample = sample;
     q.value = clamp_automation(p.param, value);
@@ -281,11 +289,11 @@ pub fn delete_automation(s: &mut ProjectState, id: &str) -> Result<()> {
     s.automation.remove(id).map(|_| ()).ok_or_else(|| not_found("automation point", id))
 }
 
-/// Remove all breakpoints of a track (one lane, or both when `param` is None).
-pub fn clear_automation(s: &mut ProjectState, track_id: &str, param: Option<AutomationParam>) -> Result<usize> {
-    s.track(track_id)?;
+/// Remove all breakpoints of a track or bus (one lane, or both when `param` is None).
+pub fn clear_automation(s: &mut ProjectState, owner_id: &str, param: Option<AutomationParam>) -> Result<usize> {
+    check_owner(s, owner_id)?;
     let before = s.automation.len();
-    s.automation.retain(|_, p| !(p.track_id == track_id && param.is_none_or(|x| p.param == x)));
+    s.automation.retain(|_, p| !(p.owner_id == owner_id && param.is_none_or(|x| p.param == x)));
     Ok(before - s.automation.len())
 }
 

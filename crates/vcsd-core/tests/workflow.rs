@@ -362,3 +362,73 @@ fn automation_lanes_shape_volume_and_pan() {
     s.undo().unwrap();
     assert_eq!(s.state.automation.len(), 3, "undo restores the cleared lane");
 }
+
+#[test]
+fn bus_and_master_automation() {
+    let (mut s, root) = session("busauto", "24", "01:00:00:00");
+    let src = root.join("Audio/Imported/const.wav");
+    wav::write(&src, &wav::AudioBuffer { sample_rate: 48_000, channels: 1, data: vec![0.5; 48_000 * 3] }, wav::SampleFormat::Float32, None)
+        .unwrap();
+    s.edit("imp", |st| {
+        library::import_wav(
+            st,
+            &src,
+            library::AssetMeta {
+                kind: AssetKind::Placeholder,
+                category: Some(Category::HardFx),
+                loopable: Some(false),
+                license: Some(License { name: "own".into(), redistributable: true, ..Default::default() }),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    scene(&mut s, "1", "01:00:00:00", "01:00:02:00");
+    marker_tc(&mut s, "fx", EventType::Range, "01:00:00:00", "01:00:02:00", "const", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let fx = s.state.buses.values().find(|b| b.name == "Hard FX").unwrap().id.clone();
+    let master = mixer::master_bus(&s.state).unwrap().id.clone();
+    let sr = 48_000i64;
+    // stem bus: 0 dB → -20 dB over the first second
+    s.edit("a", |st| editing::set_automation(st, &fx, AutomationParam::VolumeDb, 0, 0.0)).unwrap();
+    s.edit("a", |st| editing::set_automation(st, &fx, AutomationParam::VolumeDb, sr, -20.0)).unwrap();
+    let m = Mixer::new(&s.state, RenderOptions::default());
+    let stem = m.render_bus(&fx, 0, (2 * sr) as usize).unwrap();
+    let centre = stem.data[0]; // mono track panned centre into the stereo bus
+    let db = |v: f32| 20.0 * (v / centre).log10();
+    assert!(
+        (db(stem.data[(sr / 2) as usize * 2]) + 10.0).abs() < 0.05,
+        "bus volume interpolates: {}",
+        db(stem.data[(sr / 2) as usize * 2])
+    );
+    assert!((db(stem.data[(sr * 3 / 2) as usize * 2]) + 20.0).abs() < 0.05);
+    // master: balance hard right → left channel silent, right untouched
+    s.edit("m", |st| editing::set_automation(st, &master, AutomationParam::Pan, 0, 1.0)).unwrap();
+    let m = Mixer::new(&s.state, RenderOptions::default());
+    let mix = m.render_master(0, sr as usize).unwrap();
+    assert_eq!(mix.data[0], 0.0, "left muted by master balance");
+    assert!((mix.data[1] - centre).abs() < 1e-6, "right at full level");
+    // master volume to silence
+    s.edit("m", |st| editing::set_automation(st, &master, AutomationParam::VolumeDb, 0, -96.0)).unwrap();
+    assert_eq!(Mixer::new(&s.state, RenderOptions::default()).render_master(0, 100).unwrap().peak(), 0.0);
+    // unknown owners are rejected; clearing works per bus
+    assert!(s.edit("bad", |st| editing::set_automation(st, "bus_nope", AutomationParam::Pan, 0, 0.0)).is_err());
+    assert_eq!(s.edit("clr", |st| editing::clear_automation(st, &master, None)).unwrap(), 2);
+    // export: the Hard FX stem carries its automation
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-20");
+    o.out_dir = Some(root.join("Exports/busauto"));
+    o.format = wav::SampleFormat::Float32;
+    let r = export::export(&mut s.state, Some(&root), &o).unwrap();
+    let stem_file = r.files.iter().find(|f| f.contains("STEM_Hard_FX")).expect("hard fx stem");
+    let (_, b) = wav::read(&root.join("Exports/busauto").join(stem_file)).unwrap();
+    assert!((20.0 * (b.data[(sr * 3 / 2) as usize * 2] / b.data[0]).log10() + 20.0).abs() < 0.05, "stem file is automated");
+    let rm: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("Exports/busauto/Manifests/routing_map.json")).unwrap()).unwrap();
+    let fx_entry = rm["buses"].as_array().unwrap().iter().find(|b| b["name"] == "Hard FX").unwrap();
+    assert_eq!(fx_entry["automation"].as_array().unwrap().len(), 2, "bus moves documented in the routing map");
+    assert_eq!(fx_entry["automation"][1]["tc"], "01:00:01:00");
+    // projects saved before bus automation used `track_id`
+    let old: AutomationPoint = serde_json::from_str(r#"{"id":"aut_1","track_id":"trk_1","param":"pan","sample":0,"value":0.5}"#).unwrap();
+    assert_eq!(old.owner_id, "trk_1");
+}
