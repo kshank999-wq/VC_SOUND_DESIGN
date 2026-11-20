@@ -296,6 +296,19 @@ impl Session {
         !self.undo.is_empty()
     }
 
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    /// Label of the edit that `undo` would revert.
+    pub fn undo_label(&self) -> Option<&str> {
+        self.undo.last().map(|u| u.0.as_str())
+    }
+
+    pub fn redo_label(&self) -> Option<&str> {
+        self.redo.last().map(|u| u.0.as_str())
+    }
+
     pub fn undo(&mut self) -> Result<Option<String>> {
         let Some((label, snap)) = self.undo.pop() else { return Ok(None) };
         let cur = serde_json::to_vec(&self.state)?;

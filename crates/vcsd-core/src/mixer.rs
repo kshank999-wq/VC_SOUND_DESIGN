@@ -13,7 +13,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::path::Path;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+/// Decoded-audio cache shareable between mixers/threads (e.g. the realtime
+/// render thread rebuilds its mixer on every edit but keeps decoded media).
+pub type SourceCache = Arc<Mutex<HashMap<String, Arc<AudioBuffer>>>>;
 
 pub const MASTER_BUS: &str = "Review Mix";
 
@@ -214,7 +218,9 @@ impl Default for RenderOptions {
 pub struct Mixer<'a> {
     pub s: &'a ProjectState,
     pub opts: RenderOptions,
-    cache: RefCell<HashMap<String, Rc<AudioBuffer>>>,
+    cache: SourceCache,
+    /// Peak level of the last rendered block per track/bus id (for meters).
+    pub meters: RefCell<HashMap<String, f32>>,
     dsp: RefCell<HashMap<String, Vec<InsertState>>>,
     pub warnings: RefCell<Vec<String>>,
     /// Optional path remapping root for relocated media (unused when None).
@@ -242,7 +248,8 @@ impl<'a> Mixer<'a> {
         Self {
             s,
             opts,
-            cache: RefCell::new(HashMap::new()),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            meters: RefCell::new(HashMap::new()),
             dsp: RefCell::new(HashMap::new()),
             warnings: RefCell::new(vec![]),
             media_override: None,
@@ -261,8 +268,15 @@ impl<'a> Mixer<'a> {
         }
     }
 
-    pub fn source(&self, asset_id: &str) -> Result<Rc<AudioBuffer>> {
-        if let Some(b) = self.cache.borrow().get(asset_id) {
+    /// Mixer sharing an existing decoded-audio cache.
+    pub fn with_cache(s: &'a ProjectState, opts: RenderOptions, cache: SourceCache) -> Self {
+        let mut m = Self::new(s, opts);
+        m.cache = cache;
+        m
+    }
+
+    pub fn source(&self, asset_id: &str) -> Result<Arc<AudioBuffer>> {
+        if let Some(b) = self.cache.lock().unwrap().get(asset_id) {
             return Ok(b.clone());
         }
         let a = self.s.asset(asset_id)?;
@@ -275,8 +289,8 @@ impl<'a> Mixer<'a> {
             ));
             buf = resample_linear(&buf, self.s.project.sample_rate);
         }
-        let rc = Rc::new(buf);
-        self.cache.borrow_mut().insert(asset_id.to_string(), rc.clone());
+        let rc = Arc::new(buf);
+        self.cache.lock().unwrap().insert(asset_id.to_string(), rc.clone());
         Ok(rc)
     }
 
@@ -466,6 +480,7 @@ impl<'a> Mixer<'a> {
                 out.data[f * 2 + 1] = print.data[f * ch + 1] * br;
             }
         }
+        self.meters.borrow_mut().insert(track_id.to_string(), out.peak());
         Ok(out)
     }
 
@@ -495,6 +510,7 @@ impl<'a> Mixer<'a> {
         if (g - 1.0).abs() > 1e-9 {
             out.data.iter_mut().for_each(|v| *v *= g);
         }
+        self.meters.borrow_mut().insert(bus_id.to_string(), out.peak());
         Ok(out)
     }
 

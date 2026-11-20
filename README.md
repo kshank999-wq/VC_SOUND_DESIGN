@@ -10,16 +10,69 @@ How the code maps onto them is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ## Status
 
-This repository is the **core engine (spec phases P0–P3, plus the P4 integration contracts and
-the P5 AI-proposal pipeline)** as a Rust library with a CLI. It is UI-agnostic, so a desktop
-shell sits on top of it. Every acceptance scenario in spec §20 (22–31) is an automated test.
+- **Desktop app** (`crates/vcsd-app`, Tauri 2 + React): picture viewer slaved to the audio
+  clock, layered marker lanes and tracks with waveforms, live keyboard/MIDI spotting, cue chart,
+  inspector, library browser with audition, perform-to-picture pads, recording, inline faders,
+  a detachable mixer window, QA and export.
+- **Engine** (`crates/vcsd-engine`): realtime playback through CoreAudio/WASAPI/ALSA (cpal),
+  input recording, MIDI input, and one JSON command API used by the desktop app and browser mode.
+- **Core** (`crates/vcsd-core`): spec phases P0–P3, the P4 integration contracts and the P5
+  AI-proposal pipeline. Every spec §20 acceptance scenario (22–31) is an automated test.
 
-**Not built yet:** the desktop GUI (video viewer, timeline, detachable mixer), realtime audio
-and MIDI device back-ends (only the interfaces exist), live input capture (takes are imported
-WAVs), AAF/Tier-2 interchange, and plugin hosting. See
-[Roadmap](docs/ARCHITECTURE.md#roadmap).
+**Not built yet:** AAF/Tier-2 interchange, plugin hosting (VST3/AU), signed installers and
+auto-update. See the [roadmap](docs/ARCHITECTURE.md#roadmap).
 
-## Quick start
+## Desktop app
+
+Prerequisites: Rust (stable), Node 20+, and on Linux the WebKitGTK/ALSA packages
+(`libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libasound2-dev`). macOS and Windows need no
+extra packages. `ffmpeg` on `PATH` is optional; it enables picture timecode probing, playback
+proxies and visual-onset AI assist.
+
+```bash
+npm --prefix ui ci
+```
+
+```bash
+npm --prefix ui run build
+```
+
+```bash
+cargo run --release -p vcsd-app
+```
+
+To open a project directly, pass its folder: `cargo run --release -p vcsd-app -- ~/Films/GravelRoad`.
+To produce an installer (.dmg/.app, .msi/.exe, .deb/.AppImage), run `npx tauri build` from
+`crates/vcsd-app` using the CLI installed in `ui/node_modules`.
+
+On first launch, choose **Create demo project…** to get a fully spotted 3-scene project.
+
+### Keyboard
+
+| Key | Action |
+|---|---|
+| Space | Play / stop |
+| ← / → (Shift: 1 s) | Step one frame |
+| Spot mode: F, P, G, B, D, N, M | Footsteps (repeated), prop, hit, ambience range, design, note, music |
+| Spot mode: Shift+key / Enter | Close an open range or footsteps run |
+| Perform pads: J K L ; U I O P (Shift = accent) | Trigger pads while picture plays |
+| Ctrl/⌘ Z, Shift+Z / Y, S | Undo, redo, save |
+| Ctrl/⌘/Alt + wheel, Shift + wheel | Zoom, scroll timeline |
+| Drag in a lane / double-click a lane | New range / point marker |
+| Shift-drag in the ruler | Loop range |
+
+### Browser mode
+
+The same UI also runs in a web browser against a local engine, which is useful on a headless
+machine or for testing:
+
+```bash
+cargo run --release -p vcsd-cli -- serve ./demo_project --ui ui/dist
+```
+
+Then open http://127.0.0.1:7878/. It binds to localhost only and serves only the open project's media.
+
+## CLI quick start
 
 ```bash
 cargo build --release
@@ -34,14 +87,6 @@ is installed) and a procedural starter pack. Then it spots three scenes with sim
 hotkey/MIDI taps, builds the cue chart, populates placeholders, sets a scene-local override,
 performs Foley on a pad, drops in a recorded take, imports a Composer score, runs AI timing
 assist, and exports the Resolve and Pro-studio packages.
-
-```bash
-./target/release/vcsd cues ./demo_project
-```
-
-```bash
-./target/release/vcsd at ./demo_project 01:00:27:14
-```
 
 ## A manual session
 
@@ -70,7 +115,10 @@ reconstruct from a package, timecode conversion).
 |---|---|
 | `crates/vcsd-core` | Engine library: timecode, model, SQLite project store, spotting, builder, editing, performance, mixer, AI, integrations, reports/PDF, QA, export, handoff |
 | `crates/vcsd-core/tests` | `acceptance.rs` (spec §20) and `workflow.rs` |
-| `crates/vcsd-cli` | `vcsd` command-line front end and `demo` |
+| `crates/vcsd-engine` | App services: command API, realtime player, recording, MIDI, browser-mode server |
+| `crates/vcsd-app` | Tauri desktop shell |
+| `ui/` | React/TypeScript interface (shared by desktop and browser mode) |
+| `crates/vcsd-cli` | `vcsd` command-line front end (`demo`, `serve`, …) |
 | `docs/` | Spec and architecture notes |
 
 ## Tests
@@ -79,4 +127,11 @@ reconstruct from a package, timecode conversion).
 cargo test --release
 ```
 
+```bash
+npm --prefix ui test
+```
+
 The visual-onset AI test needs `ffmpeg` on `PATH` and skips itself when it is missing.
+`ui/e2e/workflow.cjs` drives the UI end to end with Playwright against a running `vcsd serve`
+(live spotting while playing, cue building, populate, replace + undo, pad performance, export,
+detached mixer).

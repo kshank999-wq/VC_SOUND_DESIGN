@@ -1,0 +1,24 @@
+[package]
+name = "vcsd-app"
+description = "VC Sound Design desktop application (Tauri shell over vcsd-engine)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vc-sound-design"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+vcsd-engine = { path = "../vcsd-engine" }
+serde_json.workspace = true
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+
+[features]
+# Embed the built UI (ui/dist). `tauri dev` disables default features to use the Vite dev server.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

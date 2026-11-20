@@ -1,0 +1,15 @@
+[package]
+name = "vcsd-engine"
+description = "VC Sound Design app services: JSON command API, realtime playback/recording, MIDI, waveform peaks, browser-mode server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vcsd-core = { path = "../vcsd-core" }
+serde.workspace = true
+serde_json.workspace = true
+cpal = "0.18.2"
+rtrb = "0.4.1"
+midir = "0.11.1"
+tiny_http = "0.12.0"

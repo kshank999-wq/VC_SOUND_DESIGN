@@ -11,5 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 vcsd-core = { path = "../vcsd-core" }
+vcsd-engine = { path = "../vcsd-engine" }
 clap.workspace = true
 serde_json.workspace = true

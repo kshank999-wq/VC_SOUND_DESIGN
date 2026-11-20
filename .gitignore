@@ -1,3 +1,6 @@
 target/
 *.vcsd.tmp
 /demo_project/
+ui/node_modules/
+ui/dist/
+crates/vcsd-app/gen/

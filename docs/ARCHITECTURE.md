@@ -1,5 +1,35 @@
 # Architecture
 
+## Layers
+
+```text
+ ui/ (React + TypeScript)  ──  Tauri IPC `api(cmd,args)`  ─┐
+                            ──  HTTP /api/<cmd> (browser) ─┤
+                                                           ▼
+ crates/vcsd-engine   Engine::call — JSON command API (~70 commands)
+                      player.rs   render thread ─rtrb─▶ cpal device callback (or clocked null device)
+                      recorder.rs input capture → BWF take at the heard position
+                      MIDI (midir) → live spotting / pad performance
+                      serve.rs    browser mode + token-protected loopback media server (Range)
+                                                           ▼
+ crates/vcsd-core     model, timecode, mixer, editing, reports, export … (UI-agnostic)
+```
+
+- **The audio clock is the master.** The picture follows it. `<video>` is driven by a
+  proportional clock-follower: drift is corrected by nudging `playbackRate`, and only large jumps
+  re-seek. When parked, the video sits mid-frame. Measured in Chromium: parked frames are exact,
+  and in playback the median offset is about −0.6 frame, which is within the measurement method's
+  ±0.5 frame resolution.
+- **Realtime safety.** The device callback never locks the project or allocates. Blocks carry a
+  seek epoch and per-frame timeline positions, so stale audio is discarded on locate and the heard
+  position (minus output latency) is exact. The render thread renders at project rate and
+  resamples to the device rate.
+- **Spotting and performance timestamps come from the engine,** not from the UI: a keypress or
+  MIDI note is stamped with the heard transport position.
+- **Media in the webview.** Desktop builds stream picture from a loopback HTTP server with a random
+  token and Range support, because WebKitGTK cannot stream video from custom URI schemes. Only
+  media referenced by the open project is served.
+
 ## Principles carried into code
 
 | Spec principle | Implementation |
@@ -50,7 +80,7 @@
 
 ## Decisions taken (spec §22)
 
-- **Engine language:** Rust, chosen for a deterministic realtime-capable engine, cross-platform builds and C-ABI embedding. The desktop shell is still open; the recommendation is Tauri or a native shell, with this crate in-process.
+- **Engine language and shell:** a Rust engine (deterministic and realtime-capable, cross-platform) inside a Tauri 2 desktop shell with a React UI. The webview only draws the interface; audio, recording and MIDI run natively in the engine, which follows the spec's rule against making browser JavaScript responsible for realtime audio.
 - **Native format:** a versioned SQLite DB with JSON documents per entity and external media, as the spec proposes.
 - **Placeholder licensing:** the bundled starter pack is generated procedurally by our own code, so it can be redistributed. Third-party packs carry their own license metadata, and QA flags anything not redistributable.
 - **Interchange:** Tier 1 (aligned BWF plus manifest) is implemented and tested. Tier 2 is an adapter trait only, pending a pinned-version Fairlight spike.
@@ -66,8 +96,8 @@
 
 ## Roadmap
 
-1. **Desktop shell (P0/P2 UI):** Tauri or a native shell with a GPU video viewer (frame stepping, overlays), marker lanes, a timeline, an inspector, a library browser with waveform cache, and a detachable mixer window.
-2. **Realtime I/O:** `AudioDevice` back-ends (CoreAudio, WASAPI/ASIO) on a realtime thread with lock-free state handoff, input capture to `Audio/RecordedFoley` with punch-in/out, and MIDI input via platform APIs feeding `LiveSpotter` and `PerformanceRecorder`.
+1. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
+2. **App polish:** device and MIDI port pickers in preferences, clip trim/fade handles on the timeline, automation lanes, track folders, persisted window layout, signed installers and auto-update.
 3. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).
 4. **Interchange spike:** AAF/OTIO against a pinned Resolve version, implemented as an `InterchangeAdapter` that reports what it loses.
 5. **AI:** optical-flow or pose models for footfall detection behind the existing trait, plus an opt-in cloud provider with consent and retention controls.

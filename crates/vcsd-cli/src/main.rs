@@ -1,7 +1,5 @@
 //! `vcsd` — command-line front end for the VC Sound Design engine.
 
-mod demo;
-
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -218,6 +216,16 @@ enum Cmd {
     Pack { out: PathBuf },
     /// Build a complete demo project end-to-end
     Demo { dir: PathBuf },
+    /// Run the app in a web browser: serves the UI and engine on localhost
+    Serve {
+        /// Project to open on start
+        dir: Option<PathBuf>,
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+        /// Built UI folder (ui/dist)
+        #[arg(long, default_value = "ui/dist")]
+        ui: PathBuf,
+    },
 }
 
 fn today() -> String {
@@ -663,7 +671,19 @@ fn run(cli: Cli) -> Result<()> {
             synth::write_starter_pack(&out, 48_000)?;
             println!("wrote starter pack to {}", out.display());
         }
-        Cmd::Demo { dir } => demo::run(&dir)?,
+        Cmd::Demo { dir } => {
+            for line in vcsd_engine::demo::run(&dir)? {
+                println!("{line}");
+            }
+        }
+        Cmd::Serve { dir, port, ui } => {
+            let engine = vcsd_engine::Engine::new();
+            if let Some(d) = dir {
+                engine.call("project.open", serde_json::json!({"dir": d})).map_err(Error::Invalid)?;
+            }
+            println!("VC Sound Design (browser mode) → http://127.0.0.1:{port}/");
+            vcsd_engine::serve::serve(engine, port, ui)?;
+        }
     }
     Ok(())
 }

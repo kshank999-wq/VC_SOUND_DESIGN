@@ -15,12 +15,21 @@ fn find(s: &ProjectState, q: &str) -> Vec<String> {
     library::search(s, &Query { text: q.into(), ..Default::default() }).iter().map(|a| a.id.clone()).collect()
 }
 
-pub fn run(dir: &Path) -> Result<()> {
+/// Build the demo project; returns the progress log.
+pub fn run(dir: &Path) -> Result<Vec<String>> {
+    let mut log: Vec<String> = vec![];
+    macro_rules! println {
+        ($($t:tt)*) => { log.push(format!($($t)*)) };
+    }
     if dir.join(layout::PROJECT_FILE).exists() {
         return Err(Error::Conflict(format!("{} already contains a project", dir.display())));
     }
-    let step = |n: u32, t: &str| println!("\n[{n}] {t}");
-    step(1, "Create project — 24 fps, 48 kHz, start 01:00:00:00");
+    macro_rules! step {
+        ($n:expr, $t:expr) => {
+            log.push(format!("[{}] {}", $n, $t))
+        };
+    }
+    step!(1, "Create project — 24 fps, 48 kHz, start 01:00:00:00");
     let mut s = Session::create(
         dir,
         NewProject { name: "Gravel Road".into(), frame_rate: FrameRate::FPS_24, sample_rate: 48_000, start_tc: "01:00:00:00".into() },
@@ -28,7 +37,7 @@ pub fn run(dir: &Path) -> Result<()> {
     s.state.project.reel = "R1".into();
     s.state.project.contacts.push(Contact { role: "Sound supervisor".into(), name: "(enter name)".into(), email: String::new() });
 
-    step(2, "Import picture reference");
+    step!(2, "Import picture reference");
     let vid = dir.join("Picture/GravelRoad_v1.mp4");
     let made = Command::new("ffmpeg")
         .args([
@@ -71,7 +80,7 @@ pub fn run(dir: &Path) -> Result<()> {
         if made { "generated 60 s test picture with embedded TC" } else { "ffmpeg unavailable — using placeholder picture file" }
     );
 
-    step(3, "Install starter pack (procedural, owned, redistributable) and scenes");
+    step!(3, "Install starter pack (procedural, owned, redistributable) and scenes");
     let pack = dir.join("Audio/LibraryRefs/VC_Starter_Pack");
     synth::write_starter_pack(&pack, 48_000)?;
     let (_, rep) = s.edit("pack", |st| library::import_pack(st, &pack, true))?;
@@ -86,7 +95,7 @@ pub fn run(dir: &Path) -> Result<()> {
         s.edit("scene", |st| add_scene(st, n, t, a, z))?;
     }
 
-    step(4, "Sound identities: Greg / Boots (gravel, alternating feet), Birds, Front Door, Kitchen Glass");
+    step!(4, "Sound identities: Greg / Boots (gravel, alternating feet), Birds, Front Door, Kitchen Glass");
     let gravel = find(&s.state, "boot gravel");
     let greg = s.edit("id", |st| {
         let id = add_identity(
@@ -133,7 +142,7 @@ pub fn run(dir: &Path) -> Result<()> {
         )
     })?;
 
-    step(5, "Live spotting with hotkeys / MIDI pads (simulated taps against picture)");
+    step!(5, "Live spotting with hotkeys / MIDI pads (simulated taps against picture)");
     let mut spot = LiveSpotter::new();
     let lane = |s: &Session, c: &str| s.state.find_lane(c).unwrap().id.clone();
     spot.bind(
@@ -257,7 +266,7 @@ pub fn run(dir: &Path) -> Result<()> {
     })?;
     println!("    {} markers across {} lanes", s.state.markers.len(), s.state.lanes.len());
 
-    step(6, "Build cue chart and populate placeholders");
+    step!(6, "Build cue chart and populate placeholders");
     let new = s.edit("cues", |st| markers_to_cues(st, None))?;
     let rep = s.edit("populate", |st| populate(st, &PopulateOptions::default()))?;
     println!("    {} cues · {} clips on {} tracks", new.len(), rep.clips_created, rep.tracks_created.len());
@@ -265,12 +274,12 @@ pub fn run(dir: &Path) -> Result<()> {
         println!("    ⚠ {}: {}", w.cue_code, w.message);
     }
 
-    step(7, "Scene 13 is a wooden kitchen floor: scene-local override for Greg's boots");
+    step!(7, "Scene 13 is a wooden kitchen floor: scene-local override for Greg's boots");
     let kitchen = s.state.cues.values().find(|c| c.description == "Greg crosses kitchen").unwrap().id.clone();
     let wood = find(&s.state, "shoe wood")[0].clone();
     s.edit("override", |st| editing::replace_cue_asset(st, &kitchen, &wood, ReplaceScope::IdentityInScene, false))?;
 
-    step(8, "Foley artist performs scene 14 steps on a pad (velocity, round-robin) — take 1");
+    step!(8, "Foley artist performs scene 14 steps on a pad (velocity, round-robin) — take 1");
     let road = s.state.cues.values().find(|c| c.description == "Greg walks to road").unwrap().id.clone();
     let track = s.state.clips_for_cue(&road)[0].track_id.clone();
     let mut pads = PadMap::default();
@@ -281,7 +290,7 @@ pub fn run(dir: &Path) -> Result<()> {
     }
     s.edit("perform", |st| rec.commit(st))?;
 
-    step(9, "Record a new door-handle take and drop it on one jiggle instance");
+    step!(9, "Record a new door-handle take and drop it on one jiggle instance");
     let take_wav = dir.join("Audio/RecordedFoley/door_handle_take01.wav");
     wav::write(&take_wav, &synth::handle_rattle(48_000, 7), wav::SampleFormat::Int24, None)?;
     let door_cue = s.state.cues.values().find(|c| c.description == "door handle jiggle").unwrap().id.clone();
@@ -302,7 +311,7 @@ pub fn run(dir: &Path) -> Result<()> {
         editing::use_take_for_clip(st, &inst, &take)
     })?;
 
-    step(10, "Composer score at 01:00:20:00 and AI timing assist (suggestions only)");
+    step!(10, "Composer score at 01:00:20:00 and AI timing assist (suggestions only)");
     let score_dir = dir.join("Audio/Imported/Score");
     std::fs::create_dir_all(&score_dir)?;
     let mut music = synth::room_tone(48_000, 10.0);
@@ -335,7 +344,7 @@ pub fn run(dir: &Path) -> Result<()> {
         Err(e) => println!("    AI assist skipped: {e}"),
     }
 
-    step(11, "Rough mix: Foley -2 dB with high-pass insert, scene summary");
+    step!(11, "Rough mix: Foley -2 dB with high-pass insert, scene summary");
     for tr in s.state.tracks.values_mut() {
         if tr.category == Category::Footsteps {
             tr.gain_db = -2.0;
@@ -349,7 +358,7 @@ pub fn run(dir: &Path) -> Result<()> {
     let act = report::active_at(&s.state, t("01:00:12:10"));
     println!("    active at 01:00:12:10: {}", act.iter().map(|a| a.code.clone()).collect::<Vec<_>>().join(", "));
 
-    step(12, "Export: Resolve/Fairlight package and Pro studio handoff (with 500 ms handles)");
+    step!(12, "Export: Resolve/Fairlight package and Pro studio handoff (with 500 ms handles)");
     let date = ids::date_from_unix(ids::now_unix());
     let root = dir.to_path_buf();
     let r1 = s.edit("export", |st| export::export(st, Some(&root), &ExportOptions::new(ExportProfile::Resolve, &date)))?;
@@ -366,9 +375,6 @@ pub fn run(dir: &Path) -> Result<()> {
             qa::count(&r.qa, qa::Severity::Warning)
         );
     }
-    println!(
-        "\nDone. Try:\n  vcsd info {0}\n  vcsd cues {0}\n  vcsd at {0} 01:00:12:10\n  open {0}/Exports/*/Reports/cue_inventory.pdf",
-        dir.display()
-    );
-    Ok(())
+    println!("Done: {}", dir.display());
+    Ok(log)
 }
