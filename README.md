@@ -61,6 +61,8 @@ On first launch, choose **Create demo project…** to get a fully spotted 3-scen
 | Drag in a lane / double-click a lane | New range / point marker |
 | Drag a clip / its left or right edge | Move / trim (audio stays in place; edits snap to frames) |
 | Drag the square handle at a clip's top corner | Fade in / fade out (double-click the handle to remove the fade) |
+| Track header **A** | Show/hide that track's Volume and Pan automation lanes |
+| Click an automation lane / drag a breakpoint / double-click it | Add (on the line: keeps its value) / move (Shift: value only) / delete |
 | Hold Alt while dragging | Disable frame snapping |
 | Shift-drag in the ruler | Loop range |
 
@@ -154,4 +156,5 @@ Linux, `crates/vcsd-engine/tests/devices.rs` creates virtual ALSA devices, so de
 playback and recording run through real ALSA streams without sound hardware.
 `ui/e2e/workflow.cjs` drives the UI end to end with Playwright against a running `vcsd serve`
 (live spotting while playing, cue building, populate, replace + undo, pad performance, export,
-detached mixer); `ui/e2e/handles.cjs` drags real trim and fade handles with the mouse.
+detached mixer); `ui/e2e/handles.cjs` and `ui/e2e/automation.cjs` drag real trim/fade handles and automation
+breakpoints with the mouse.

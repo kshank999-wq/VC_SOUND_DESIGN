@@ -306,3 +306,59 @@ fn trims_keep_fades_valid_and_respect_source_length() {
     assert_eq!((c.timeline_start, c.source_offset), (start, 0));
     assert!(s.edit("before source", |st| editing::trim_start(st, &clip.id, start - 1)).is_err());
 }
+
+#[test]
+fn automation_lanes_shape_volume_and_pan() {
+    let (mut s, root) = session("auto", "24", "01:00:00:00");
+    // constant 0.5 mono source so rendered values are easy to check
+    let src = root.join("Audio/Imported/const.wav");
+    wav::write(&src, &wav::AudioBuffer { sample_rate: 48_000, channels: 1, data: vec![0.5; 48_000 * 3] }, wav::SampleFormat::Float32, None)
+        .unwrap();
+    s.edit("imp", |st| {
+        library::import_wav(
+            st,
+            &src,
+            library::AssetMeta {
+                kind: AssetKind::Placeholder,
+                category: Some(Category::HardFx),
+                loopable: Some(false),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Range, "01:00:00:00", "01:00:02:00", "const", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let t = s.state.tracks.values().next().unwrap().id.clone();
+    let sr = 48_000i64;
+    let v0 = s.edit("a", |st| editing::set_automation(st, &t, AutomationParam::VolumeDb, 0, 0.0)).unwrap();
+    s.edit("a", |st| editing::set_automation(st, &t, AutomationParam::VolumeDb, sr, -20.0)).unwrap();
+    s.edit("a", |st| editing::set_automation(st, &t, AutomationParam::Pan, 0, -1.0)).unwrap();
+    s.edit("a", |st| editing::set_automation(st, &t, AutomationParam::Pan, sr, 1.0)).unwrap();
+    let m = Mixer::new(&s.state, RenderOptions::default());
+    let print = m.render_track_print(&t, 0, (2 * sr) as usize).unwrap();
+    let db = |v: f32| 20.0 * (v / 0.5).log10();
+    assert!(db(print.data[0]).abs() < 0.01);
+    assert!((db(print.data[(sr / 2) as usize]) + 10.0).abs() < 0.05, "interpolates in dB: {}", db(print.data[(sr / 2) as usize]));
+    assert!((db(print.data[(sr * 3 / 2) as usize]) + 20.0).abs() < 0.05, "holds the last value");
+    let st = m.render_track_stereo(&t, 0, (2 * sr) as usize).unwrap();
+    assert!(st.data[0] > 0.49 && st.data[1].abs() < 1e-6, "hard left at start");
+    let k = (sr * 3 / 2) as usize * 2;
+    assert!(st.data[k].abs() < 1e-6 && st.data[k + 1] > 0.04, "hard right after the sweep");
+    // values are clamped; -96 dB is silence
+    let low = s.edit("a", |st| editing::set_automation(st, &t, AutomationParam::VolumeDb, sr / 4, -500.0)).unwrap();
+    assert_eq!(s.state.automation[&low].value, -96.0);
+    let m = Mixer::new(&s.state, RenderOptions::default());
+    assert_eq!(m.render_track_print(&t, sr / 4, 1).unwrap().data[0], 0.0);
+    // moving onto another breakpoint replaces it; delete and clear
+    s.edit("mv", |st| editing::move_automation(st, &low, sr, -6.0)).unwrap();
+    let vol: Vec<&AutomationPoint> = s.state.automation.values().filter(|p| p.param == AutomationParam::VolumeDb).collect();
+    assert_eq!(vol.len(), 2, "no duplicate breakpoints at one sample");
+    s.edit("del", |st| editing::delete_automation(st, &v0)).unwrap();
+    assert_eq!(s.edit("clr", |st| editing::clear_automation(st, &t, Some(AutomationParam::Pan))).unwrap(), 2);
+    assert_eq!(s.state.automation.len(), 1);
+    s.undo().unwrap();
+    assert_eq!(s.state.automation.len(), 3, "undo restores the cleared lane");
+}

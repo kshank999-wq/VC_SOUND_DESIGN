@@ -227,20 +227,44 @@ pub struct Mixer<'a> {
     pub media_override: Option<&'a Path>,
 }
 
-fn automation_value(points: &[&AutomationPoint], s: i64, default: f32) -> f32 {
-    if points.is_empty() {
-        return default;
+/// Breakpoint lookup for monotonically increasing sample positions: linear
+/// interpolation between points, held flat before the first / after the last.
+/// Amortised O(1) per sample (the cursor only moves forward within a block).
+struct AutoCursor<'p> {
+    points: Vec<&'p AutomationPoint>,
+    i: usize,
+    default: f32,
+}
+
+impl<'p> AutoCursor<'p> {
+    fn new(mut points: Vec<&'p AutomationPoint>, default: f32) -> Self {
+        points.sort_by_key(|p| (p.sample, p.id.clone()));
+        Self { points, i: 0, default }
     }
-    if s <= points[0].sample {
-        return points[0].value;
+    fn is_empty(&self) -> bool {
+        self.points.is_empty()
     }
-    for w in points.windows(2) {
-        if s >= w[0].sample && s < w[1].sample {
-            let t = (s - w[0].sample) as f32 / (w[1].sample - w[0].sample) as f32;
-            return w[0].value + (w[1].value - w[0].value) * t;
+    fn at(&mut self, s: i64) -> f32 {
+        let p = &self.points;
+        if p.is_empty() {
+            return self.default;
         }
+        if s <= p[0].sample {
+            return p[0].value;
+        }
+        if s >= p[p.len() - 1].sample {
+            return p[p.len() - 1].value;
+        }
+        if self.i >= p.len() - 1 || p[self.i].sample > s {
+            self.i = 0;
+        }
+        while self.i + 1 < p.len() && p[self.i + 1].sample <= s {
+            self.i += 1;
+        }
+        let (a, b) = (p[self.i], p[self.i + 1]);
+        let t = (s - a.sample) as f32 / (b.sample - a.sample).max(1) as f32;
+        a.value + (b.value - a.value) * t
     }
-    points[points.len() - 1].value
 }
 
 impl<'a> Mixer<'a> {
@@ -427,9 +451,10 @@ impl<'a> Mixer<'a> {
             let st = dsp.entry(format!("t:{track_id}")).or_default();
             process_inserts(&t.inserts, st, &mut buf);
         }
-        let mut vol: Vec<&AutomationPoint> =
-            self.s.automation.values().filter(|p| p.track_id == track_id && p.param == AutomationParam::VolumeDb).collect();
-        vol.sort_by_key(|p| p.sample);
+        let mut vol = AutoCursor::new(
+            self.s.automation.values().filter(|p| p.track_id == track_id && p.param == AutomationParam::VolumeDb).collect(),
+            0.0,
+        );
         let ch = buf.channels as usize;
         let base = db_to_lin(t.gain_db);
         if vol.is_empty() {
@@ -438,7 +463,8 @@ impl<'a> Mixer<'a> {
             }
         } else {
             for f in 0..frames {
-                let g = base * db_to_lin(automation_value(&vol, start + f as i64, 0.0));
+                let db = vol.at(start + f as i64);
+                let g = if db <= -96.0 { 0.0 } else { base * db_to_lin(db) };
                 for c in 0..ch {
                     buf.data[f * ch + c] *= g;
                 }
@@ -462,12 +488,13 @@ impl<'a> Mixer<'a> {
         let t = self.s.track(track_id)?;
         let print = self.render_track_print(track_id, start, frames)?;
         let mut out = AudioBuffer::silent(self.s.project.sample_rate, 2, frames);
-        let mut pans: Vec<&AutomationPoint> =
-            self.s.automation.values().filter(|p| p.track_id == track_id && p.param == AutomationParam::Pan).collect();
-        pans.sort_by_key(|p| p.sample);
+        let mut pans = AutoCursor::new(
+            self.s.automation.values().filter(|p| p.track_id == track_id && p.param == AutomationParam::Pan).collect(),
+            t.pan,
+        );
         let ch = print.channels as usize;
         for f in 0..frames {
-            let pan = automation_value(&pans, start + f as i64, t.pan);
+            let pan = pans.at(start + f as i64);
             let (gl, gr) = pan_gains(pan);
             if ch == 1 {
                 let v = print.data[f];

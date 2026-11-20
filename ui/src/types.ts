@@ -82,6 +82,7 @@ export interface ProjectView {
   chart: ChartRow[];
   identities: Identity[];
   tracks: Track[];
+  automation?: { id: string; track_id: string; param: "volume_db" | "pan"; sample: number; value: number }[];
   buses: Bus[];
   clips: Clip[];
   assets: Asset[];

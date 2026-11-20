@@ -269,3 +269,9 @@ tr.missing td { color: #ff8a84; }
 .status .device-btn { cursor: pointer; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
 .status .device-btn:hover { color: var(--text); }
 .welcome-foot { margin-top: 16px; }
+
+/* automation lanes */
+:root { --auto-bg: #16191d; }
+.auto-head { display: flex; align-items: center; gap: 6px; padding: 0 6px 0 22px; border-bottom: 1px solid #23262b; background: #1a1d21; }
+.auto-head .auto-val { margin-left: auto; color: #cfe0ff; }
+button.tiny.has-auto:not(.on) { color: #ffd24a; }

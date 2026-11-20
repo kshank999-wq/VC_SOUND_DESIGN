@@ -243,8 +243,20 @@ pub fn delete_clip(s: &mut ProjectState, clip_id: &str) -> Result<()> {
     s.clips.remove(clip_id).map(|_| ()).ok_or_else(|| not_found("clip", clip_id))
 }
 
+/// Legal range for an automation value: volume is dB relative to the track
+/// fader (-96 dB is treated as silence), pan is -1 (L) .. +1 (R).
+pub fn clamp_automation(param: AutomationParam, v: f32) -> f32 {
+    let v = if v.is_finite() { v } else { 0.0 };
+    match param {
+        AutomationParam::VolumeDb => v.clamp(-96.0, 12.0),
+        AutomationParam::Pan => v.clamp(-1.0, 1.0),
+    }
+}
+
+/// Add a breakpoint (or update the one already at exactly `sample`).
 pub fn set_automation(s: &mut ProjectState, track_id: &str, param: AutomationParam, sample: i64, value: f32) -> Result<String> {
     s.track(track_id)?;
+    let value = clamp_automation(param, value);
     if let Some(p) = s.automation.values_mut().find(|p| p.track_id == track_id && p.param == param && p.sample == sample) {
         p.value = value;
         return Ok(p.id.clone());
@@ -252,6 +264,29 @@ pub fn set_automation(s: &mut ProjectState, track_id: &str, param: AutomationPar
     let id = new_id("aut");
     s.automation.insert(id.clone(), AutomationPoint { id: id.clone(), track_id: track_id.into(), param, sample, value });
     Ok(id)
+}
+
+/// Move a breakpoint in time and/or value. If it lands exactly on another
+/// breakpoint of the same lane, that one is replaced (no duplicates).
+pub fn move_automation(s: &mut ProjectState, id: &str, sample: i64, value: f32) -> Result<()> {
+    let p = s.automation.get(id).ok_or_else(|| not_found("automation point", id))?.clone();
+    s.automation.retain(|k, q| k == id || !(q.track_id == p.track_id && q.param == p.param && q.sample == sample));
+    let q = s.automation.get_mut(id).unwrap();
+    q.sample = sample;
+    q.value = clamp_automation(p.param, value);
+    Ok(())
+}
+
+pub fn delete_automation(s: &mut ProjectState, id: &str) -> Result<()> {
+    s.automation.remove(id).map(|_| ()).ok_or_else(|| not_found("automation point", id))
+}
+
+/// Remove all breakpoints of a track (one lane, or both when `param` is None).
+pub fn clear_automation(s: &mut ProjectState, track_id: &str, param: Option<AutomationParam>) -> Result<usize> {
+    s.track(track_id)?;
+    let before = s.automation.len();
+    s.automation.retain(|_, p| !(p.track_id == track_id && param.is_none_or(|x| p.param == x)));
+    Ok(before - s.automation.len())
 }
 
 // ---------------------------------------------------------------- takes

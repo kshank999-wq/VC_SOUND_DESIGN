@@ -4,6 +4,7 @@ import type { EngineHook } from "../store";
 import { catColor, catKey, type Clip, type Marker, type Selection, type Track } from "../types";
 import { frameAtSample, sampleAtFrame, snap, tcAt, type Rate } from "../tc";
 import { applyClipDrag, clipZone, type ClipEdit, type ClipZone } from "../clipEdit";
+import { formatValue, neutral, posToValue, valueAt, valueToPos, type AutoPoint, type Param } from "../automation";
 
 export interface Viewport {
   start: number; // first visible sample
@@ -16,7 +17,47 @@ const LANE = 24;
 const TRACK = 54;
 const HEAD_W = 230;
 
-type Hit = { x: number; y: number; w: number; h: number; kind: "clip" | "marker"; id: string };
+type Hit = { x: number; y: number; w: number; h: number; kind: "clip" | "marker" | "auto"; id: string };
+
+const AUTO = 56; // automation lane height
+const PARAMS: Param[] = ["volume_db", "pan"];
+const PARAM_LABEL: Record<Param, string> = { volume_db: "Volume", pan: "Pan" };
+
+type Row = { kind: "track"; t: Track; y: number; h: number } | { kind: "auto"; t: Track; param: Param; y: number; h: number };
+
+/** Track rows, each followed by its automation lanes when open (y relative to the first track). */
+function buildRows(tracks: Track[], open: Set<string>): Row[] {
+  const rows: Row[] = [];
+  let y = 0;
+  for (const t of tracks) {
+    rows.push({ kind: "track", t, y, h: TRACK });
+    y += TRACK;
+    if (open.has(t.id)) {
+      for (const param of PARAMS) {
+        rows.push({ kind: "auto", t, param, y, h: AUTO });
+        y += AUTO;
+      }
+    }
+  }
+  return rows;
+}
+
+const AUTO_KEY = "vcsd.automationLanes";
+function loadOpen(): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(AUTO_KEY) ?? "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Canvas y of a value inside an automation row whose top is `top`. */
+function autoY(param: Param, v: number, top: number) {
+  return top + 4 + (1 - valueToPos(param, v)) * (AUTO - 9);
+}
+function autoVal(param: Param, y: number, top: number) {
+  return posToValue(param, 1 - (y - top - 4) / (AUTO - 9));
+}
 
 const peakCache = new Map<string, { per: number; data: number[] } | "loading" | "error">();
 
@@ -42,7 +83,9 @@ interface Props {
 }
 
 interface Drag {
-  kind: "clip" | "marker" | "ruler" | "loop" | "newRange";
+  kind: "clip" | "marker" | "ruler" | "loop" | "newRange" | "auto";
+  autoPreview?: { sample: number; value: number };
+  autoTop?: number;
   zone?: ClipZone;
   id?: string;
   x0: number;
@@ -63,13 +106,27 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
   const hits = useRef<Hit[]>([]);
   const drag = useRef<Drag | null>(null);
   const hover = useRef<{ id: string; zone: ClipZone } | null>(null);
+  const [autoOpen, setAutoOpen] = useState<Set<string>>(loadOpen);
+  const toggleAuto = (id: string) =>
+    setAutoOpen((o) => {
+      const n = new Set(o);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      try {
+        localStorage.setItem(AUTO_KEY, JSON.stringify([...n]));
+      } catch {
+        /* storage unavailable */
+      }
+      return n;
+    });
   const [, force] = useState(0);
-  const stateRef = useRef({ view, tx, vp, sel, scrollY, size, rate, livePosition });
-  stateRef.current = { view, tx, vp, sel, scrollY, size, rate, livePosition };
-
   const lanes = view?.lanes ?? [];
   const tracks = view?.tracks ?? [];
-  const contentH = RULER + SCENES + lanes.length * LANE + tracks.length * TRACK + 40;
+  const rows = buildRows(tracks, autoOpen);
+  const rowsH = rows.reduce((a, r) => a + r.h, 0);
+  const contentH = RULER + SCENES + lanes.length * LANE + rowsH + 40;
+  const stateRef = useRef({ view, tx, vp, sel, scrollY, size, rate, livePosition, rows });
+  stateRef.current = { view, tx, vp, sel, scrollY, size, rate, livePosition, rows };
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -222,11 +279,12 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
       ctx.fillStyle = C("--sep");
       ctx.fillRect(0, y - 1, W, 2);
       const trackY = new Map<string, number>();
-      for (const t of view.tracks) {
-        trackY.set(t.id, y);
-        ctx.fillStyle = sel?.kind === "track" && sel.id === t.id ? C("--track-sel") : C("--track-bg");
-        ctx.fillRect(0, y, W, TRACK - 1);
-        y += TRACK;
+      const tracksTop = y;
+      for (const r of st.rows) {
+        if (r.kind !== "track") continue;
+        trackY.set(r.t.id, tracksTop + r.y);
+        ctx.fillStyle = sel?.kind === "track" && sel.id === r.t.id ? C("--track-sel") : C("--track-bg");
+        ctx.fillRect(0, tracksTop + r.y, W, TRACK - 1);
       }
       const clipsByTrack = view.clips;
       for (const c of clipsByTrack) {
@@ -354,6 +412,75 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
         ctx.globalAlpha = 1;
         newHits.push({ x: x0, y: ty + 3 - scrollY, w, h: TRACK - 7, kind: "clip", id: c.id });
       }
+      // automation lanes
+      const autoPts = (view.automation ?? []) as AutoPoint[];
+      for (const r of st.rows) {
+        if (r.kind !== "auto") continue;
+        const top = tracksTop + r.y;
+        if (top - scrollY > H || top + AUTO - scrollY < 0) continue;
+        ctx.fillStyle = C("--auto-bg");
+        ctx.fillRect(0, top, W, AUTO - 1);
+        const refV = r.param === "pan" ? 0 : 0;
+        ctx.fillStyle = "rgba(255,255,255,0.08)";
+        ctx.fillRect(0, Math.round(autoY(r.param, refV, top)), W, 1);
+        let pts = autoPts.filter((p) => p.track_id === r.t.id && p.param === r.param);
+        if (d?.kind === "auto" && d.autoPreview && pts.some((p) => p.id === d.id)) {
+          const pv = d.autoPreview;
+          pts = pts.filter((p) => p.id === d.id || p.sample !== pv.sample).map((p) => (p.id === d.id ? { ...p, sample: pv.sample, value: pv.value } : p));
+        }
+        pts.sort((a, b) => a.sample - b.sample);
+        const col = catColor(r.t.category);
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1.5;
+        if (!pts.length) {
+          ctx.setLineDash([3, 4]);
+          ctx.globalAlpha = 0.45;
+          const yy = autoY(r.param, neutral(r.param, r.t.pan), top);
+          ctx.beginPath();
+          ctx.moveTo(0, yy);
+          ctx.lineTo(W, yy);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 1;
+        } else {
+          ctx.beginPath();
+          ctx.moveTo(0, autoY(r.param, pts[0].value, top));
+          for (const p of pts) ctx.lineTo(X(p.sample), autoY(r.param, p.value, top));
+          ctx.lineTo(W, autoY(r.param, pts[pts.length - 1].value, top));
+          ctx.stroke();
+          ctx.globalAlpha = 0.12;
+          ctx.fillStyle = col;
+          ctx.lineTo(W, top + AUTO - 1);
+          ctx.lineTo(0, top + AUTO - 1);
+          ctx.closePath();
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          for (const p of pts) {
+            const px = X(p.sample);
+            if (px < -8 || px > W + 8) continue;
+            const py = autoY(r.param, p.value, top);
+            const active = d?.kind === "auto" && d.id === p.id;
+            ctx.fillStyle = active ? "#ffd24a" : "#f2f4f7";
+            ctx.beginPath();
+            ctx.arc(px, py, active ? 5 : 3.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "#111";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            newHits.push({ x: px - 6, y: py - 6 - scrollY, w: 12, h: 12, kind: "auto", id: p.id });
+          }
+        }
+        if (d?.kind === "auto" && d.autoPreview && d.autoTop === r.y) {
+          const label = `${formatValue(r.param, d.autoPreview.value)} @ ${tcAt(rate, d.autoPreview.sample)}`;
+          ctx.font = "11px var(--mono)";
+          const tw = ctx.measureText(label).width + 10;
+          const lx = Math.min(Math.max(2, X(d.autoPreview.sample) + 10), W - tw - 2);
+          ctx.fillStyle = "rgba(10,10,12,0.9)";
+          ctx.fillRect(lx, top + 2, tw, 16);
+          ctx.fillStyle = "#ffd24a";
+          ctx.fillText(label, lx + 5, top + 14);
+        }
+      }
       ctx.restore();
 
       // ---- fixed ruler + scene strip
@@ -424,6 +551,14 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
     const r = canvasRef.current!.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
+  /** Track/automation row under canvas y, with its top in canvas coordinates. */
+  const rowAt = (y: number) => {
+    const cy = y + scrollY - RULER - SCENES - lanes.length * LANE;
+    const r = rows.find((r) => cy >= r.y && cy < r.y + r.h);
+    return r ? { row: r, top: RULER + SCENES + lanes.length * LANE + r.y - scrollY } : null;
+  };
+  const autoPoints = (trackId: string, param: Param) => ((view?.automation ?? []) as AutoPoint[]).filter((p) => p.track_id === trackId && p.param === param);
+
   /** Topmost hit under a point; clips get a few px of grab slop past their
    *  edges so trim handles are easy to catch. */
   const SLOP = 4;
@@ -458,6 +593,25 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
         drag.current = { kind: "ruler", x0: x, s0: s, moved: false, delta: 0, cur: s };
         call("transport.locate", { sample: snapS(s) });
       }
+    } else if (hitAt(x, y, "auto") || rowAt(y)?.row.kind === "auto") {
+      const ra = rowAt(y)!;
+      const row = ra.row as Extract<Row, { kind: "auto" }>;
+      const ph = hitAt(x, y, "auto");
+      if (ph) {
+        drag.current = { kind: "auto", id: ph.id, x0: x, s0: s, moved: false, delta: 0, cur: s, autoTop: row.y };
+      } else {
+        // add a breakpoint: on the line keep its value, elsewhere take the pointer's
+        const pts = autoPoints(row.t.id, row.param);
+        const sample = e.altKey ? Math.round(s) : snapS(s);
+        const lineV = valueAt(pts, sample, neutral(row.param, row.t.pan));
+        const value = Math.abs(autoY(row.param, lineV, ra.top) - y) <= 4 ? lineV : autoVal(row.param, y, ra.top);
+        // listeners attach right away; the new point's id arrives asynchronously
+        const pending: Drag = { kind: "auto", id: "", x0: x, s0: s, moved: false, delta: 0, cur: s, autoTop: row.y };
+        drag.current = pending;
+        run<{ id: string }>("automation.set", { track_id: row.t.id, param: row.param === "pan" ? "pan" : "volume_db", sample, value }).then((r) => {
+          if (r) pending.id = r.id;
+        });
+      }
     } else {
       const h = hitAt(x, y);
       if (h) {
@@ -475,8 +629,8 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
         const lane = laneAt(y);
         if (lane) drag.current = { kind: "newRange", laneId: lane.id, x0: x, s0: snapS(s), moved: false, delta: 0, cur: snapS(s) };
         else {
-          const ti = Math.floor((y + scrollY - RULER - SCENES - lanes.length * LANE) / TRACK);
-          if (ti >= 0 && ti < tracks.length) setSel({ kind: "track", id: tracks[ti].id });
+          const ra = rowAt(y);
+          if (ra) setSel({ kind: "track", id: ra.row.t.id });
           else setSel(null);
         }
       }
@@ -495,6 +649,16 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
         const tgt = base + (cs - dd.s0);
         dd.delta = (ev.altKey ? Math.round(tgt) : snapS(tgt)) - base;
       }
+      if (dd.kind === "auto" && dd.moved && dd.id) {
+        const cur = stateRef.current;
+        const p = ((cur.view?.automation ?? []) as AutoPoint[]).find((q) => q.id === dd.id);
+        const row = cur.rows.find((r) => r.kind === "auto" && r.y === dd.autoTop) as Extract<Row, { kind: "auto" }> | undefined;
+        if (p && row) {
+          const top = RULER + SCENES + lanes.length * LANE + row.y - scrollY;
+          const sample = ev.shiftKey ? p.sample : Math.max(0, ev.altKey ? Math.round(cs) : snapS(cs));
+          dd.autoPreview = { sample, value: autoVal(row.param, localXY(ev).y, top) };
+        }
+      }
       if (dd.kind === "clip" && dd.moved) {
         const c = view.clips.find((c) => c.id === dd.id)!;
         const asset = view.assets.find((x) => x.id === c.asset_id);
@@ -511,6 +675,9 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
       drag.current = null;
       if (!dd) return;
       if (dd.kind === "loop" && !dd.moved) call("transport.loop", {});
+      if (dd.kind === "auto" && dd.moved && dd.id && dd.autoPreview) {
+        await run("automation.update", { id: dd.id, sample: dd.autoPreview.sample, value: dd.autoPreview.value });
+      }
       if (dd.kind === "clip" && dd.moved && dd.preview) {
         const c = view.clips.find((c) => c.id === dd.id)! as Clip;
         const pv = dd.preview;
@@ -543,6 +710,12 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
 
   const onDouble = async (e: React.MouseEvent) => {
     const { x, y } = localXY(e);
+    const ap = hitAt(x, y, "auto");
+    if (ap) {
+      await run("automation.delete", { id: ap.id });
+      return;
+    }
+    if (rowAt(y)?.row.kind === "auto") return;
     const ch = hitAt(x, y, "clip");
     if (ch && view) {
       const c = view.clips.find((c) => c.id === ch.id)!;
@@ -564,6 +737,16 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
   const onHover = (e: React.MouseEvent) => {
     if (drag.current || !view) return;
     const { x, y } = localXY(e);
+    if (hitAt(x, y, "auto")) {
+      hover.current = null;
+      if (canvasRef.current) canvasRef.current.style.cursor = "pointer";
+      return;
+    }
+    if (rowAt(y)?.row.kind === "auto") {
+      hover.current = null;
+      if (canvasRef.current) canvasRef.current.style.cursor = "copy";
+      return;
+    }
     const h = hitAt(x, y, "clip");
     let cursor = "crosshair";
     if (h) {
@@ -610,9 +793,14 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
               </div>
             );
           })}
-          {tracks.map((t) => (
-            <TrackHead key={t.id} t={t} eng={eng} selected={sel?.kind === "track" && sel.id === t.id} onSelect={() => setSel({ kind: "track", id: t.id })} />
-          ))}
+          {rows.map((r) =>
+            r.kind === "track" ? (
+              <TrackHead key={r.t.id} t={r.t} eng={eng} selected={sel?.kind === "track" && sel.id === r.t.id} onSelect={() => setSel({ kind: "track", id: r.t.id })}
+                autoOpen={autoOpen.has(r.t.id)} hasAuto={((view.automation ?? []) as AutoPoint[]).some((p) => p.track_id === r.t.id)} onToggleAuto={() => toggleAuto(r.t.id)} />
+            ) : (
+              <AutoHead key={r.t.id + r.param} t={r.t} param={r.param} eng={eng} points={autoPoints(r.t.id, r.param)} />
+            ),
+          )}
         </div>
       </div>
       <canvas ref={canvasRef} className="tl-canvas" onMouseDown={onDown} onDoubleClick={onDouble} onMouseMove={onHover} onMouseLeave={() => (hover.current = null)} />
@@ -625,7 +813,20 @@ function frameLabel(rate: Rate, vp: Viewport) {
   return f < 1 ? `${(1 / f).toFixed(1)} px/frame` : `${f.toFixed(1)} frames/px`;
 }
 
-function TrackHead({ t, eng, selected, onSelect }: { t: Track; eng: EngineHook; selected: boolean; onSelect: () => void }) {
+function AutoHead({ t, param, eng, points }: { t: Track; param: Param; eng: EngineHook; points: AutoPoint[] }) {
+  const v = valueAt(points, eng.livePosition(), neutral(param, t.pan));
+  return (
+    <div className="auto-head" style={{ height: AUTO }}>
+      <span className="small">{PARAM_LABEL[param]}{param === "volume_db" && <span className="muted"> (vs fader)</span>}</span>
+      <span className="mono small auto-val">{formatValue(param, v)}</span>
+      <span className="small muted">{points.length} pt</span>
+      <button className="tiny" disabled={!points.length} title={`Clear ${PARAM_LABEL[param].toLowerCase()} automation`}
+        onClick={() => confirm(`Remove all ${points.length} ${PARAM_LABEL[param].toLowerCase()} points on "${t.name}"?`) && eng.run("automation.clear", { track_id: t.id, param: param === "pan" ? "pan" : "volume_db" })}>×</button>
+    </div>
+  );
+}
+
+function TrackHead({ t, eng, selected, onSelect, autoOpen, hasAuto, onToggleAuto }: { t: Track; eng: EngineHook; selected: boolean; onSelect: () => void; autoOpen: boolean; hasAuto: boolean; onToggleAuto: () => void }) {
   const meter = eng.tx?.meters[t.id] ?? 0;
   const db = meter > 0 ? 20 * Math.log10(meter) : -90;
   const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
@@ -638,6 +839,7 @@ function TrackHead({ t, eng, selected, onSelect }: { t: Track; eng: EngineHook; 
         <button className={"tiny" + (t.mute ? " on-mute" : "")} title="Mute" onClick={() => upd({ mute: !t.mute })}>M</button>
         <button className={"tiny" + (t.solo ? " on-solo" : "")} title="Solo" onClick={() => upd({ solo: !t.solo })}>S</button>
         <button className={"tiny" + (t.armed ? " on-rec" : "")} title="Arm for recording" onClick={() => upd({ armed: !t.armed })}>●</button>
+        <button className={"tiny" + (autoOpen ? " on" : "") + (hasAuto ? " has-auto" : "")} title={(autoOpen ? "Hide" : "Show") + " automation lanes" + (hasAuto ? " (has automation)" : "")} onClick={onToggleAuto}>A</button>
       </div>
       <div className="th-row">
         <input

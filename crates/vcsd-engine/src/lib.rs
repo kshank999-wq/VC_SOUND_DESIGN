@@ -102,6 +102,13 @@ fn mode(m: &str) -> VariationMode {
         _ => VariationMode::RoundRobin,
     }
 }
+fn auto_param(a: &Value) -> AutomationParam {
+    if os(a, "param") == Some("pan") {
+        AutomationParam::Pan
+    } else {
+        AutomationParam::VolumeDb
+    }
+}
 fn today() -> String {
     ids::date_from_unix(ids::now_unix())
 }
@@ -820,17 +827,35 @@ impl Engine {
                 Ok(json!({}))
             }
             "automation.set" => {
-                let id = self.edit(g, "automation", |st| {
-                    let p = if os(a, "param") == Some("pan") { AutomationParam::Pan } else { AutomationParam::VolumeDb };
+                let id = self.edit(g, "add automation point", |st| {
                     editing::set_automation(
                         st,
                         s(a, "track_id").map_err(Error::Invalid)?,
-                        p,
+                        auto_param(a),
                         i(a, "sample").map_err(Error::Invalid)?,
                         of(a, "value").unwrap_or(0.0),
                     )
                 })?;
                 Ok(json!({"id": id}))
+            }
+            "automation.update" => {
+                self.edit(g, "move automation point", |st| {
+                    let id = s(a, "id").map_err(Error::Invalid)?;
+                    let p = st.automation.get(id).ok_or_else(|| Error::NotFound(id.into()))?.clone();
+                    editing::move_automation(st, id, oi(a, "sample").unwrap_or(p.sample), of(a, "value").unwrap_or(p.value))
+                })?;
+                Ok(json!({}))
+            }
+            "automation.delete" => {
+                self.edit(g, "delete automation point", |st| editing::delete_automation(st, s(a, "id").map_err(Error::Invalid)?))?;
+                Ok(json!({}))
+            }
+            "automation.clear" => {
+                let n = self.edit(g, "clear automation", |st| {
+                    let p = os(a, "param").map(|_| auto_param(a));
+                    editing::clear_automation(st, s(a, "track_id").map_err(Error::Invalid)?, p)
+                })?;
+                Ok(json!({"removed": n}))
             }
 
             // ------------------------------------------------ library
@@ -1395,6 +1420,7 @@ fn state_json(g: &Inner, eng: &Engine) -> ApiResult {
         "chart": report::cue_rows(st, None),
         "identities": st.identities.values().collect::<Vec<_>>(),
         "tracks": tracks,
+        "automation": st.automation.values().collect::<Vec<_>>(),
         "buses": buses,
         "clips": st.clips.values().collect::<Vec<_>>(),
         "assets": assets,
