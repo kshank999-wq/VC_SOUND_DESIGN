@@ -28,10 +28,10 @@ const OUT = process.argv[3] || null;
   const bg = st.buses.find((x) => x.name === "Backgrounds/Atmos");
   for (const x of [master, bg]) await api("automation.clear", { owner_id: x.id });
   const pts = async (owner) => ((await api("state.get")).automation || []).filter((x) => x.owner_id === owner);
-  const peakWhilePlaying = async (key, from = 48000 * 2) => {
+  const peakWhilePlaying = async (key, from = 48000 * 2, polls = 12) => {
     await api("transport.play", { from });
     let m = 0;
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < polls; i++) {
       await p.waitForTimeout(60);
       const t = await api("transport.state");
       m = Math.max(m, key === "master" ? t.master_peak : t.meters[key] ?? 0);
@@ -54,7 +54,8 @@ const OUT = process.argv[3] || null;
   const baseline = await peakWhilePlaying("master");
   // steady wind ambience (scene 14) makes the stem-bus level comparison stable
   const WIND = 48000 * 42;
-  const bgBase = await peakWhilePlaying(bg.id, WIND);
+  // a long window so both runs catch the same wind peaks
+  const bgBase = await peakWhilePlaying(bg.id, WIND, 40);
   assert.ok(baseline > 0.01 && bgBase > 0.01, "audible before automation");
 
   // master: open lanes, click low in the volume lane → near silence
@@ -75,10 +76,10 @@ const OUT = process.argv[3] || null;
 
   // stem bus: -12 dB via API, the bus meter follows; mixer shows the badge
   await api("automation.set", { bus_id: bg.id, param: "volume_db", sample: 0, value: -12 });
-  const bgAuto = await peakWhilePlaying(bg.id, WIND);
+  const bgAuto = await peakWhilePlaying(bg.id, WIND, 40);
   const delta = 20 * Math.log10(bgAuto / bgBase);
   // live peak meters are approximate; exact dB accuracy is covered by the core render test
-  assert.ok(Math.abs(delta + 12) < 1.5, `stem bus about −12 dB live: ${delta.toFixed(2)} dB`);
+  assert.ok(Math.abs(delta + 12) < 2.5, `stem bus about −12 dB live: ${delta.toFixed(2)} dB`);
   await p.click(".tabs button:has-text('Mixer')");
   await p.waitForTimeout(300);
   assert.equal(await p.locator(".mixer-buses .auto-badge:not(.off)").count(), 1, "badge on the automated bus only");

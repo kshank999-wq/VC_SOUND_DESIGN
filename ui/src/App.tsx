@@ -12,6 +12,7 @@ import { Mixer } from "./components/Mixer";
 import { Pads } from "./components/Pads";
 import { ImportDialog, Welcome, type ImportKind } from "./components/Dialogs";
 import { DevicesDialog } from "./components/Devices";
+import { UpdatesDialog, useUpdates } from "./components/Updates";
 import { getLayout, resetLayout, saveLayout } from "./layout";
 import { DEFAULTS, LIMITS } from "./layoutModel";
 
@@ -41,6 +42,8 @@ export function App() {
   const [perform, setPerform] = useState<string | null>(null);
   const [tcEdit, setTcEdit] = useState<string | null>(null);
   const [devices, setDevices] = useState(false);
+  const updates = useUpdates(eng);
+  const [showUpdates, setShowUpdates] = useState(false);
   const centerRef = useRef<HTMLDivElement>(null);
   const opened = useRef<string | null>(null);
 
@@ -163,6 +166,8 @@ export function App() {
               <div onClick={() => run("project.settings", { ai_enabled: !view.project.ai_enabled }, view.project.ai_enabled ? "AI assist off" : "Local AI assist on")}>{view.project.ai_enabled ? "✓ " : ""}Local AI timing assist</div>
               <div onClick={() => openMixerWindow()}>Open mixer window</div>
               <div onClick={resetWindowLayout}>Reset window layout</div>
+              {updates.enabled && <div onClick={() => setShowUpdates(true)}>Check for updates…{updates.phase === "available" ? " ●" : ""}</div>}
+              {updates.info && <div className="muted small" style={{ cursor: "default" }}>Version {updates.info.version}</div>}
               <div onClick={() => setDevices(true)}>Audio & MIDI devices…</div>
               <hr />
               <div onClick={() => run("project.close")}>Close project</div>
@@ -246,6 +251,10 @@ export function App() {
       </footer>
       <ImportDialog kind={imp} eng={eng} onClose={() => setImp(null)} />
       {devices && <DevicesDialog eng={eng} onClose={() => setDevices(false)} />}
+      {showUpdates && <UpdatesDialog u={updates} onClose={() => setShowUpdates(false)} />}
+      {updates.phase === "available" && !showUpdates && (
+        <button className="update-pill" onClick={() => setShowUpdates(true)}>Update {updates.update?.version} available</button>
+      )}
       <Toasts toasts={toasts} />
     </div>
   );

@@ -19,8 +19,11 @@ How the code maps onto them is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - **Core** (`crates/vcsd-core`): spec phases P0–P3, the P4 integration contracts and the P5
   AI-proposal pipeline. Every spec §20 acceptance scenario (22–31) is an automated test.
 
-**Not built yet:** AAF/Tier-2 interchange, plugin hosting (VST3/AU), signed installers and
-auto-update. See the [roadmap](docs/ARCHITECTURE.md#roadmap).
+- **Releases:** a tagged push builds macOS, Windows and Linux installers, signed when the
+  certificates are configured, with in-app auto-update. See [`RELEASING.md`](RELEASING.md).
+
+**Not built yet:** AAF/Tier-2 interchange and plugin hosting (VST3/AU). See the
+[roadmap](docs/ARCHITECTURE.md#roadmap).
 
 ## Desktop app
 
@@ -43,7 +46,8 @@ cargo run --release -p vcsd-app
 
 To open a project directly, pass its folder: `cargo run --release -p vcsd-app -- ~/Films/GravelRoad`.
 To produce an installer (.dmg/.app, .msi/.exe, .deb/.AppImage), run `npx tauri build` from
-`crates/vcsd-app` using the CLI installed in `ui/node_modules`.
+`crates/vcsd-app` using the CLI installed in `ui/node_modules`. Release builds (signing,
+auto-update) are described in [`RELEASING.md`](RELEASING.md).
 
 On first launch, choose **Create demo project…** to get a fully spotted 3-scene project.
 

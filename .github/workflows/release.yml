@@ -1,0 +1,135 @@
+name: Release
+# Builds installers for macOS (universal), Windows and Linux and attaches them to a
+# draft GitHub release. Push a tag that matches the repo version (see RELEASING.md):
+#   node scripts/bump-version.mjs 0.2.0 && git commit -am "v0.2.0" && git tag v0.2.0 && git push --tags
+# Every signing step is optional: without secrets you get working unsigned installers.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: windows-latest
+            args: ""
+            rust_targets: ""
+          - platform: ubuntu-22.04
+            args: ""
+            rust_targets: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libasound2-dev patchelf \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+
+      - name: UI dependencies
+        run: npm ci
+        working-directory: ui
+
+      - name: Tag matches repo version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: node scripts/check-version.mjs ${{ github.ref_name }}
+
+      # Secrets are exported only when set, so an empty secret never switches a
+      # signing path on with a blank value.
+      - name: Signing environment
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          put() { # name value (multi-line safe)
+            [ -n "$2" ] || return 0
+            d="EOF_$RANDOM$RANDOM"
+            { echo "$1<<$d"; echo "$2"; echo "$d"; } >> "$GITHUB_ENV"
+          }
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            for k in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do put "$k" "${!k}"; done
+          fi
+          put TAURI_SIGNING_PRIVATE_KEY "$TAURI_SIGNING_PRIVATE_KEY"
+          # an unencrypted key still needs the variable to exist
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" >> "$GITHUB_ENV"; fi
+
+      - name: Windows code-signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) { Write-Host "no WINDOWS_CERTIFICATE: installers will be unsigned"; exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $pw = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          Remove-Item $pfx
+          "WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Release config (updater, signing)
+        env:
+          TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+          VCSD_UPDATE_ENDPOINT: ${{ vars.VCSD_UPDATE_ENDPOINT }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: node scripts/release-config.mjs crates/vcsd-app/tauri.release.json
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: crates/vcsd-app
+          tauriScript: node ../../ui/node_modules/@tauri-apps/cli/tauri.js
+          args: ${{ matrix.args }} --config tauri.release.json
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: VC Sound Design ${{ github.ref_name }}
+          releaseBody: See the assets below. Signed builds verify automatically; unsigned builds need a Gatekeeper/SmartScreen bypass (see RELEASING.md).
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+
+      # manual runs (no tag) don't create a release; keep the installers as run artifacts
+      - name: Upload installers (manual run)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.platform }}
+          path: |
+            target/**/release/bundle/**/*.dmg
+            target/**/release/bundle/**/*.app.tar.gz*
+            target/**/release/bundle/**/*.msi*
+            target/**/release/bundle/**/*.exe*
+            target/**/release/bundle/**/*.deb
+            target/**/release/bundle/**/*.AppImage*
+          if-no-files-found: warn

@@ -106,3 +106,19 @@ export async function nativePick(opts: { directory: boolean; title: string; filt
   const r = await open({ directory: opts.directory, multiple: false, title: opts.title, filters: opts.filters });
   return typeof r === "string" ? r : null;
 }
+
+export interface BuildInfo {
+  version: string;
+  /** Built with an update signing key: in-app updates available. */
+  updater: boolean;
+}
+
+/** Version and update capability of the running app. */
+export async function buildInfo(): Promise<BuildInfo> {
+  if (isTauri) {
+    await loadTauri();
+    return (await tauriInvoke!("build_info", {})) as BuildInfo;
+  }
+  const info = await call<{ version: string }>("app.info");
+  return { version: info.version, updater: false };
+}

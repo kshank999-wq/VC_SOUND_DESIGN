@@ -13,6 +13,8 @@ export interface Layout {
   lowerTab?: "timeline" | "chart" | "mixer" | "qa";
   snap?: boolean;
   mixerOpen?: boolean;
+  /** Check for app updates at startup (desktop release builds). */
+  autoUpdateCheck?: boolean;
   projects?: Record<string, ProjectView>;
 }
 
@@ -39,6 +41,7 @@ export function sanitize(raw: unknown): Layout {
   if (typeof r.lowerTab === "string" && LOWER_TABS.includes(r.lowerTab)) out.lowerTab = r.lowerTab as Layout["lowerTab"];
   if (typeof r.snap === "boolean") out.snap = r.snap;
   if (typeof r.mixerOpen === "boolean") out.mixerOpen = r.mixerOpen;
+  if (typeof r.autoUpdateCheck === "boolean") out.autoUpdateCheck = r.autoUpdateCheck;
   if (r.projects && typeof r.projects === "object") {
     out.projects = {};
     for (const [k, v] of Object.entries(r.projects as Record<string, Record<string, unknown>>)) {

@@ -6,13 +6,29 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+/// Whether the updater plugin actually initialised in this run.
+struct Updates(AtomicBool);
+use tauri::Manager;
 use vcsd_engine::Engine;
 
 #[tauri::command]
 async fn api(engine: tauri::State<'_, Arc<Engine>>, cmd: String, args: serde_json::Value) -> Result<serde_json::Value, String> {
     let e = engine.inner().clone();
     tauri::async_runtime::spawn_blocking(move || e.call(&cmd, args)).await.map_err(|x| x.to_string())?
+}
+
+/// What this build can do, for the UI: version, and whether it was built with
+/// an update signing key (release builds) so in-app updates are available.
+#[tauri::command]
+fn build_info(app: tauri::AppHandle, updates: tauri::State<'_, Updates>) -> serde_json::Value {
+    serde_json::json!({
+        "version": app.package_info().version.to_string(),
+        "updater": updates.0.load(Ordering::Relaxed),
+        "identifier": app.config().identifier,
+    })
 }
 
 fn main() {
@@ -31,8 +47,24 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         // remembers size, position and maximised state of every window (main + mixer)
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            // Auto-update only in builds configured with an update public key
+            // (release builds via scripts/release-config.mjs). Dev builds stay
+            // fully functional without one.
+            // A broken update configuration must never stop the app from opening a
+            // project: log it and run without updates.
+            if app.config().plugins.0.contains_key("updater") {
+                match app.handle().plugin(tauri_plugin_updater::Builder::new().build()) {
+                    Ok(()) => app.state::<Updates>().0.store(true, Ordering::Relaxed),
+                    Err(e) => eprintln!("updates disabled: {e}"),
+                }
+            }
+            Ok(())
+        })
         .manage(engine)
-        .invoke_handler(tauri::generate_handler![api])
+        .manage(Updates(AtomicBool::new(false)))
+        .invoke_handler(tauri::generate_handler![api, build_info])
         .run(tauri::generate_context!())
         .expect("error while running VC Sound Design");
 }
