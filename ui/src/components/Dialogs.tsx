@@ -65,7 +65,7 @@ export function PathField({ value, onChange, directory, title, placeholder }: { 
   );
 }
 
-export function Welcome({ eng }: { eng: EngineHook }) {
+export function Welcome({ eng, onDevices }: { eng: EngineHook; onDevices: () => void }) {
   const [mode, setMode] = useState<"home" | "new" | "open" | "demo">("home");
   const [dir, setDir] = useState("");
   const [name, setName] = useState("My Film");
@@ -87,6 +87,7 @@ export function Welcome({ eng }: { eng: EngineHook }) {
             <button className="primary big" onClick={() => setMode("new")}>New project…</button>
             <button className="big" onClick={() => setMode("open")}>Open project…</button>
             <button className="big" onClick={() => { setMode("demo"); setDir((d) => d.replace(/\/?$/, "/") + "Gravel_Road_Demo"); }}>Create demo project…</button>
+            <div className="welcome-foot"><button className="link" onClick={onDevices}>Audio & MIDI devices…</button></div>
           </div>
         )}
         {mode === "new" && (

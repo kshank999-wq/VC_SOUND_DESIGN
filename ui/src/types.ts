@@ -105,6 +105,7 @@ export interface TransportState {
   output_latency: number;
   loop_range: [number, number] | null;
   previewing: boolean;
+  device_warning: string | null;
   version: number;
   recording: string | null;
   mode: "spot" | "perform";

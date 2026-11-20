@@ -258,3 +258,14 @@ tr.missing td { color: #ff8a84; }
 .fader::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 4px; margin-left: -2px; background: #0d0f11; border-radius: 2px; }
 .fader-zero { position: absolute; left: 2px; right: 2px; height: 1px; background: #5a616c; }
 .fader-thumb { position: absolute; left: 0; width: 22px; height: 14px; border-radius: 3px; background: linear-gradient(#cfd4db, #8d949e); border: 1px solid #1a1c20; box-shadow: 0 1px 3px #0008; }
+
+/* audio & midi preferences */
+.devices section { padding: 4px 0 8px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+.devices select { width: 100%; }
+.dev-row { display: flex; gap: 6px; align-items: center; }
+.dev-row select { flex: 1; }
+.led { width: 10px; height: 10px; border-radius: 50%; background: #2b2f35; border: 1px solid #444a53; flex: none; }
+.led.on { background: #6be36b; box-shadow: 0 0 8px #6be36b; }
+.status .device-btn { cursor: pointer; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+.status .device-btn:hover { color: var(--text); }
+.welcome-foot { margin-top: 16px; }

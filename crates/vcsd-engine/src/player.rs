@@ -10,7 +10,7 @@
 //! seek *epoch* and its timeline position, so stale audio is discarded after
 //! a locate and the heard position is known exactly (minus output latency).
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::*};
@@ -73,6 +73,10 @@ pub struct Shared {
     pub cache: SourceCache,
     /// Monotonic ms of the last locate/play (ring refill grace period).
     seek_ms: AtomicU64,
+    /// Requested output device (None = system default).
+    pub output_pref: Mutex<Option<String>>,
+    /// Why the requested device is not the one in use, if it isn't.
+    pub device_warning: Mutex<Option<String>>,
 }
 
 fn now_ms() -> u64 {
@@ -102,6 +106,7 @@ pub struct TransportState {
     pub output_latency: i64,
     pub loop_range: Option<(i64, i64)>,
     pub previewing: bool,
+    pub device_warning: Option<String>,
 }
 
 enum OutputCmd {
@@ -138,6 +143,8 @@ impl Player {
             shutdown: AtomicBool::new(false),
             cache: Arc::new(Mutex::new(HashMap::new())),
             seek_ms: AtomicU64::new(0),
+            output_pref: Mutex::new(None),
+            device_warning: Mutex::new(None),
         });
         let (prod, cons) = rtrb::RingBuffer::<Block>::new(RING_BLOCKS);
         let consumer = Arc::new(Mutex::new(Consumer { ring: cons, cur: None, idx: 0 }));
@@ -163,6 +170,13 @@ impl Player {
                 let _ = self.out_tx.send(OutputCmd::Open(r));
             }
         }
+    }
+
+    /// Switch output device (None = system default); takes effect immediately,
+    /// also while playing.
+    pub fn set_output_device(&self, name: Option<String>) {
+        *self.shared.output_pref.lock().unwrap() = name;
+        let _ = self.out_tx.send(OutputCmd::Open(self.shared.project_rate.load(SeqCst)));
     }
 
     pub fn clear_cache(&self) {
@@ -232,6 +246,7 @@ impl Player {
             output_latency: sh.output_latency.load(Relaxed),
             loop_range: (b > a).then_some((a, b)),
             previewing: sh.preview_active.load(Relaxed),
+            device_warning: sh.device_warning.lock().unwrap().clone(),
         }
     }
 }
@@ -465,9 +480,12 @@ fn null_device(sh: Arc<Shared>, consumer: Arc<Mutex<Consumer>>, run: Arc<AtomicB
 }
 
 fn open_device(sh: &Arc<Shared>, consumer: &Arc<Mutex<Consumer>>, rate: u32) -> Result<cpal::Stream, String> {
-    let host = cpal::default_host();
-    let dev = host.default_output_device().ok_or("no default output device")?;
-    let name = dev.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "output".into());
+    let pref = sh.output_pref.lock().unwrap().clone();
+    let (dev, warning) = crate::devices::find_output(pref.as_deref()).inspect_err(|e| {
+        *sh.device_warning.lock().unwrap() = pref.as_ref().map(|p| format!("'{p}' unavailable: {e}"));
+    })?;
+    *sh.device_warning.lock().unwrap() = warning;
+    let name = crate::devices::device_name(&dev);
     let mut chosen = None;
     if let Ok(cfgs) = dev.supported_output_configs() {
         let mut cands: Vec<_> = cfgs.collect();
@@ -485,6 +503,14 @@ fn open_device(sh: &Arc<Shared>, consumer: &Arc<Mutex<Consumer>>, rate: u32) -> 
         Some(c) => c,
         None => dev.default_output_config().map_err(|e| e.to_string())?,
     };
+    if cfg.sample_rate() != rate {
+        let w = format!("device runs at {} Hz; project is {rate} Hz (resampled for monitoring only)", cfg.sample_rate());
+        let mut dw = sh.device_warning.lock().unwrap();
+        *dw = Some(match dw.take() {
+            Some(x) => format!("{x}; {w}"),
+            None => w,
+        });
+    }
     sh.device_rate.store(cfg.sample_rate(), SeqCst);
     *sh.device_name.lock().unwrap() = format!("{name} ({} Hz, {} ch)", cfg.sample_rate(), cfg.channels());
     let stream = match cfg.sample_format() {

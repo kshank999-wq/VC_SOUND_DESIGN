@@ -61,6 +61,21 @@ On first launch, choose **Create demo project…** to get a fully spotted 3-scen
 | Drag in a lane / double-click a lane | New range / point marker |
 | Shift-drag in the ruler | Loop range |
 
+### Audio & MIDI devices
+
+Open **☰ → Audio & MIDI devices…** (or click the device name in the status bar):
+
+- **Output:** any connected device or *System default*. Switching takes effect immediately,
+  even during playback. If a saved device is unplugged, the app falls back to the default and
+  shows a ⚠ in the status bar. *Test tone* plays 1 kHz at −18 dBFS.
+- **Input:** the device used for Foley recording.
+- **MIDI input:** the controller used for live spotting and pad performance, with an activity
+  light and the last message received. The choice is remembered and reconnects at launch.
+
+These settings belong to the computer, not the project. They are saved in `prefs.json` under
+the user config folder (`~/.config/vc-sound-design`, `~/Library/Application Support/VC Sound
+Design`, or `%APPDATA%\VC Sound Design`; override with `VCSD_CONFIG_DIR`).
+
 ### Browser mode
 
 The same UI also runs in a web browser against a local engine, which is useful on a headless
@@ -131,7 +146,9 @@ cargo test --release
 npm --prefix ui test
 ```
 
-The visual-onset AI test needs `ffmpeg` on `PATH` and skips itself when it is missing.
+The visual-onset AI test needs `ffmpeg` on `PATH` and skips itself when it is missing. On
+Linux, `crates/vcsd-engine/tests/devices.rs` creates virtual ALSA devices, so device switching,
+playback and recording run through real ALSA streams without sound hardware.
 `ui/e2e/workflow.cjs` drives the UI end to end with Playwright against a running `vcsd serve`
 (live spotting while playing, cue building, populate, replace + undo, pad performance, export,
 detached mixer).

@@ -4,7 +4,7 @@
 //! first sample was captured, minus measured input latency.
 
 use crate::player::Shared;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering::*};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -34,27 +34,27 @@ impl Recording {
     }
 }
 
-pub fn input_devices() -> Vec<String> {
-    let host = cpal::default_host();
-    host.input_devices().map(|it| it.filter_map(|d| d.description().ok().map(|x| x.name().to_string())).collect()).unwrap_or_default()
-}
-
-pub fn start(sh: Arc<Shared>, rate: u32, cue_id: Option<String>, track_id: Option<String>) -> Result<Recording, String> {
+pub fn start(
+    sh: Arc<Shared>,
+    rate: u32,
+    device: Option<String>,
+    cue_id: Option<String>,
+    track_id: Option<String>,
+) -> Result<Recording, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = mpsc::channel::<Result<String, String>>();
     let stop2 = stop.clone();
     let handle = thread::Builder::new()
         .name("vcsd-record".into())
         .spawn(move || -> Result<Captured, String> {
-            let host = cpal::default_host();
-            let dev = match host.default_input_device() {
-                Some(d) => d,
-                None => {
-                    let _ = ready_tx.send(Err("no audio input device".into()));
-                    return Err("no audio input device".into());
+            let dev = match crate::devices::find_input(device.as_deref()) {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e.clone()));
+                    return Err(e);
                 }
             };
-            let name = dev.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "input".into());
+            let name = crate::devices::device_name(&dev);
             let cfg = dev
                 .supported_input_configs()
                 .ok()

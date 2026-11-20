@@ -7,6 +7,7 @@
 //! transports over that single entry point, so both behave identically.
 
 pub mod demo;
+pub mod devices;
 pub mod player;
 pub mod recorder;
 pub mod serve;
@@ -53,6 +54,11 @@ pub struct Engine {
     midi: Mutex<Option<midir::MidiInputConnection<()>>>,
     /// Set by the desktop shell when it runs the loopback media server.
     pub media_base: Mutex<Option<String>>,
+    prefs: Mutex<devices::Prefs>,
+    prefs_path: Option<PathBuf>,
+    midi_port: Mutex<Option<String>>,
+    midi_error: Mutex<Option<String>>,
+    midi_last: Mutex<Option<(Instant, Vec<u8>)>>,
 }
 
 // ---------------------------------------------------------------- arg helpers
@@ -127,8 +133,18 @@ fn bindings_file(root: &Path) -> PathBuf {
 }
 
 impl Engine {
+    /// Engine using the per-user preferences file (devices, MIDI port).
     pub fn new() -> Arc<Engine> {
-        Arc::new(Engine {
+        Self::with_prefs(Some(devices::default_prefs_path()))
+    }
+
+    /// Engine with an explicit preferences file (`None` = defaults, never saved).
+    pub fn with_prefs(prefs_path: Option<PathBuf>) -> Arc<Engine> {
+        let prefs = prefs_path.as_deref().map(devices::Prefs::load).unwrap_or_default();
+        let player = Player::start();
+        player.set_output_device(prefs.output_device.clone());
+        let midi_pref = prefs.midi_port.clone();
+        let e = Arc::new(Engine {
             inner: Mutex::new(Inner {
                 session: None,
                 version: 0,
@@ -139,10 +155,96 @@ impl Engine {
                 peaks: HashMap::new(),
                 log: vec![],
             }),
-            player: Player::start(),
+            player,
             recording: Mutex::new(None),
             midi: Mutex::new(None),
             media_base: Mutex::new(None),
+            prefs: Mutex::new(prefs),
+            prefs_path,
+            midi_port: Mutex::new(None),
+            midi_error: Mutex::new(None),
+            midi_last: Mutex::new(None),
+        });
+        if let Some(port) = midi_pref {
+            // a missing controller at startup is reported, not fatal
+            let _ = e.connect_midi(Some(&port));
+        }
+        e
+    }
+
+    /// Connect a MIDI input (first available when `port` is None). Must be
+    /// called without holding the inner lock: replacing a connection joins its
+    /// callback thread, which may be waiting on that lock.
+    fn connect_midi(self: &Arc<Self>, port: Option<&str>) -> std::result::Result<String, String> {
+        *self.midi.lock().unwrap() = None;
+        *self.midi_port.lock().unwrap() = None;
+        let r = (|| {
+            let input = midir::MidiInput::new("VC Sound Design").map_err(e)?;
+            let ports = input.ports();
+            let p = ports
+                .iter()
+                .find(|p| port.is_none_or(|w| input.port_name(p).map(|n| n == w).unwrap_or(false)))
+                .ok_or_else(|| match port {
+                    Some(w) => format!("MIDI input '{w}' is not connected"),
+                    None => "no MIDI inputs found".to_string(),
+                })?
+                .clone();
+            let name = input.port_name(&p).unwrap_or_default();
+            let me = self.clone();
+            let conn = input.connect(&p, "vcsd-in", move |_, msg, _| me.handle_midi(msg), ()).map_err(e)?;
+            Ok::<_, String>((name, conn))
+        })();
+        match r {
+            Ok((name, conn)) => {
+                *self.midi.lock().unwrap() = Some(conn);
+                *self.midi_port.lock().unwrap() = Some(name.clone());
+                *self.midi_error.lock().unwrap() = None;
+                Ok(name)
+            }
+            Err(err) => {
+                *self.midi_error.lock().unwrap() = Some(err.clone());
+                Err(err)
+            }
+        }
+    }
+
+    fn disconnect_midi(&self) {
+        *self.midi.lock().unwrap() = None;
+        *self.midi_port.lock().unwrap() = None;
+        *self.midi_error.lock().unwrap() = None;
+    }
+
+    fn save_prefs(&self) -> std::result::Result<(), String> {
+        match &self.prefs_path {
+            Some(p) => self.prefs.lock().unwrap().save(p),
+            None => Ok(()),
+        }
+    }
+
+    /// Devices, ports, saved choices and what is actually active.
+    pub fn devices_json(&self) -> Value {
+        let mut v = self.device_status_json();
+        v["outputs"] = json!(devices::outputs());
+        v["inputs"] = json!(devices::inputs());
+        v["midi_inputs"] = json!(devices::midi_ports());
+        v
+    }
+
+    /// Cheap status (no enumeration) for polling: saved prefs + active devices.
+    pub fn device_status_json(&self) -> Value {
+        let ts = self.player.state();
+        json!({
+            "prefs": *self.prefs.lock().unwrap(),
+            "active": {
+                "output": ts.device,
+                "output_rate": ts.device_rate,
+                "output_warning": ts.device_warning,
+                "output_latency": ts.output_latency,
+                "midi": *self.midi_port.lock().unwrap(),
+                "midi_error": *self.midi_error.lock().unwrap(),
+                "midi_last": self.midi_last.lock().unwrap().as_ref().map(|(t, b)| json!({"ms_ago": t.elapsed().as_millis() as u64, "bytes": b})),
+            },
+            "prefs_path": self.prefs_path.as_ref().map(|p| p.display().to_string()),
         })
     }
 
@@ -216,6 +318,7 @@ impl Engine {
 
     /// MIDI input callback target.
     pub fn handle_midi(self: &Arc<Self>, msg: &[u8]) {
+        *self.midi_last.lock().unwrap() = Some((Instant::now(), msg.to_vec()));
         let pos = self.heard();
         let mut g = self.inner.lock().unwrap();
         let changed = match g.mode {
@@ -241,8 +344,8 @@ impl Engine {
             "app.info" => Ok(json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "ffmpeg": std::process::Command::new("ffmpeg").arg("-version").output().is_ok(),
-                "input_devices": recorder::input_devices(),
-                "midi_inputs": midi_ports(),
+                "input_devices": devices::inputs().into_iter().map(|d| d.name).collect::<Vec<_>>(),
+                "midi_inputs": devices::midi_ports(),
                 "home": std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default(),
                 "open": g.session.as_ref().and_then(|s| s.root.as_ref()).map(|r| r.display().to_string()),
                 "media_base": self.media_base.lock().unwrap().clone(),
@@ -966,7 +1069,8 @@ impl Engine {
                 if self.recording.lock().unwrap().is_some() {
                     return Err("already recording".into());
                 }
-                let rec = recorder::start(self.player.shared.clone(), rate, cue, track)?;
+                let input = self.prefs.lock().unwrap().input_device.clone();
+                let rec = recorder::start(self.player.shared.clone(), rate, input, cue, track)?;
                 let dev = rec.device.clone();
                 *self.recording.lock().unwrap() = Some(rec);
                 let from = oi(a, "from").unwrap_or_else(|| self.player.position()) - oi(a, "preroll").unwrap_or(0);
@@ -1045,20 +1149,72 @@ impl Engine {
 
             // ------------------------------------------------ MIDI
             "midi.connect" => {
-                let want = os(a, "port").map(String::from);
-                *self.midi.lock().unwrap() = None;
-                let input = midir::MidiInput::new("VC Sound Design").map_err(e)?;
-                let ports = input.ports();
-                let port = ports
-                    .iter()
-                    .find(|p| want.as_ref().is_none_or(|w| input.port_name(p).map(|n| &n == w).unwrap_or(false)))
-                    .ok_or("MIDI input port not found")?
-                    .clone();
-                let name = input.port_name(&port).unwrap_or_default();
-                let me = self.clone();
-                let conn = input.connect(&port, "vcsd-in", move |_, msg, _| me.handle_midi(msg), ()).map_err(e)?;
-                *self.midi.lock().unwrap() = Some(conn);
+                drop(guard);
+                let name = self.connect_midi(os(a, "port"))?;
                 Ok(json!({"port": name}))
+            }
+            "midi.disconnect" => {
+                drop(guard);
+                self.disconnect_midi();
+                Ok(json!({}))
+            }
+            "devices.list" => Ok(self.devices_json()),
+            "devices.status" => Ok(self.device_status_json()),
+            "prefs.set" => {
+                // keys present in `args` change; null = system default / no MIDI
+                drop(guard);
+                let has = |k: &str| a.as_object().is_some_and(|o| o.contains_key(k));
+                let val = |k: &str| a.get(k).and_then(|v| v.as_str()).filter(|v| !v.is_empty()).map(String::from);
+                let mut midi_err = None;
+                if has("output_device") {
+                    let v = val("output_device");
+                    self.prefs.lock().unwrap().output_device = v.clone();
+                    self.player.set_output_device(v);
+                }
+                if has("input_device") {
+                    let v = val("input_device");
+                    if let Some(n) = &v {
+                        if !devices::inputs().iter().any(|d| &d.name == n) {
+                            return Err(format!("audio input '{n}' is not connected"));
+                        }
+                    }
+                    self.prefs.lock().unwrap().input_device = v;
+                }
+                if has("midi_port") {
+                    let v = val("midi_port");
+                    match &v {
+                        Some(p) => {
+                            if let Err(x) = self.connect_midi(Some(p)) {
+                                midi_err = Some(x);
+                            }
+                        }
+                        None => self.disconnect_midi(),
+                    }
+                    // remember the choice even if the controller is unplugged right now
+                    self.prefs.lock().unwrap().midi_port = v;
+                }
+                self.save_prefs()?;
+                std::thread::sleep(std::time::Duration::from_millis(60)); // let the output reopen
+                let mut out = self.devices_json();
+                if let Some(x) = midi_err {
+                    out["error"] = json!(x);
+                }
+                Ok(out)
+            }
+            "devices.test_tone" => {
+                // 1 kHz at -18 dBFS for 0.6 s with short ramps, on the current output
+                let sr = self.player.shared.project_rate.load(std::sync::atomic::Ordering::Relaxed).max(8000);
+                let n = (sr as f32 * 0.6) as usize;
+                let mut data = Vec::with_capacity(n * 2);
+                let amp = 10f32.powf(-18.0 / 20.0);
+                for k in 0..n {
+                    let env = (k.min(n - 1 - k) as f32 / (sr as f32 * 0.01)).min(1.0);
+                    let v = (2.0 * std::f32::consts::PI * 1000.0 * k as f32 / sr as f32).sin() * amp * env;
+                    data.push(v);
+                    data.push(v);
+                }
+                self.player.preview(Some(Arc::new(wav::AudioBuffer { sample_rate: sr, channels: 2, data })));
+                Ok(json!({}))
             }
             "midi.message" => {
                 // for on-screen pads / testing: inject a raw MIDI message
@@ -1159,12 +1315,6 @@ impl Engine {
             || sess.state.assets.values().any(|x| x.path == ps)
             || sess.root.as_ref().is_some_and(|r| std::fs::canonicalize(r).map(|r| p.starts_with(r)).unwrap_or(false))
     }
-}
-
-fn midi_ports() -> Vec<String> {
-    midir::MidiInput::new("VC Sound Design probe")
-        .map(|m| m.ports().iter().filter_map(|p| m.port_name(p).ok()).collect())
-        .unwrap_or_default()
 }
 
 fn asset_json(x: &Asset) -> Value {

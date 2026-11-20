@@ -11,6 +11,7 @@ import { CueChart, QaExport } from "./components/Chart";
 import { Mixer } from "./components/Mixer";
 import { Pads } from "./components/Pads";
 import { ImportDialog, Welcome, type ImportKind } from "./components/Dialogs";
+import { DevicesDialog } from "./components/Devices";
 
 export function App() {
   const eng = useEngine();
@@ -25,6 +26,7 @@ export function App() {
   const [imp, setImp] = useState<ImportKind>(null);
   const [perform, setPerform] = useState<string | null>(null);
   const [tcEdit, setTcEdit] = useState<string | null>(null);
+  const [devices, setDevices] = useState(false);
   const centerRef = useRef<HTMLDivElement>(null);
   const opened = useRef<string | null>(null);
 
@@ -97,7 +99,14 @@ export function App() {
   }, [view, rate, run, sel, spotMode, perform, tx?.open_spots]);
 
   if (!view) return <div className="boot">Connecting to engine…</div>;
-  if (!view.open || !rate) return (<><Welcome eng={eng} /><Toasts toasts={toasts} /></>);
+  if (!view.open || !rate)
+    return (
+      <>
+        <Welcome eng={eng} onDevices={() => setDevices(true)} />
+        {devices && <DevicesDialog eng={eng} onClose={() => setDevices(false)} />}
+        <Toasts toasts={toasts} />
+      </>
+    );
 
   const pos = tx?.position ?? 0;
   const db = (tx?.master_peak ?? 0) > 0 ? 20 * Math.log10(tx!.master_peak) : -90;
@@ -117,6 +126,7 @@ export function App() {
               <hr />
               <div onClick={() => run("project.settings", { ai_enabled: !view.project.ai_enabled }, view.project.ai_enabled ? "AI assist off" : "Local AI assist on")}>{view.project.ai_enabled ? "✓ " : ""}Local AI timing assist</div>
               <div onClick={() => openMixerWindow()}>Open mixer window</div>
+              <div onClick={() => setDevices(true)}>Audio & MIDI devices…</div>
               <hr />
               <div onClick={() => run("project.close")}>Close project</div>
             </div>
@@ -174,7 +184,7 @@ export function App() {
       <aside className="right"><Inspector eng={eng} sel={sel} setSel={setSel} libSel={libSel} onPerform={(id) => setPerform(id)} /></aside>
 
       <footer className="status">
-        <span title="Audio device">🔈 {tx?.device}</span>
+        <span className={"device-btn" + (tx?.device_warning ? " warn" : "")} title={(tx?.device_warning ?? "") + " — click for Audio & MIDI"} onClick={() => setDevices(true)}>🔈 {tx?.device}{tx?.device_warning ? " ⚠" : ""}</span>
         <span>DSP {(Math.min(9.99, tx?.load ?? 0) * 100).toFixed(0)}%</span>
         <span className={(tx?.dropouts ?? 0) > 0 ? "warn" : ""}>dropouts {tx?.dropouts ?? 0}</span>
         <span>latency {rate ? ((tx?.output_latency ?? 0) / rate.sr * 1000).toFixed(1) : 0} ms</span>
@@ -184,6 +194,7 @@ export function App() {
         <span className="muted mono">{view.root}</span>
       </footer>
       <ImportDialog kind={imp} eng={eng} onClose={() => setImp(null)} />
+      {devices && <DevicesDialog eng={eng} onClose={() => setDevices(false)} />}
       <Toasts toasts={toasts} />
     </div>
   );

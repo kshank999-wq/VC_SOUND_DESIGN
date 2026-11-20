@@ -38,7 +38,7 @@ fn call(e: &Arc<Engine>, cmd: &str, a: Value) -> Value {
 
 #[test]
 fn transport_runs_in_realtime_and_spotting_uses_heard_position() {
-    let e = Engine::new();
+    let e = Engine::with_prefs(None);
     call(&e, "project.open", json!({"dir": copy_demo()}));
     let st = call(&e, "state.get", json!({}));
     assert!(st["cues"].as_array().unwrap().len() >= 9);
@@ -74,7 +74,7 @@ fn transport_runs_in_realtime_and_spotting_uses_heard_position() {
 
 #[test]
 fn perform_record_and_errors() {
-    let e = Engine::new();
+    let e = Engine::with_prefs(None);
     call(&e, "project.open", json!({"dir": copy_demo()}));
     let st = call(&e, "state.get", json!({}));
     let cue =
@@ -118,7 +118,7 @@ fn http(port: u16, req: &str) -> (String, Vec<u8>) {
 
 #[test]
 fn browser_mode_server_api_and_media_ranges() {
-    let e = Engine::new();
+    let e = Engine::with_prefs(None);
     call(&e, "project.open", json!({"dir": copy_demo()}));
     let pic = call(&e, "state.get", json!({}))["picture"]["path"].as_str().unwrap().to_string();
     let ui = tmp("ui");
