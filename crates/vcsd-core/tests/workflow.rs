@@ -275,3 +275,34 @@ fn visual_onset_assistant_finds_flash_frame() {
     let again = s.edit("ai", |x| ai::run(x, &ai::VisualOnsetAssistant::default(), &cue)).unwrap();
     assert_eq!(again, p);
 }
+
+#[test]
+fn trims_keep_fades_valid_and_respect_source_length() {
+    let (mut s, _r) = session("trim", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    let cue = s.edit("c", |st| markers_to_cues(st, None)).unwrap()[0].clone();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let clip = s.state.clips_for_cue(&cue)[0].clone();
+    let full = editing::source_len(&s.state, &clip).unwrap();
+    assert_eq!(clip.length, full, "point cue places the whole one-shot");
+    s.edit("fades", |st| editing::set_fades(st, &clip.id, 4800, 9600)).unwrap();
+    // head trim keeps audio in place and shrinks fades that no longer fit
+    let start = clip.timeline_start;
+    s.edit("trim head", |st| editing::trim_start(st, &clip.id, start + full - 6000)).unwrap();
+    let c = &s.state.clips[&clip.id];
+    assert_eq!((c.length, c.source_offset), (6000, full - 6000));
+    assert!(c.fade_in + c.fade_out <= c.length);
+    // one-shot tail cannot run past the source; trimming shorter is fine
+    assert!(s.edit("too long", |st| editing::trim_end(st, &clip.id, 6001)).is_err());
+    s.edit("tail", |st| editing::trim_end(st, &clip.id, 1000)).unwrap();
+    let c = &s.state.clips[&clip.id];
+    assert_eq!(c.length, 1000);
+    assert!(c.fade_in + c.fade_out <= 1000, "{} + {}", c.fade_in, c.fade_out);
+    // pulling the head back restores audio (non-destructive)
+    s.edit("restore head", |st| editing::trim_start(st, &clip.id, start)).unwrap();
+    let c = &s.state.clips[&clip.id];
+    assert_eq!((c.timeline_start, c.source_offset), (start, 0));
+    assert!(s.edit("before source", |st| editing::trim_start(st, &clip.id, start - 1)).is_err());
+}

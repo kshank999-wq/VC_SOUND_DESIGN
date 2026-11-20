@@ -3,6 +3,7 @@ import { call } from "../api";
 import type { EngineHook } from "../store";
 import { catColor, catKey, type Clip, type Marker, type Selection, type Track } from "../types";
 import { frameAtSample, sampleAtFrame, snap, tcAt, type Rate } from "../tc";
+import { applyClipDrag, clipZone, type ClipEdit, type ClipZone } from "../clipEdit";
 
 export interface Viewport {
   start: number; // first visible sample
@@ -42,6 +43,7 @@ interface Props {
 
 interface Drag {
   kind: "clip" | "marker" | "ruler" | "loop" | "newRange";
+  zone?: ClipZone;
   id?: string;
   x0: number;
   s0: number;
@@ -49,6 +51,7 @@ interface Drag {
   moved: boolean;
   delta: number;
   cur: number;
+  preview?: ClipEdit;
 }
 
 export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
@@ -59,6 +62,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
   const [size, setSize] = useState({ w: 800, h: 300 });
   const hits = useRef<Hit[]>([]);
   const drag = useRef<Drag | null>(null);
+  const hover = useRef<{ id: string; zone: ClipZone } | null>(null);
   const [, force] = useState(0);
   const stateRef = useRef({ view, tx, vp, sel, scrollY, size, rate, livePosition });
   stateRef.current = { view, tx, vp, sel, scrollY, size, rate, livePosition };
@@ -228,9 +232,10 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
       for (const c of clipsByTrack) {
         const ty = trackY.get(c.track_id);
         if (ty === undefined) continue;
-        const dx = d?.kind === "clip" && d.id === c.id ? d.delta : 0;
-        const a = c.timeline_start + dx;
-        const b = a + c.length;
+        const pv = d?.kind === "clip" && d.id === c.id && d.preview ? d.preview : null;
+        const geo = pv ?? c;
+        const a = geo.timeline_start;
+        const b = a + geo.length;
         if (b < vp.start || a > end) continue;
         const track = view.tracks.find((t) => t.id === c.track_id) as Track;
         const x0 = X(a);
@@ -252,9 +257,9 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
           const nb = pk.data.length / 2;
           const x1 = Math.min(w, W - x0 + 2);
           for (let px = Math.max(0, -x0); px < x1; px += 1) {
-            const sp = c.source_offset + px * vp.spp;
+            const sp = geo.source_offset + px * vp.spp;
             const srcLen = nb * pk.per;
-            let sidx = c.fill === "loop" && srcLen > 0 ? c.source_offset + ((px * vp.spp) % Math.max(1, srcLen - c.source_offset)) : sp;
+            let sidx = c.fill === "loop" && srcLen > 0 ? geo.source_offset + ((px * vp.spp) % Math.max(1, srcLen - geo.source_offset)) : sp;
             if (sidx >= srcLen) break;
             const i0 = Math.floor(sidx / pk.per);
             const i1 = Math.max(i0 + 1, Math.floor((sidx + vp.spp) / pk.per));
@@ -267,20 +272,66 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
             ctx.fillRect(x0 + px, mid - (hi / 127) * amp * g, 1, Math.max(1, ((hi - lo) / 127) * amp * g));
           }
         }
-        // fades
-        ctx.strokeStyle = "rgba(255,255,255,0.7)";
+        // fades (shaded curve) and handles
+        const top = ty + 3, bot = ty + TRACK - 4;
+        ctx.strokeStyle = "rgba(255,255,255,0.75)";
+        ctx.fillStyle = "rgba(0,0,0,0.28)";
         ctx.lineWidth = 1;
-        if (c.fade_in > 0) {
+        if (geo.fade_in > 0) {
+          const fx = X(a + geo.fade_in);
           ctx.beginPath();
-          ctx.moveTo(x0, ty + TRACK - 4);
-          ctx.lineTo(X(a + c.fade_in), ty + 3);
+          ctx.moveTo(x0, bot);
+          ctx.quadraticCurveTo(x0 + (fx - x0) * 0.25, top, fx, top);
+          ctx.lineTo(x0, top);
+          ctx.closePath();
+          ctx.fill();
+          ctx.beginPath();
+          ctx.moveTo(x0, bot);
+          ctx.quadraticCurveTo(x0 + (fx - x0) * 0.25, top, fx, top);
           ctx.stroke();
         }
-        if (c.fade_out > 0) {
+        if (geo.fade_out > 0) {
+          const fx = X(b - geo.fade_out);
+          const x1 = X(b);
           ctx.beginPath();
-          ctx.moveTo(X(b - c.fade_out), ty + 3);
-          ctx.lineTo(X(b), ty + TRACK - 4);
+          ctx.moveTo(fx, top);
+          ctx.quadraticCurveTo(x1 - (x1 - fx) * 0.25, top, x1, bot);
+          ctx.lineTo(x1, top);
+          ctx.closePath();
+          ctx.fill();
+          ctx.beginPath();
+          ctx.moveTo(fx, top);
+          ctx.quadraticCurveTo(x1 - (x1 - fx) * 0.25, top, x1, bot);
           ctx.stroke();
+        }
+        const hv = hover.current?.id === c.id ? hover.current.zone : null;
+        const active = pv ? d!.zone : hv;
+        if (w > 14 && (hv || pv || (sel?.kind === "clip" && sel.id === c.id))) {
+          const handle = (hx: number, on: boolean) => {
+            ctx.fillStyle = on ? "#ffd24a" : "rgba(255,255,255,0.85)";
+            ctx.fillRect(hx - 3.5, top, 7, 7);
+          };
+          handle(X(a + geo.fade_in), active === "fadeIn");
+          handle(X(b - geo.fade_out), active === "fadeOut");
+        }
+        if (active === "trimL" || active === "trimR") {
+          ctx.fillStyle = "#ffd24a";
+          ctx.fillRect(active === "trimL" ? x0 : x0 + w - 3, top, 3, bot - top);
+        }
+        if (pv && d!.zone !== "move") {
+          const ms = (n: number) => `${Math.round((n / rate.sr) * 1000)} ms`;
+          const label =
+            d!.zone === "fadeIn" ? `fade in ${ms(pv.fade_in)}` :
+            d!.zone === "fadeOut" ? `fade out ${ms(pv.fade_out)}` :
+            d!.zone === "trimL" ? `start ${tcAt(rate, pv.timeline_start)} · ${(pv.length / rate.sr).toFixed(2)}s` :
+            `end ${tcAt(rate, pv.timeline_start + pv.length)} · ${(pv.length / rate.sr).toFixed(2)}s`;
+          ctx.font = "11px var(--mono)";
+          const tw = ctx.measureText(label).width + 10;
+          const lx = Math.min(Math.max(2, X(d!.cur) + 10), W - tw - 2);
+          ctx.fillStyle = "rgba(10,10,12,0.9)";
+          ctx.fillRect(lx, ty - 16, tw, 16);
+          ctx.fillStyle = "#ffd24a";
+          ctx.fillText(label, lx + 5, ty - 4);
         }
         if (selected) {
           ctx.strokeStyle = C("--sel");
@@ -362,6 +413,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
       ctx.lineTo(ph + 0.5, 8);
       ctx.fill();
       hits.current = newHits;
+      (window as unknown as { __vcsdHits: Hit[] }).__vcsdHits = newHits; // for UI tests
     };
     draw();
     return () => cancelAnimationFrame(raf);
@@ -371,6 +423,24 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
   const localXY = (e: React.MouseEvent | MouseEvent) => {
     const r = canvasRef.current!.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+  /** Topmost hit under a point; clips get a few px of grab slop past their
+   *  edges so trim handles are easy to catch. */
+  const SLOP = 4;
+  const hitAt = (x: number, y: number, kind?: Hit["kind"]) => {
+    const under = [...hits.current].reverse().filter((h) => {
+      const pad = h.kind === "clip" ? SLOP : 0;
+      return (!kind || h.kind === kind) && x >= h.x - pad && x <= h.x + h.w + pad && y >= h.y && y <= h.y + h.h;
+    });
+    // with overlapping clips: fade handles beat trim edges, which beat bodies
+    const zoneOf = (h: Hit) => {
+      const c = h.kind === "clip" ? view?.clips.find((c) => c.id === h.id) : undefined;
+      return c ? clipZone(h, c, x, y, vp.spp) : "move";
+    };
+    const rank = (z: ClipZone) => (z === "fadeIn" || z === "fadeOut" ? 0 : z === "move" ? 2 : 1);
+    let best = under[0];
+    for (const h of under) if (rank(zoneOf(h)) < rank(zoneOf(best))) best = h;
+    return best;
   };
   const laneAt = (y: number) => {
     const cy = y + scrollY - RULER - SCENES;
@@ -389,16 +459,18 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
         call("transport.locate", { sample: snapS(s) });
       }
     } else {
-      const h = [...hits.current].reverse().find((h) => x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h);
+      const h = hitAt(x, y);
       if (h) {
+        let zone: ClipZone | undefined;
         if (h.kind === "clip") {
           const c = view.clips.find((c) => c.id === h.id)!;
+          zone = clipZone(h, c, x, y, vp.spp);
           setSel({ kind: "clip", id: c.id });
         } else {
           const m = view.markers.find((m) => m.id === h.id)!;
           setSel(m.cue_id ? { kind: "cue", id: m.cue_id } : { kind: "marker", id: m.id });
         }
-        drag.current = { kind: h.kind, id: h.id, x0: x, s0: s, moved: false, delta: 0, cur: s };
+        drag.current = { kind: h.kind, zone, id: h.id, x0: x, s0: s, moved: false, delta: 0, cur: s };
       } else {
         const lane = laneAt(y);
         if (lane) drag.current = { kind: "newRange", laneId: lane.id, x0: x, s0: snapS(s), moved: false, delta: 0, cur: snapS(s) };
@@ -415,11 +487,19 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
       const p = localXY(ev);
       const cs = sOf(p.x);
       if (Math.abs(p.x - dd.x0) > 3) dd.moved = true;
-      dd.cur = dd.kind === "ruler" ? cs : snapS(cs);
+      const fade = dd.zone === "fadeIn" || dd.zone === "fadeOut";
+      dd.cur = dd.kind === "ruler" || fade || ev.altKey ? Math.round(cs) : snapS(cs);
       if (dd.kind === "ruler") call("transport.locate", { sample: snapS(cs) });
       if (dd.kind === "clip" || dd.kind === "marker") {
         const base = dd.kind === "clip" ? view.clips.find((c) => c.id === dd.id)!.timeline_start : view.markers.find((m) => m.id === dd.id)!.start_sample;
-        dd.delta = snapS(base + (cs - dd.s0)) - base;
+        const tgt = base + (cs - dd.s0);
+        dd.delta = (ev.altKey ? Math.round(tgt) : snapS(tgt)) - base;
+      }
+      if (dd.kind === "clip" && dd.moved) {
+        const c = view.clips.find((c) => c.id === dd.id)!;
+        const asset = view.assets.find((x) => x.id === c.asset_id);
+        const srcLen = asset ? Math.floor((asset.length * rate.sr) / asset.sample_rate) : c.length;
+        dd.preview = applyClipDrag(c, dd.zone ?? "move", dd.cur, dd.delta, srcLen);
       }
       if (dd.kind === "loop" && dd.moved) call("transport.loop", { start: Math.min(dd.s0, dd.cur), end: Math.max(dd.s0, dd.cur) });
       force((n) => n + 1);
@@ -431,9 +511,15 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
       drag.current = null;
       if (!dd) return;
       if (dd.kind === "loop" && !dd.moved) call("transport.loop", {});
-      if (dd.kind === "clip" && dd.moved && dd.delta !== 0) {
+      if (dd.kind === "clip" && dd.moved && dd.preview) {
         const c = view.clips.find((c) => c.id === dd.id)! as Clip;
-        await run("clip.update", { id: c.id, timeline_start: c.timeline_start + dd.delta });
+        const pv = dd.preview;
+        const z = dd.zone ?? "move";
+        if (z === "move" && pv.timeline_start !== c.timeline_start) await run("clip.update", { id: c.id, timeline_start: pv.timeline_start });
+        if (z === "trimL" && pv.timeline_start !== c.timeline_start) await run("clip.update", { id: c.id, trim_start: pv.timeline_start });
+        if (z === "trimR" && pv.length !== c.length) await run("clip.update", { id: c.id, length: pv.length });
+        if (z === "fadeIn" && pv.fade_in !== c.fade_in) await run("clip.update", { id: c.id, fade_in: pv.fade_in });
+        if (z === "fadeOut" && pv.fade_out !== c.fade_out) await run("clip.update", { id: c.id, fade_out: pv.fade_out });
       }
       if (dd.kind === "marker" && dd.moved && dd.delta !== 0) {
         const m = view.markers.find((m) => m.id === dd.id)!;
@@ -457,6 +543,15 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
 
   const onDouble = async (e: React.MouseEvent) => {
     const { x, y } = localXY(e);
+    const ch = hitAt(x, y, "clip");
+    if (ch && view) {
+      const c = view.clips.find((c) => c.id === ch.id)!;
+      const z = clipZone(ch, c, x, y, vp.spp);
+      if (z === "fadeIn" || z === "fadeOut") {
+        await run("clip.update", { id: c.id, [z === "fadeIn" ? "fade_in" : "fade_out"]: 0 });
+        return;
+      }
+    }
     const lane = laneAt(y);
     if (!lane || !rate) return;
     const h = hits.current.find((h) => x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h);
@@ -464,6 +559,23 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
     const s = snapS(sOf(x));
     const r = await run<{ id: string }>("marker.add", { lane: lane.id, kind: "point", start: s, end: s, label: lane.name.split("•").pop()!.trim().toLowerCase() });
     if (r) setSel({ kind: "marker", id: r.id });
+  };
+
+  const onHover = (e: React.MouseEvent) => {
+    if (drag.current || !view) return;
+    const { x, y } = localXY(e);
+    const h = hitAt(x, y, "clip");
+    let cursor = "crosshair";
+    if (h) {
+      const c = view.clips.find((c) => c.id === h.id);
+      const zone = c ? clipZone(h, c, x, y, vp.spp) : "move";
+      hover.current = { id: h.id, zone };
+      cursor = { move: "grab", trimL: "w-resize", trimR: "e-resize", fadeIn: "ew-resize", fadeOut: "ew-resize" }[zone];
+    } else {
+      hover.current = null;
+      if (y < RULER + SCENES) cursor = "text";
+    }
+    if (canvasRef.current && canvasRef.current.style.cursor !== cursor) canvasRef.current.style.cursor = cursor;
   };
 
   const onWheel = (e: React.WheelEvent) => {
@@ -503,7 +615,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
           ))}
         </div>
       </div>
-      <canvas ref={canvasRef} className="tl-canvas" onMouseDown={onDown} onDoubleClick={onDouble} />
+      <canvas ref={canvasRef} className="tl-canvas" onMouseDown={onDown} onDoubleClick={onDouble} onMouseMove={onHover} onMouseLeave={() => (hover.current = null)} />
     </div>
   );
 }

@@ -131,6 +131,18 @@ pub fn move_clip(s: &mut ProjectState, clip_id: &str, new_start: i64) -> Result<
     Ok(())
 }
 
+/// Fades never exceed the clip: fade-in first, fade-out gets the remainder.
+fn clamp_fades(c: &mut ClipInstance) {
+    c.fade_in = c.fade_in.clamp(0, c.length);
+    c.fade_out = c.fade_out.clamp(0, c.length - c.fade_in);
+}
+
+/// Source length of a clip's asset in project samples.
+pub fn source_len(s: &ProjectState, c: &ClipInstance) -> Result<i64> {
+    let a = s.asset(&c.asset_id)?;
+    Ok((a.length_samples as i128 * s.project.sample_rate as i128 / a.sample_rate.max(1) as i128) as i64)
+}
+
 /// Trim the head: the clip starts later/earlier while audio stays in place.
 pub fn trim_start(s: &mut ProjectState, clip_id: &str, new_start: i64) -> Result<()> {
     let c = s.clip_mut(clip_id)?;
@@ -141,14 +153,26 @@ pub fn trim_start(s: &mut ProjectState, clip_id: &str, new_start: i64) -> Result
     c.timeline_start = new_start;
     c.source_offset += delta;
     c.length -= delta;
+    clamp_fades(c);
     Ok(())
 }
 
+/// Trim the tail. One-shot clips cannot extend past the end of their
+/// source audio; looped clips can be any length.
 pub fn trim_end(s: &mut ProjectState, clip_id: &str, new_length: i64) -> Result<()> {
     if new_length <= 0 {
         return Err(invalid("clip length must be positive"));
     }
-    s.clip_mut(clip_id)?.length = new_length;
+    let c = s.clips.get(clip_id).ok_or_else(|| not_found("clip", clip_id))?.clone();
+    if c.fill == FillMode::OneShot && new_length > c.length {
+        let avail = source_len(s, &c)? - c.source_offset;
+        if new_length > avail {
+            return Err(invalid(format!("only {avail} samples of source audio remain after the clip start")));
+        }
+    }
+    let c = s.clip_mut(clip_id)?;
+    c.length = new_length;
+    clamp_fades(c);
     Ok(())
 }
 
