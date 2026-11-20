@@ -15,11 +15,16 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 vcsd-engine = { path = "../vcsd-engine" }
 serde_json.workspace = true
-tauri = { version = "2", features = ["protocol-asset"] }
+# unstable: windows without a webview (plugin editor windows)
+tauri = { version = "2", features = ["protocol-asset", "unstable"] }
+raw-window-handle = "0.6"
 tauri-plugin-dialog = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+glib = "0.18"
 
 [features]
 # Embed the built UI (ui/dist). `tauri dev` disables default features to use the Vite dev server.

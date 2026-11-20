@@ -2,9 +2,12 @@
 //!
 //! The web UI calls one IPC command, `api(cmd, args)`, which runs the engine
 //! command on a worker thread (never on the UI thread). Realtime audio,
-//! recording and MIDI live in the engine, not in the webview.
+//! recording and MIDI live in the engine, not in the webview. Plugins' own
+//! editors open in native windows ([`editors`]).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod editors;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -34,6 +37,7 @@ fn build_info(app: tauri::AppHandle, updates: tauri::State<'_, Updates>) -> serd
 fn main() {
     // started as the out-of-process plugin scanner: scan one bundle and exit
     vcsd_engine::vcsd_plugins::scan::child_main();
+    editors::prefer_x11();
     let engine = Engine::new();
     // Loopback media server (token-protected, Range-capable) for the picture viewer.
     if let Err(err) = vcsd_engine::serve::start_media_server(engine.clone()) {
@@ -48,7 +52,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         // remembers size, position and maximised state of every window (main + mixer)
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_window_state::Builder::default().with_filter(|label| !label.starts_with("fx-")).build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Auto-update only in builds configured with an update public key
@@ -66,7 +70,13 @@ fn main() {
         })
         .manage(engine)
         .manage(Updates(AtomicBool::new(false)))
-        .invoke_handler(tauri::generate_handler![api, build_info])
+        .invoke_handler(tauri::generate_handler![
+            api,
+            build_info,
+            editors::plugin_editor_open,
+            editors::plugin_editor_close,
+            editors::plugin_editors_open
+        ])
         .run(tauri::generate_context!())
         .expect("error while running VC Sound Design");
 }

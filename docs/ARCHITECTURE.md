@@ -42,6 +42,16 @@
   as failed. Results are cached by modification time. Instances run on the render thread, never in
   the device callback, and exports use separate offline instances. The core mixer only sees a
   `PluginHost` trait.
+- **Plugin editor windows.** In the desktop app a plugin's own editor opens in a native window
+  without a webview (`crates/vcsd-app/src/editors.rs`). VST3 views are attached to the
+  window's HWND, NSView or X11 window, with an `IPlugFrame` for resize requests. On Linux,
+  `IRunLoop` puts the plugin's file descriptors and timers on the GTK main loop. Audio Units
+  show their Cocoa view, or Apple's generic view. Window and plugin sizes are kept in step
+  both ways, and closing the window or removing the slot detaches the view. Edits made in a
+  plugin's window reach the processor straight away. The engine captures them into the project
+  at most twice a second, so they're saved and autosaved. Before saving state, waiting
+  parameter changes are flushed with a zero-sample `process` call. On Linux the app runs on
+  X11 (XWayland under Wayland), because VST3 editors embed X11 windows.
 - **Plugin delay compensation by reading ahead.** The timeline can be read at any position, so a
   chain reporting `L` samples of latency is fed its input `L` samples early instead of delaying
   everything else. When a chain doesn't continue from where it left off (locate, loop, a second
@@ -116,16 +126,18 @@
 - Reconform needs an explicit change list. EDL/XML change-list parsing is not done yet.
 - Script import is the JSON contract only. The PDF/text fallback is not done yet.
 - XLSX export (optional in the spec) is not done.
-- Plugins are edited with the app's generic parameter panel. Plugins' own editor windows (VST3
-  `IPlugView`, AU Cocoa views) are not embedded yet.
+- Plugin editor windows are tested end to end on Linux (X11) only. On macOS and Windows the
+  code is type-checked, and the Audio Unit editor has not run yet. Browser mode (`vcsd serve`)
+  has the parameter panel only.
+- Changes made in a plugin's own window are not undoable (the plugin's state is saved, not
+  each move).
 - Plugin parameters can't be automated yet (track/bus volume and pan can).
 - Inserts are effects only: instruments, sidechain inputs and MIDI to plugins are not routed.
 
 ## Roadmap
 
-1. **Plugins, next steps:** plugins' own editor windows (a native child window per editor; on
-   Linux an `IRunLoop` on the GTK main loop), parameter automation lanes, and a test pass with
-   common commercial plugins on each OS.
+1. **Plugins, next steps:** parameter automation lanes, and a test pass with common commercial
+   plugins (and their editors) on each OS.
 2. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
 3. **Distribution:** cloud-HSM Windows signing (`signCommand`), a beta update channel, and delta updates.
 4. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).

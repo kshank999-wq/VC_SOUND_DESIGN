@@ -7,6 +7,12 @@
 //!   as latency, so delay compensation can be checked to the sample.
 //!
 //! Mono and stereo layouts are both accepted (input and output must match).
+//!
+//! On Linux the plugins have an editor: an X11 window embedded in the host's
+//! window, showing the gain as a bar. Clicking or dragging sets the gain through
+//! the host's component handler (as a real plugin GUI does). It watches its X
+//! connection through the host's `IRunLoop`, repaints from a run-loop timer, and
+//! asks the host to resize it right after it is attached.
 //! Structure follows the `vst3` crate's gain example.
 // Binding types differ by platform, so some casts are no-ops on one OS and needed on another.
 #![allow(non_snake_case, non_upper_case_globals, clippy::missing_safety_doc, clippy::unnecessary_cast)]
@@ -215,8 +221,32 @@ impl IAudioProcessorTrait for Processor {
     }
 }
 
-struct Controller {
+/// State shared by a controller and its editor.
+#[derive(Default)]
+struct Shared {
     gain: Mutex<f64>,
+    handler: Mutex<Option<vst3::ComPtr<IComponentHandler>>>,
+}
+unsafe impl Send for Shared {}
+unsafe impl Sync for Shared {}
+
+impl Shared {
+    /// An edit made in the editor: tell the host (which forwards it to the processor).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only the Linux editor edits
+    fn edit(&self, v: f64) {
+        *self.gain.lock().unwrap() = v;
+        if let Some(h) = self.handler.lock().unwrap().as_ref() {
+            unsafe {
+                h.beginEdit(0);
+                h.performEdit(0, v);
+                h.endEdit(0);
+            }
+        }
+    }
+}
+
+struct Controller {
+    shared: std::sync::Arc<Shared>,
 }
 
 impl Class for Controller {
@@ -238,7 +268,7 @@ impl IEditControllerTrait for Controller {
         let mut b = [0u8; 8];
         let mut n = 0;
         if s.read(b.as_mut_ptr() as *mut c_void, 8, &mut n) == kResultOk && n == 8 {
-            *self.gain.lock().unwrap() = f64::from_le_bytes(b);
+            *self.shared.gain.lock().unwrap() = f64::from_le_bytes(b);
         }
         kResultOk
     }
@@ -286,7 +316,7 @@ impl IEditControllerTrait for Controller {
     }
     unsafe fn getParamNormalized(&self, id: u32) -> f64 {
         if id == 0 {
-            *self.gain.lock().unwrap()
+            *self.shared.gain.lock().unwrap()
         } else {
             0.0
         }
@@ -295,14 +325,22 @@ impl IEditControllerTrait for Controller {
         if id != 0 {
             return kInvalidArgument;
         }
-        *self.gain.lock().unwrap() = v;
+        *self.shared.gain.lock().unwrap() = v;
         kResultOk
     }
-    unsafe fn setComponentHandler(&self, _h: *mut IComponentHandler) -> tresult {
+    unsafe fn setComponentHandler(&self, h: *mut IComponentHandler) -> tresult {
+        *self.shared.handler.lock().unwrap() = ComRef::from_raw(h).map(|h| h.to_com_ptr());
         kResultOk
     }
     unsafe fn createView(&self, _name: *const c_char) -> *mut IPlugView {
-        ptr::null_mut()
+        #[cfg(target_os = "linux")]
+        {
+            editor::create(self.shared.clone())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            ptr::null_mut()
+        }
     }
 }
 
@@ -343,7 +381,10 @@ impl IPluginFactoryTrait for Factory {
         let unknown = match *(cid as *const TUID) {
             GAIN_CID => ComWrapper::new(Processor::new(0)).to_com_ptr::<FUnknown>(),
             DELAY_CID => ComWrapper::new(Processor::new(DELAY_SAMPLES)).to_com_ptr::<FUnknown>(),
-            CONTROLLER_CID => ComWrapper::new(Controller { gain: Mutex::new(0.5) }).to_com_ptr::<FUnknown>(),
+            CONTROLLER_CID => {
+                ComWrapper::new(Controller { shared: std::sync::Arc::new(Shared { gain: Mutex::new(0.5), handler: Mutex::new(None) }) })
+                    .to_com_ptr::<FUnknown>()
+            }
             _ => None,
         };
         match unknown {
@@ -402,6 +443,197 @@ extern "system" fn ModuleEntry(_handle: *mut c_void) -> bool {
 #[no_mangle]
 extern "system" fn ModuleExit() -> bool {
     true
+}
+
+#[cfg(target_os = "linux")]
+mod editor {
+    //! The X11 editor (see the crate docs).
+    use super::Shared;
+    use std::ptr;
+    use std::sync::{Arc, Mutex};
+    use vst3::Steinberg::Linux::*;
+    use vst3::Steinberg::*;
+    use vst3::{Class, ComPtr, ComRef, ComWrapper};
+    use x11::xlib;
+
+    pub const START: (i32, i32) = (300, 100);
+    pub const ASKED: (i32, i32) = (360, 120);
+
+    struct X {
+        dpy: *mut xlib::Display,
+        win: xlib::Window,
+        frame: ComPtr<IPlugFrame>,
+        run_loop: Option<ComPtr<IRunLoop>>,
+        fd: ComWrapper<Fd>,
+        timer: ComWrapper<Timer>,
+    }
+
+    pub struct State {
+        shared: Arc<Shared>,
+        size: Mutex<(i32, i32)>,
+        x: Mutex<Option<X>>,
+        frame: Mutex<Option<ComPtr<IPlugFrame>>>,
+    }
+    unsafe impl Send for State {}
+    unsafe impl Sync for State {}
+
+    impl State {
+        fn paint(&self) {
+            let g = self.x.lock().unwrap();
+            let Some(x) = g.as_ref() else { return };
+            let (w, h) = *self.size.lock().unwrap();
+            let v = (*self.shared.gain.lock().unwrap()).clamp(0.0, 1.0);
+            unsafe {
+                let gc = xlib::XDefaultGC(x.dpy, xlib::XDefaultScreen(x.dpy));
+                xlib::XSetForeground(x.dpy, gc, 0x20_28_30);
+                xlib::XFillRectangle(x.dpy, x.win, gc, 0, 0, w as u32, h as u32);
+                xlib::XSetForeground(x.dpy, gc, 0x3c_c8_6e);
+                xlib::XFillRectangle(x.dpy, x.win, gc, 0, h / 3, ((w as f64) * v) as u32, (h / 3) as u32);
+                xlib::XFlush(x.dpy);
+            }
+        }
+        fn events(&self) {
+            let mut edits = vec![];
+            {
+                let g = self.x.lock().unwrap();
+                let Some(x) = g.as_ref() else { return };
+                let w = self.size.lock().unwrap().0.max(1);
+                unsafe {
+                    while xlib::XPending(x.dpy) > 0 {
+                        let mut ev: xlib::XEvent = std::mem::zeroed();
+                        xlib::XNextEvent(x.dpy, &mut ev);
+                        match ev.get_type() {
+                            xlib::ButtonPress => edits.push(ev.button.x as f64 / w as f64),
+                            xlib::MotionNotify => edits.push(ev.motion.x as f64 / w as f64),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            for v in edits {
+                self.shared.edit(v.clamp(0.0, 1.0));
+            }
+            self.paint();
+        }
+    }
+
+    struct Fd(Arc<State>);
+    impl Class for Fd {
+        type Interfaces = (IEventHandler,);
+    }
+    impl IEventHandlerTrait for Fd {
+        unsafe fn onFDIsSet(&self, _fd: FileDescriptor) {
+            self.0.events();
+        }
+    }
+
+    struct Timer(Arc<State>);
+    impl Class for Timer {
+        type Interfaces = (ITimerHandler,);
+    }
+    impl ITimerHandlerTrait for Timer {
+        unsafe fn onTimer(&self) {
+            self.0.paint(); // shows changes made by the host (automation, its own sliders)
+        }
+    }
+
+    struct View(Arc<State>);
+    impl Class for View {
+        type Interfaces = (IPlugView,);
+    }
+
+    pub fn create(shared: Arc<Shared>) -> *mut IPlugView {
+        let st = Arc::new(State { shared, size: Mutex::new(START), x: Mutex::new(None), frame: Mutex::new(None) });
+        ComWrapper::new(View(st)).to_com_ptr::<IPlugView>().map(|p| p.into_raw()).unwrap_or(ptr::null_mut())
+    }
+
+    impl IPlugViewTrait for View {
+        unsafe fn isPlatformTypeSupported(&self, ty: FIDString) -> tresult {
+            if std::ffi::CStr::from_ptr(ty).to_bytes() == b"X11EmbedWindowID" {
+                kResultTrue
+            } else {
+                kResultFalse
+            }
+        }
+        unsafe fn attached(&self, parent: *mut std::ffi::c_void, _ty: FIDString) -> tresult {
+            let Some(frame) = self.0.frame.lock().unwrap().clone() else { return kResultFalse };
+            let dpy = xlib::XOpenDisplay(ptr::null());
+            if dpy.is_null() {
+                return kResultFalse;
+            }
+            let (w, h) = *self.0.size.lock().unwrap();
+            let win = xlib::XCreateSimpleWindow(dpy, parent as xlib::Window, 0, 0, w as u32, h as u32, 0, 0, 0x20_28_30);
+            xlib::XSelectInput(dpy, win, xlib::ExposureMask | xlib::ButtonPressMask | xlib::Button1MotionMask);
+            xlib::XMapWindow(dpy, win);
+            xlib::XFlush(dpy);
+            let run_loop = frame.cast::<IRunLoop>();
+            let fd = ComWrapper::new(Fd(self.0.clone()));
+            let timer = ComWrapper::new(Timer(self.0.clone()));
+            if let Some(rl) = &run_loop {
+                rl.registerEventHandler(fd.to_com_ptr::<IEventHandler>().unwrap().as_ptr(), xlib::XConnectionNumber(dpy));
+                rl.registerTimer(timer.to_com_ptr::<ITimerHandler>().unwrap().as_ptr(), 100);
+            }
+            *self.0.x.lock().unwrap() = Some(X { dpy, win, frame: frame.clone(), run_loop, fd, timer });
+            // ask the host for a different size, like editors that lay out after opening
+            let me = ComWrapper::new(View(self.0.clone()));
+            let mut r = ViewRect { left: 0, top: 0, right: ASKED.0, bottom: ASKED.1 };
+            frame.resizeView(me.to_com_ptr::<IPlugView>().unwrap().as_ptr(), &mut r);
+            self.0.paint();
+            kResultOk
+        }
+        unsafe fn removed(&self) -> tresult {
+            if let Some(x) = self.0.x.lock().unwrap().take() {
+                if let Some(rl) = &x.run_loop {
+                    rl.unregisterEventHandler(x.fd.to_com_ptr::<IEventHandler>().unwrap().as_ptr());
+                    rl.unregisterTimer(x.timer.to_com_ptr::<ITimerHandler>().unwrap().as_ptr());
+                }
+                xlib::XDestroyWindow(x.dpy, x.win);
+                xlib::XCloseDisplay(x.dpy);
+                drop(x.frame);
+            }
+            kResultOk
+        }
+        unsafe fn onWheel(&self, _d: f32) -> tresult {
+            kResultFalse
+        }
+        unsafe fn onKeyDown(&self, _k: char16, _c: int16, _m: int16) -> tresult {
+            kResultFalse
+        }
+        unsafe fn onKeyUp(&self, _k: char16, _c: int16, _m: int16) -> tresult {
+            kResultFalse
+        }
+        unsafe fn getSize(&self, size: *mut ViewRect) -> tresult {
+            let (w, h) = *self.0.size.lock().unwrap();
+            *size = ViewRect { left: 0, top: 0, right: w, bottom: h };
+            kResultOk
+        }
+        unsafe fn onSize(&self, size: *mut ViewRect) -> tresult {
+            let r = &*size;
+            let (w, h) = ((r.right - r.left).max(1), (r.bottom - r.top).max(1));
+            *self.0.size.lock().unwrap() = (w, h);
+            if let Some(x) = self.0.x.lock().unwrap().as_ref() {
+                xlib::XResizeWindow(x.dpy, x.win, w as u32, h as u32);
+            }
+            self.0.paint();
+            kResultOk
+        }
+        unsafe fn onFocus(&self, _s: TBool) -> tresult {
+            kResultOk
+        }
+        unsafe fn setFrame(&self, frame: *mut IPlugFrame) -> tresult {
+            *self.0.frame.lock().unwrap() = ComRef::from_raw(frame).map(|f| f.to_com_ptr());
+            kResultOk
+        }
+        unsafe fn canResize(&self) -> tresult {
+            kResultTrue
+        }
+        unsafe fn checkSizeConstraint(&self, r: *mut ViewRect) -> tresult {
+            let r = &mut *r;
+            r.right = r.left + (r.right - r.left).max(120);
+            r.bottom = r.top + (r.bottom - r.top).max(60);
+            kResultTrue
+        }
+    }
 }
 
 /// The VST3 entry point.

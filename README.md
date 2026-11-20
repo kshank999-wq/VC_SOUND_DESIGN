@@ -20,14 +20,13 @@ How the code maps onto them is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
   AI-proposal pipeline. Every spec §20 acceptance scenario (22–31) is an automated test.
 - **Plugins** (`crates/vcsd-plugins`): VST3 effects on macOS, Windows and Linux, and Audio Units
   on macOS, as inserts on tracks, stem buses and the master. Scanning runs in a separate process,
-  latency is compensated sample-accurately, state is saved with the project, and exports render
-  through the plugins.
+  latency is compensated sample-accurately, state is saved with the project, exports render
+  through the plugins, and the desktop app opens each plugin's own editor window.
 
 - **Releases:** a tagged push builds macOS, Windows and Linux installers, signed when the
   certificates are configured, with in-app auto-update. See [`RELEASING.md`](RELEASING.md).
 
-**Not built yet:** AAF/Tier-2 interchange, plugins' own editor windows (plugins are edited
-with the app's parameter panel for now) and plugin parameter automation. See the
+**Not built yet:** AAF/Tier-2 interchange and plugin parameter automation. See the
 [roadmap](docs/ARCHITECTURE.md#roadmap).
 
 ## Desktop app
@@ -59,7 +58,10 @@ On first launch, choose **Create demo project…** to get a fully spotted 3-scen
 ### Plugins
 
 Add an effect with **+ FX** on a mixer strip (tracks, stem buses and the master) or **+ Add
-plugin…** in a track's inspector. Click a plugin's name to open its parameters; ⏻ bypasses it.
+plugin…** in a track's inspector. Click a plugin's name to open its own window (in the desktop
+app; ≡ opens the app's parameter panel instead, which browser mode always uses); ⏻ bypasses
+it. On Linux the app runs on X11 (XWayland under Wayland) because plugin editors need it; set
+`VCSD_WAYLAND=1` to stay on Wayland without plugin windows.
 VST3 plugins are found in the standard folders (macOS `~/Library/Audio/Plug-Ins/VST3` and
 `/Library/Audio/Plug-Ins/VST3`, Windows `Common Files\VST3`, Linux `~/.vst3` and `/usr/lib/vst3`),
 plus any you add under **☰ → Plugins… → Folders…** or in `VCSD_VST3_PATH`. On macOS, installed

@@ -4901,6 +4901,8 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 name = "vcsd-app"
 version = "0.1.0"
 dependencies = [
+ "glib",
+ "raw-window-handle",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -4954,10 +4956,12 @@ name = "vcsd-plugins"
 version = "0.1.0"
 dependencies = [
  "libloading 0.9.1",
+ "objc2",
  "serde",
  "serde_json",
  "vcsd-testplug",
  "vst3",
+ "x11",
 ]
 
 [[package]]
@@ -4965,6 +4969,7 @@ name = "vcsd-testplug"
 version = "0.1.0"
 dependencies = [
  "vst3",
+ "x11",
 ]
 
 [[package]]

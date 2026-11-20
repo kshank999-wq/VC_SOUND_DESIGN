@@ -63,6 +63,8 @@ struct Inner {
     perf: Option<PerformanceRecorder>,
     mode: InputMode,
     last_autosave: Instant,
+    /// Last time edits made in plugins' own windows were captured.
+    last_plugin_capture: Instant,
     peaks: HashMap<String, Arc<Value>>,
     log: Vec<String>,
 }
@@ -199,6 +201,7 @@ impl Engine {
                 perf: None,
                 mode: InputMode::Spot,
                 last_autosave: Instant::now(),
+                last_plugin_capture: Instant::now(),
                 peaks: HashMap::new(),
                 log: vec![],
             }),
@@ -1213,6 +1216,16 @@ impl Engine {
                 Ok(json!({}))
             }
             "transport.state" => {
+                // edits made in plugins' own windows: into the project (≤ 2×/s while editing)
+                if g.last_plugin_capture.elapsed().as_millis() >= 500 && self.rack.poll_dirty() {
+                    g.last_plugin_capture = Instant::now();
+                    if let Some(sess) = g.session.as_mut() {
+                        if self.rack.capture(&mut sess.state) {
+                            sess.dirty = true;
+                            self.publish(g);
+                        }
+                    }
+                }
                 let mut v = serde_json::to_value(self.player.state()).map_err(e)?;
                 v["version"] = json!(g.version);
                 v["recording"] = json!(self.recording.lock().unwrap().as_ref().map(|r| r.device.clone()));

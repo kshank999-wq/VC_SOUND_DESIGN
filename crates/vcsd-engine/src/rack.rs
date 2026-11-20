@@ -131,6 +131,12 @@ impl Rack {
         self.slots.lock().unwrap().get(slot_id).and_then(|s| s.inst.clone())
     }
 
+    /// True if any plugin was edited in its own window since the last call.
+    pub fn poll_dirty(&self) -> bool {
+        let insts: Vec<Arc<dyn Instance>> = self.slots.lock().unwrap().values().filter_map(|s| s.inst.clone()).collect();
+        insts.iter().fold(false, |any, i| i.take_dirty() | any) // check (and reset) them all
+    }
+
     /// Note a parameter value already sent to the instance (so sync doesn't resend it).
     pub fn mark_applied(&self, slot_id: &str, param: u32, v: f64) {
         if let Some(s) = self.slots.lock().unwrap().get_mut(slot_id) {

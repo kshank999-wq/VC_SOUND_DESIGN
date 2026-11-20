@@ -46,8 +46,12 @@ fn processes_with_parameters_and_restores_state() {
     g.process(&mut buf, 2, 3000);
     assert!(buf.iter().zip(&input).all(|(o, i)| (o - i * 0.5).abs() < 1e-6), "parameter reached the processor");
 
+    // a change made while nothing plays still lands in the saved state (flushed)
+    g.set_param(0, 0.3).unwrap();
+    g.set_param(0, 0.25).unwrap();
     // state: a fresh instance picks up the saved gain, in processor and controller
     let st = g.get_state().unwrap();
+    assert_eq!(f64::from_le_bytes(st[8..16].try_into().unwrap()), 0.25, "processor state is current");
     let h = make("VCSD Test Gain", Setup::default());
     h.set_state(&st).unwrap();
     assert!((h.params()[0].value - 0.25).abs() < 1e-9);

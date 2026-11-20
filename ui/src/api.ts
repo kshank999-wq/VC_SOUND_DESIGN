@@ -122,3 +122,21 @@ export async function buildInfo(): Promise<BuildInfo> {
   const info = await call<{ version: string }>("app.info");
   return { version: info.version, updater: false };
 }
+
+/** Desktop only: a plugin's own editor in a native window. Rejects if the plugin
+ *  has no editor or the window system can't host one (the caller falls back). */
+export async function openNativeEditor(slot: string, title: string): Promise<void> {
+  if (!isTauri) throw new ApiError("plugin windows need the desktop app");
+  await loadTauri();
+  await tauriInvoke!("plugin_editor_open", { slot, title });
+}
+export async function closeNativeEditor(slot: string): Promise<void> {
+  if (!isTauri) return;
+  await loadTauri();
+  await tauriInvoke!("plugin_editor_close", { slot }).catch(() => {});
+}
+export async function openNativeEditors(): Promise<string[]> {
+  if (!isTauri) return [];
+  await loadTauri();
+  return ((await tauriInvoke!("plugin_editors_open", {}).catch(() => [])) as string[]) ?? [];
+}

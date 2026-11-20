@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { call } from "../api";
+import { call, closeNativeEditor, isTauri, openNativeEditor, openNativeEditors } from "../api";
 import type { EngineHook } from "../store";
 import type { Insert, PluginInfo, PluginParam, PluginSlot } from "../types";
 
@@ -63,7 +63,23 @@ export function openPluginEditor(slotId: string) {
   }
   raise(slotId);
 }
+/** Open a plugin: its own window in the desktop app, else (or if it has none) the parameter panel. */
+export async function openPlugin(eng: EngineHook, slotId: string) {
+  const f = findSlot(eng, slotId);
+  if (isTauri && f && eng.view?.plugins?.[slotId]?.loaded) {
+    try {
+      await openNativeEditor(slotId, `${f.slot.name} — ${f.ownerName}`);
+      return;
+    } catch (e) {
+      const msg = String((e as Error)?.message ?? e);
+      if (!/no editor/i.test(msg)) eng.toast(msg, "error");
+    }
+  }
+  openPluginEditor(slotId);
+}
+
 function closePluginEditor(slotId: string) {
+  closeNativeEditor(slotId);
   editors = editors.filter((x) => x !== slotId);
   stack = stack.filter((x) => x !== slotId);
   editorSubs.forEach((f) => f());
@@ -101,11 +117,12 @@ export function InsertRack({ eng, ownerId, inserts, compact }: { eng: EngineHook
               <button className={"tiny fx-power" + (ins.bypass ? "" : " on")} title={ins.bypass ? "Bypassed — click to enable" : "Click to bypass"}
                 onClick={() => eng.run("insert.bypass", { owner_id: ownerId, id: ins.id, bypass: !ins.bypass })}>⏻</button>
             )}
-            <span className="fx-name ellipsis" onClick={() => openPluginEditor(ins.id)}
+            <span className="fx-name ellipsis" onClick={() => openPlugin(eng, ins.id)}
               title={`${ins.name}${ins.vendor ? " — " + ins.vendor : ""} (${ins.format.toUpperCase()})${ins.bypass ? " · bypassed" : ""}${missing ? "\n⚠ " + st.error : ""}${st?.latency ? `\nlatency ${st.latency} samples (compensated)` : ""}\nclick to open`}>
               {missing ? "⚠ " : ""}{ins.name}
             </span>
             {!compact && st?.latency ? <span className="small muted mono">{st.latency}</span> : null}
+            {!compact && isTauri && <button className="tiny" title="Parameters (the app's panel)" onClick={() => openPluginEditor(ins.id)}>≡</button>}
             {!compact && (
               <>
                 <button className="tiny" disabled={pos === 0} title="Move up (earlier in the chain)" onClick={() => eng.run("insert.move", { owner_id: ownerId, id: ins.id, to: slots[pos - 1].index })}>↑</button>
@@ -124,7 +141,7 @@ export function InsertRack({ eng, ownerId, inserts, compact }: { eng: EngineHook
             setPicking(false);
             const r = await eng.run<{ id: string; status: { loaded: boolean; error: string | null } }>("insert.add", { owner_id: ownerId, plugin_id: p.id });
             if (r?.status && !r.status.loaded) eng.toast(`${p.name}: ${r.status.error}`, "error");
-            else if (r) openPluginEditor(r.id);
+            else if (r) openPlugin(eng, r.id);
           }}
         />
       )}
@@ -312,9 +329,13 @@ function PluginEditor({ eng, slotId, index, onClose }: { eng: EngineHook; slotId
           <button className={"tiny fx-power" + (found.slot.bypass ? "" : " on")} title={found.slot.bypass ? "Bypassed" : "Active — click to bypass"}
             onClick={() => eng.run("insert.bypass", { owner_id: found.owner, id: slotId, bypass: !found.slot.bypass })}>⏻</button>
         )}
+        {isTauri && d?.loaded && found && (
+          <button className="tiny" title="The plugin's own interface, in its own window"
+            onClick={() => openNativeEditor(slotId, `${found.slot.name} — ${found.ownerName}`).catch((e) => eng.toast(String(e?.message ?? e), "error"))}>Plugin window</button>
+        )}
         {found && (
           <button className="tiny" title="Remove this plugin from the chain (undoable)"
-            onClick={() => { onClose(); eng.run("insert.remove", { owner_id: found.owner, id: slotId }, `Removed ${found.slot.name}`); }}>Remove</button>
+            onClick={() => { onClose(); closeNativeEditor(slotId); eng.run("insert.remove", { owner_id: found.owner, id: slotId }, `Removed ${found.slot.name}`); }}>Remove</button>
         )}
         <button className="tiny" title="Close" onClick={onClose}>✕</button>
       </div>
@@ -345,5 +366,11 @@ function PluginEditor({ eng, slotId, index, onClose }: { eng: EngineHook; slotId
 /** Mount once per window: renders every open plugin window. */
 export function PluginEditors({ eng }: { eng: EngineHook }) {
   const ids = useSyncExternalStore((cb) => (editorSubs.add(cb), () => editorSubs.delete(cb)), () => editors);
+  // plugin windows whose slot went away (removed, undone, project closed) are closed
+  const version = eng.view?.version;
+  useEffect(() => {
+    if (!isTauri) return;
+    openNativeEditors().then((open) => open.filter((id) => !findSlot(eng, id)).forEach((id) => closeNativeEditor(id)));
+  }, [version, eng.view?.open]); // eslint-disable-line react-hooks/exhaustive-deps
   return <>{ids.map((id, i) => <PluginEditor key={id} eng={eng} slotId={id} index={i} onClose={() => closePluginEditor(id)} />)}</>;
 }

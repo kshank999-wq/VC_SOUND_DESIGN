@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::*};
 use std::sync::{Arc, Mutex, OnceLock};
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
-use vst3::{Class, ComPtr, ComWrapper, Interface};
+use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface};
 
 const AUDIO: MediaType = MediaTypes_::kAudio as MediaType;
 const INPUT: BusDirection = BusDirections_::kInput as BusDirection;
@@ -728,6 +728,33 @@ impl Vst3Instance {
         }
     }
 
+    /// Parameter changes waiting for the processor (last value per parameter wins).
+    fn take_changes(&self) -> Option<ComWrapper<Changes>> {
+        let pending = std::mem::take(&mut *self.edits.pending.lock().unwrap());
+        if pending.is_empty() {
+            return None;
+        }
+        let mut last: Vec<(ParamID, f64)> = vec![];
+        for (id, v) in pending {
+            match last.iter_mut().find(|x| x.0 == id) {
+                Some(x) => x.1 = v,
+                None => last.push((id, v)),
+            }
+        }
+        Some(ComWrapper::new(Changes(
+            last.into_iter().map(|(id, value)| ComWrapper::new(Queue { id, value }).to_com_ptr().unwrap()).collect(),
+        )))
+    }
+
+    /// Deliver waiting parameter changes with a zero-sample process call (the
+    /// VST3 "flush"), so the processor's state is current while nothing plays.
+    fn flush(&self, p: &mut Proc) {
+        if let Some(ch) = self.take_changes() {
+            let pos = p.next_pos.unwrap_or(0);
+            self.block(p, &mut [], self.setup.channels.max(1), 0, pos, Some(&ch));
+        }
+    }
+
     fn restart(&self) {
         unsafe {
             self.processor.setProcessing(0);
@@ -849,6 +876,7 @@ impl Instance for Vst3Instance {
     }
 
     fn get_state(&self) -> Result<Vec<u8>, String> {
+        self.flush(&mut self.proc.lock().unwrap());
         let _g = self.ctrl.lock().unwrap();
         unsafe {
             let a = MemStream::with(&[]);
@@ -910,21 +938,7 @@ impl Instance for Vst3Instance {
         if self.edits.latency_changed.swap(false, Relaxed) {
             self.latency.store(unsafe { self.processor.getLatencySamples() }, Relaxed);
         }
-        let pending = std::mem::take(&mut *self.edits.pending.lock().unwrap());
-        let mut changes = None;
-        if !pending.is_empty() {
-            // last value per parameter wins
-            let mut last: Vec<(ParamID, f64)> = vec![];
-            for (id, v) in pending {
-                match last.iter_mut().find(|x| x.0 == id) {
-                    Some(x) => x.1 = v,
-                    None => last.push((id, v)),
-                }
-            }
-            changes = Some(ComWrapper::new(Changes(
-                last.into_iter().map(|(id, value)| ComWrapper::new(Queue { id, value }).to_com_ptr().unwrap()).collect(),
-            )));
-        }
+        let changes = self.take_changes();
         let mut off = 0;
         while off < frames {
             let n = (frames - off).min(self.setup.max_block);
@@ -947,6 +961,10 @@ impl Instance for Vst3Instance {
 
     fn take_dirty(&self) -> bool {
         self.edits.dirty.swap(false, Relaxed)
+    }
+
+    fn open_editor(&self, parent: crate::ParentWindow, host: std::rc::Rc<dyn crate::EditorHost>) -> Result<Box<dyn crate::Editor>, String> {
+        self.open_vst3_editor(parent, host)
     }
 }
 
@@ -978,5 +996,146 @@ impl Drop for Vst3Instance {
             self.component.terminate();
         }
         let _ = &self.handler;
+    }
+}
+
+// ---------------------------------------------------------------- editors
+
+use crate::{Editor, EditorHost, ParentWindow};
+use std::cell::RefCell;
+use std::rc::Rc;
+use vst3::Steinberg::Linux::{IEventHandler, IEventHandlerTrait, IRunLoop, IRunLoopTrait, ITimerHandler, ITimerHandlerTrait};
+
+/// The plugin view's frame: resize requests, and on Linux the run loop.
+struct Frame {
+    host: Rc<dyn EditorHost>,
+    view: RefCell<Option<ComPtr<IPlugView>>>,
+    /// Run-loop registrations by handler object.
+    regs: RefCell<HashMap<usize, Vec<u64>>>,
+}
+
+impl Class for Frame {
+    type Interfaces = (IPlugFrame, IRunLoop);
+}
+
+impl IPlugFrameTrait for Frame {
+    unsafe fn resizeView(&self, view: *mut IPlugView, size: *mut ViewRect) -> tresult {
+        if view.is_null() || size.is_null() {
+            return kInvalidArgument;
+        }
+        let r = &mut *size;
+        let (w, h) = ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32);
+        if !self.host.resize(w, h) {
+            return kResultFalse;
+        }
+        // the view learns its new size (as hosts must do after resizeView)
+        if let Some(v) = ComRef::from_raw(view) {
+            v.onSize(size);
+        }
+        kResultOk
+    }
+}
+
+impl IRunLoopTrait for Frame {
+    unsafe fn registerEventHandler(&self, handler: *mut IEventHandler, fd: Linux::FileDescriptor) -> tresult {
+        let (Some(rl), Some(h)) = (self.host.run_loop(), ComRef::from_raw(handler)) else { return kNotImplemented };
+        let h = h.to_com_ptr();
+        let id = rl.watch_fd(fd, Box::new(move || h.onFDIsSet(fd)));
+        self.regs.borrow_mut().entry(handler as usize).or_default().push(id);
+        kResultOk
+    }
+    unsafe fn unregisterEventHandler(&self, handler: *mut IEventHandler) -> tresult {
+        self.cancel(handler as usize)
+    }
+    unsafe fn registerTimer(&self, handler: *mut ITimerHandler, ms: Linux::TimerInterval) -> tresult {
+        let (Some(rl), Some(h)) = (self.host.run_loop(), ComRef::from_raw(handler)) else { return kNotImplemented };
+        let h = h.to_com_ptr();
+        let id = rl.every(ms.clamp(1, 60_000) as u32, Box::new(move || h.onTimer()));
+        self.regs.borrow_mut().entry(handler as usize).or_default().push(id);
+        kResultOk
+    }
+    unsafe fn unregisterTimer(&self, handler: *mut ITimerHandler) -> tresult {
+        self.cancel(handler as usize)
+    }
+}
+
+impl Frame {
+    fn cancel(&self, key: usize) -> tresult {
+        if let (Some(rl), Some(ids)) = (self.host.run_loop(), self.regs.borrow_mut().remove(&key)) {
+            ids.into_iter().for_each(|i| rl.cancel(i));
+        }
+        kResultOk
+    }
+    fn cancel_all(&self) {
+        let keys: Vec<usize> = self.regs.borrow().keys().copied().collect();
+        keys.into_iter().for_each(|k| {
+            self.cancel(k);
+        });
+    }
+}
+
+/// A VST3 editor (`IPlugView`) attached to a native window.
+pub struct Vst3Editor {
+    view: ComPtr<IPlugView>,
+    frame: ComWrapper<Frame>,
+}
+
+impl Editor for Vst3Editor {
+    fn size(&self) -> (u32, u32) {
+        let mut r = ViewRect { left: 0, top: 0, right: 0, bottom: 0 };
+        unsafe { self.view.getSize(&mut r) };
+        ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32)
+    }
+    fn resizable(&self) -> bool {
+        unsafe { self.view.canResize() == kResultTrue }
+    }
+    fn set_size(&self, w: u32, h: u32) -> (u32, u32) {
+        let mut r = ViewRect { left: 0, top: 0, right: w as i32, bottom: h as i32 };
+        unsafe {
+            if self.view.checkSizeConstraint(&mut r) != kResultTrue {
+                r = ViewRect { left: 0, top: 0, right: w as i32, bottom: h as i32 };
+            }
+            self.view.onSize(&mut r);
+        }
+        ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32)
+    }
+}
+
+impl Drop for Vst3Editor {
+    fn drop(&mut self) {
+        unsafe {
+            self.view.removed();
+            self.view.setFrame(ptr::null_mut());
+        }
+        // the plugin should have unregistered; make sure nothing keeps calling it
+        self.frame.cancel_all();
+        *self.frame.view.borrow_mut() = None;
+    }
+}
+
+impl Vst3Instance {
+    pub(crate) fn open_vst3_editor(&self, parent: ParentWindow, host: Rc<dyn EditorHost>) -> Result<Box<dyn Editor>, String> {
+        let no = || format!("{} has no editor of its own", self.info.name);
+        let view = self.create_view().ok_or_else(no)?;
+        let (ty, handle): (FIDString, *mut c_void) = match parent {
+            ParentWindow::Win32(h) => (kPlatformTypeHWND, h),
+            ParentWindow::AppKit(v) => (kPlatformTypeNSView, v),
+            ParentWindow::X11(x) => (kPlatformTypeX11EmbedWindowID, x as usize as *mut c_void),
+        };
+        unsafe {
+            if view.isPlatformTypeSupported(ty) != kResultTrue {
+                return Err(format!("{}'s editor doesn't support this window system", self.info.name));
+            }
+            if let Some(sc) = view.cast::<IPlugViewContentScaleSupport>() {
+                sc.setContentScaleFactor(host.scale() as f32);
+            }
+            let frame = ComWrapper::new(Frame { host, view: RefCell::new(Some(view.clone())), regs: RefCell::new(HashMap::new()) });
+            view.setFrame(frame.to_com_ptr::<IPlugFrame>().unwrap().as_ptr());
+            if view.attached(handle, ty) != kResultOk {
+                view.setFrame(ptr::null_mut());
+                return Err(format!("{}'s editor could not be opened", self.info.name));
+            }
+            Ok(Box::new(Vst3Editor { view, frame }))
+        }
     }
 }

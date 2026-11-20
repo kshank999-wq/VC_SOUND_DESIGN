@@ -19,6 +19,7 @@ pub mod vst3host;
 pub mod au;
 
 use serde::{Deserialize, Serialize};
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// One plugin (class) found by the scanner.
@@ -106,6 +107,55 @@ pub trait Instance: Send + Sync {
     fn take_dirty(&self) -> bool {
         false
     }
+    /// Show the plugin's own editor inside `parent`. Main (GUI) thread only.
+    /// Dropping the returned editor detaches it; keep the instance alive meanwhile.
+    fn open_editor(&self, _parent: ParentWindow, _host: Rc<dyn EditorHost>) -> Result<Box<dyn Editor>, String> {
+        Err(format!("{} has no editor of its own", self.info().name))
+    }
+}
+
+/// The native window a plugin editor is embedded in.
+#[derive(Debug, Clone, Copy)]
+pub enum ParentWindow {
+    /// Windows `HWND`.
+    Win32(*mut std::ffi::c_void),
+    /// macOS `NSView` (the window's content view).
+    AppKit(*mut std::ffi::c_void),
+    /// X11 window id (Linux).
+    X11(u64),
+}
+
+/// What the app provides to an open editor (main thread).
+pub trait EditorHost {
+    /// The plugin asks for a new editor size (in the units of [`Editor::size`]).
+    /// Return true once the window has been resized.
+    fn resize(&self, width: u32, height: u32) -> bool;
+    /// UI scale (1.0, 2.0, …) for plugins that draw at a scale (Windows/Linux).
+    fn scale(&self) -> f64 {
+        1.0
+    }
+    /// Linux: the GUI event loop that plugin file descriptors and timers join.
+    fn run_loop(&self) -> Option<Rc<dyn RunLoop>> {
+        None
+    }
+}
+
+/// Linux GUI event loop hooks (VST3 `IRunLoop`); everything runs on the main thread.
+pub trait RunLoop {
+    /// Call `f` whenever `fd` is readable. Returns an id for [`RunLoop::cancel`].
+    fn watch_fd(&self, fd: i32, f: Box<dyn Fn()>) -> u64;
+    /// Call `f` every `ms` milliseconds.
+    fn every(&self, ms: u32, f: Box<dyn Fn()>) -> u64;
+    fn cancel(&self, id: u64);
+}
+
+/// An open plugin editor. Dropping it removes the view from its window.
+pub trait Editor {
+    /// Current size: physical pixels on Windows/Linux, points on macOS.
+    fn size(&self) -> (u32, u32);
+    fn resizable(&self) -> bool;
+    /// The user resized the window: returns the size the editor actually took.
+    fn set_size(&self, width: u32, height: u32) -> (u32, u32);
 }
 
 /// Create an instance of a scanned plugin.

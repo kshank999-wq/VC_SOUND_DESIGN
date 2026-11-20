@@ -547,6 +547,14 @@ impl Instance for AuInstance {
     fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Relaxed)
     }
+
+    fn open_editor(
+        &self,
+        parent: crate::ParentWindow,
+        _host: std::rc::Rc<dyn crate::EditorHost>,
+    ) -> Result<Box<dyn crate::Editor>, String> {
+        self.open_au_editor(parent)
+    }
 }
 
 impl Drop for AuInstance {
@@ -555,6 +563,133 @@ impl Drop for AuInstance {
         unsafe {
             AudioUnitUninitialize(self.unit);
             AudioComponentInstanceDispose(self.unit);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- editor
+
+use objc2::encode::{Encode, Encoding};
+use objc2::runtime::{AnyClass, AnyObject};
+use objc2::{class, msg_send};
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSPoint {
+    x: f64,
+    y: f64,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSSize {
+    width: f64,
+    height: f64,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSRect {
+    origin: NSPoint,
+    size: NSSize,
+}
+unsafe impl Encode for NSPoint {
+    const ENCODING: Encoding = Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+}
+unsafe impl Encode for NSSize {
+    const ENCODING: Encoding = Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
+}
+unsafe impl Encode for NSRect {
+    const ENCODING: Encoding = Encoding::Struct("CGRect", &[NSPoint::ENCODING, NSSize::ENCODING]);
+}
+
+const PROP_COCOA_UI: u32 = 31;
+
+/// The unit's own Cocoa view (`kAudioUnitProperty_CocoaUI`), retained.
+unsafe fn cocoa_view(unit: AudioUnit) -> Option<*mut AnyObject> {
+    let mut size = 0u32;
+    if AudioUnitGetPropertyInfo(unit, PROP_COCOA_UI, SCOPE_GLOBAL, 0, &mut size, ptr::null_mut()) != 0 || size < 16 {
+        return None;
+    }
+    // AudioUnitCocoaViewInfo { CFURLRef bundle; CFStringRef classes[]; }
+    let mut info = vec![ptr::null::<c_void>(); size as usize / std::mem::size_of::<CFTypeRef>()];
+    if AudioUnitGetProperty(unit, PROP_COCOA_UI, SCOPE_GLOBAL, 0, info.as_mut_ptr() as *mut c_void, &mut size) != 0 {
+        return None;
+    }
+    let (url, name) = (info[0], info[1]);
+    let mut view: *mut AnyObject = ptr::null_mut();
+    if !url.is_null() && !name.is_null() {
+        let bundle: *mut AnyObject = msg_send![class!(NSBundle), bundleWithURL: url as *mut AnyObject];
+        if !bundle.is_null() {
+            let cls: *const AnyClass = msg_send![bundle, classNamed: name as *mut AnyObject];
+            if !cls.is_null() {
+                let factory: *mut AnyObject = msg_send![cls, new];
+                if !factory.is_null() {
+                    view = msg_send![factory, uiViewForAudioUnit: unit, withSize: NSSize { width: 0.0, height: 0.0 }];
+                    if !view.is_null() {
+                        let _: *mut AnyObject = msg_send![view, retain];
+                    }
+                    let _: () = msg_send![factory, release];
+                }
+            }
+        }
+    }
+    for p in info.iter().filter(|p| !p.is_null()) {
+        CFRelease(*p);
+    }
+    (!view.is_null()).then_some(view)
+}
+
+/// Apple's generic parameter view (CoreAudioKit), retained.
+unsafe fn generic_view(unit: AudioUnit) -> Option<*mut AnyObject> {
+    if AnyClass::get(c"AUGenericView").is_none() {
+        let path: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c"/System/Library/Frameworks/CoreAudioKit.framework".as_ptr()];
+        let b: *mut AnyObject = msg_send![class!(NSBundle), bundleWithPath: path];
+        if !b.is_null() {
+            let _: bool = msg_send![b, load];
+        }
+    }
+    let cls = AnyClass::get(c"AUGenericView")?;
+    let v: *mut AnyObject = msg_send![cls, alloc];
+    let v: *mut AnyObject = msg_send![v, initWithAudioUnit: unit];
+    (!v.is_null()).then_some(v)
+}
+
+pub struct AuEditor {
+    view: *mut AnyObject,
+}
+
+impl crate::Editor for AuEditor {
+    fn size(&self) -> (u32, u32) {
+        let r: NSRect = unsafe { msg_send![self.view, frame] };
+        (r.size.width.max(1.0) as u32, r.size.height.max(1.0) as u32)
+    }
+    fn resizable(&self) -> bool {
+        false
+    }
+    fn set_size(&self, _w: u32, _h: u32) -> (u32, u32) {
+        self.size()
+    }
+}
+
+impl Drop for AuEditor {
+    fn drop(&mut self) {
+        unsafe {
+            let _: () = msg_send![self.view, removeFromSuperview];
+            let _: () = msg_send![self.view, release];
+        }
+    }
+}
+
+impl AuInstance {
+    pub(crate) fn open_au_editor(&self, parent: crate::ParentWindow) -> Result<Box<dyn crate::Editor>, String> {
+        let crate::ParentWindow::AppKit(parent) = parent else { return Err("Audio Units need a macOS window".into()) };
+        unsafe {
+            let view =
+                cocoa_view(self.unit).or_else(|| generic_view(self.unit)).ok_or_else(|| format!("{} has no editor", self.info.name))?;
+            let parent = parent as *mut AnyObject;
+            let _: () = msg_send![view, setFrameOrigin: NSPoint { x: 0.0, y: 0.0 }];
+            let _: () = msg_send![parent, addSubview: view];
+            Ok(Box::new(AuEditor { view }))
         }
     }
 }
