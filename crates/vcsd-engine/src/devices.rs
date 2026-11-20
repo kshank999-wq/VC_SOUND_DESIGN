@@ -95,6 +95,9 @@ pub struct Prefs {
     /// MIDI input to connect at startup; None = no MIDI.
     #[serde(default)]
     pub midi_port: Option<String>,
+    /// Window/panel layout owned by the UI (opaque JSON object).
+    #[serde(default)]
+    pub ui_layout: serde_json::Value,
 }
 
 /// `$VCSD_CONFIG_DIR`, else the platform config folder.
@@ -123,5 +126,25 @@ impl Prefs {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
         std::fs::write(path, serde_json::to_vec_pretty(self).unwrap_or_default()).map_err(|e| e.to_string())
+    }
+}
+
+/// Merge `patch` into `base`: objects merge recursively, `null` deletes a key,
+/// anything else replaces. Used for the UI layout so independent parts of the
+/// UI (panels, per-project timeline views) can save without clobbering each other.
+pub fn merge_json(base: &mut serde_json::Value, patch: &serde_json::Value) {
+    match (base.as_object_mut(), patch.as_object()) {
+        (Some(b), Some(p)) => {
+            for (k, v) in p {
+                if v.is_null() {
+                    b.remove(k);
+                } else if v.is_object() && b.get(k).is_some_and(|x| x.is_object()) {
+                    merge_json(b.get_mut(k).unwrap(), v);
+                } else {
+                    b.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        _ => *base = patch.clone(),
     }
 }

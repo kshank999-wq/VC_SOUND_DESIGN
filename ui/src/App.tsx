@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { call, openMixerWindow } from "./api";
+import { call, isTauri, openMixerWindow } from "./api";
 import { useEngine } from "./store";
 import type { Asset, Selection } from "./types";
 import { sampleAtTc, tcAt } from "./tc";
@@ -12,16 +12,30 @@ import { Mixer } from "./components/Mixer";
 import { Pads } from "./components/Pads";
 import { ImportDialog, Welcome, type ImportKind } from "./components/Dialogs";
 import { DevicesDialog } from "./components/Devices";
+import { getLayout, resetLayout, saveLayout } from "./layout";
+import { DEFAULTS, LIMITS } from "./layoutModel";
 
 export function App() {
   const eng = useEngine();
   const { view, tx, rate, run, toasts } = eng;
   const [sel, setSel] = useState<Selection>(null);
   const [libSel, setLibSel] = useState<Asset | null>(null);
+  const L0 = getLayout();
   const [vp, setVp] = useState<Viewport>({ start: -4800, spp: 400 });
-  const [snapOn, setSnapOn] = useState(true);
+  const [snapOn, setSnapOnRaw] = useState(L0.snap ?? true);
+  const setSnapOn = (v: boolean) => {
+    setSnapOnRaw(v);
+    saveLayout({ snap: v });
+  };
+  const [leftW, setLeftW] = useState<number>(L0.leftW ?? DEFAULTS.leftW);
+  const [rightW, setRightW] = useState<number>(L0.rightW ?? DEFAULTS.rightW);
+  const [upperPct, setUpperPct] = useState<number>(L0.upperPct ?? DEFAULTS.upperPct);
   const [spotMode, setSpotMode] = useState(false);
-  const [lower, setLower] = useState<"timeline" | "chart" | "mixer" | "qa">("timeline");
+  const [lower, setLowerRaw] = useState<"timeline" | "chart" | "mixer" | "qa">(L0.lowerTab ?? "timeline");
+  const setLower = (t: "timeline" | "chart" | "mixer" | "qa") => {
+    setLowerRaw(t);
+    saveLayout({ lowerTab: t });
+  };
   const [menu, setMenu] = useState(false);
   const [imp, setImp] = useState<ImportKind>(null);
   const [perform, setPerform] = useState<string | null>(null);
@@ -34,11 +48,33 @@ export function App() {
   useEffect(() => {
     if (!view?.open || !rate || opened.current === view.root) return;
     opened.current = view.root ?? null;
+    const saved = view.root ? getLayout().projects?.[view.root]?.vp : undefined;
     const sc = view.scenes[0];
     const w = (centerRef.current?.clientWidth ?? 1000) - 252;
-    if (sc) setVp(zoomToRange(rate, sc.start_sample, sc.end_sample, w));
+    if (saved) setVp(saved); // where you left this project's timeline
+    else if (sc) setVp(zoomToRange(rate, sc.start_sample, sc.end_sample, w));
     setSel(null);
   }, [view?.open, view?.root, rate]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // remember the timeline view per project
+  useEffect(() => {
+    if (view?.open && view.root && opened.current === view.root) saveLayout({ projects: { [view.root]: { vp } } });
+  }, [vp]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // reopen the detached mixer if it was open last time (desktop only: browsers block unrequested popups)
+  useEffect(() => {
+    if (view?.open && getLayout().mixerOpen && isTauri) openMixerWindow();
+  }, [view?.open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const resetWindowLayout = async () => {
+    await resetLayout();
+    setLeftW(DEFAULTS.leftW);
+    setRightW(DEFAULTS.rightW);
+    setUpperPct(DEFAULTS.upperPct);
+    setLowerRaw("timeline");
+    setSnapOnRaw(true);
+    eng.toast("Window layout reset");
+  };
 
   const gotoRange = useCallback((a: number, b: number) => {
     if (!rate) return;
@@ -111,7 +147,7 @@ export function App() {
   const pos = tx?.position ?? 0;
   const db = (tx?.master_peak ?? 0) > 0 ? 20 * Math.log10(tx!.master_peak) : -90;
   return (
-    <div className="app">
+    <div className="app" style={{ gridTemplateColumns: `${leftW}px minmax(0, 1fr) ${rightW}px` }}>
       <header className="topbar">
         <div className="brand" onClick={() => setMenu(!menu)}>
           ☰ <b>{view.project.name}</b>{view.dirty ? " •" : ""}
@@ -126,6 +162,7 @@ export function App() {
               <hr />
               <div onClick={() => run("project.settings", { ai_enabled: !view.project.ai_enabled }, view.project.ai_enabled ? "AI assist off" : "Local AI assist on")}>{view.project.ai_enabled ? "✓ " : ""}Local AI timing assist</div>
               <div onClick={() => openMixerWindow()}>Open mixer window</div>
+              <div onClick={resetWindowLayout}>Reset window layout</div>
               <div onClick={() => setDevices(true)}>Audio & MIDI devices…</div>
               <hr />
               <div onClick={() => run("project.close")}>Close project</div>
@@ -158,9 +195,19 @@ export function App() {
         <button className="primary" onClick={() => setLower("qa")}>Export</button>
       </header>
 
-      <aside className="left"><LeftDock eng={eng} setSel={setSel} libSel={libSel} setLibSel={setLibSel} gotoRange={gotoRange} /></aside>
+      <aside className="left"><LeftDock eng={eng} setSel={setSel} libSel={libSel} setLibSel={setLibSel} gotoRange={gotoRange} initialTab={L0.leftTab} onTab={(t) => saveLayout({ leftTab: t })} /></aside>
+      <Splitter dir="v" style={{ left: leftW - 3 }} title="Drag to resize the left panel (double-click: default)"
+        onDrag={(x) => setLeftW(clamp(x, LIMITS.leftW))} onDone={() => saveLayout({ leftW })} onReset={() => { setLeftW(DEFAULTS.leftW); saveLayout({ leftW: DEFAULTS.leftW }); }} />
+      <Splitter dir="v" style={{ right: rightW - 3 }} title="Drag to resize the inspector (double-click: default)"
+        onDrag={(x) => setRightW(clamp(window.innerWidth - x, LIMITS.rightW))} onDone={() => saveLayout({ rightW })} onReset={() => { setRightW(DEFAULTS.rightW); saveLayout({ rightW: DEFAULTS.rightW }); }} />
 
-      <main className="center" ref={centerRef}>
+      <main className="center" ref={centerRef} style={{ gridTemplateRows: `minmax(100px, ${upperPct}%) 1fr` }}>
+        <Splitter dir="h" style={{ top: `calc(${upperPct}% - 3px)` }} title="Drag to resize picture / timeline (double-click: default)"
+          onDrag={(_, y) => {
+            const r = centerRef.current!.getBoundingClientRect();
+            setUpperPct(clamp(((y - r.top) / r.height) * 100, LIMITS.upperPct));
+          }}
+          onDone={() => saveLayout({ upperPct })} onReset={() => { setUpperPct(DEFAULTS.upperPct); saveLayout({ upperPct: DEFAULTS.upperPct }); }} />
         <div className="upper">
           <Viewer eng={eng} />
           {perform && <Pads eng={eng} cueId={perform} onClose={() => setPerform(null)} />}
@@ -174,7 +221,11 @@ export function App() {
             ))}
             {spotMode && <span className="spot-hint">SPOT MODE — {tx?.open_spots.length ? `open: ${tx.open_spots.map((k) => k.replace("key:Key", "")).join(", ")} (Enter closes)` : "tap F P G B D N M while playing"}</span>}
           </div>
-          {lower === "timeline" && <Timeline eng={eng} vp={vp} setVp={setVp} sel={sel} setSel={setSel} snapOn={snapOn} />}
+          {lower === "timeline" && (
+            <Timeline key={view.root} eng={eng} vp={vp} setVp={setVp} sel={sel} setSel={setSel} snapOn={snapOn}
+              initialScrollY={(view.root && getLayout().projects?.[view.root]?.scrollY) || 0}
+              onScrollY={(y) => view.root && saveLayout({ projects: { [view.root]: { scrollY: y } } })} />
+          )}
           {lower === "chart" && <CueChart eng={eng} setSel={(s) => { setSel(s); }} />}
           {lower === "mixer" && <Mixer eng={eng} />}
           {lower === "qa" && <QaExport eng={eng} />}
@@ -197,6 +248,35 @@ export function App() {
       {devices && <DevicesDialog eng={eng} onClose={() => setDevices(false)} />}
       <Toasts toasts={toasts} />
     </div>
+  );
+}
+
+function clamp(v: number, [lo, hi]: readonly [number, number]) {
+  return Math.round(Math.max(lo, Math.min(hi, v)) * 10) / 10;
+}
+
+/** Draggable divider between panels. `onDrag` gets pointer client x/y. */
+function Splitter({ dir, style, title, onDrag, onDone, onReset }: { dir: "v" | "h"; style: React.CSSProperties; title: string; onDrag: (x: number, y: number) => void; onDone: () => void; onReset: () => void }) {
+  const dragging = useRef(false);
+  return (
+    <div
+      className={`splitter ${dir}`}
+      style={style}
+      title={title}
+      onPointerDown={(e) => {
+        dragging.current = true;
+        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        document.body.classList.add(dir === "v" ? "resizing-v" : "resizing-h");
+      }}
+      onPointerMove={(e) => dragging.current && onDrag(e.clientX, e.clientY)}
+      onPointerUp={() => {
+        if (!dragging.current) return;
+        dragging.current = false;
+        document.body.classList.remove("resizing-v", "resizing-h");
+        onDone();
+      }}
+      onDoubleClick={onReset}
+    />
   );
 }
 

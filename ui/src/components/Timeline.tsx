@@ -121,6 +121,9 @@ interface Props {
   sel: Selection;
   setSel: (s: Selection) => void;
   snapOn: boolean;
+  /** Restored vertical scroll for this project, and a callback to persist it. */
+  initialScrollY?: number;
+  onScrollY?: (y: number) => void;
 }
 
 interface Drag {
@@ -138,11 +141,14 @@ interface Drag {
   preview?: ClipEdit;
 }
 
-export function Timeline({ eng, vp, setVp, sel, setSel, snapOn }: Props) {
+export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY = 0, onScrollY }: Props) {
   const { view, tx, rate, run, livePosition } = eng;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const [scrollY, setScrollY] = useState(0);
+  const [scrollY, setScrollY] = useState(initialScrollY);
+  useEffect(() => {
+    onScrollY?.(scrollY);
+  }, [scrollY]); // eslint-disable-line react-hooks/exhaustive-deps
   const [size, setSize] = useState({ w: 800, h: 300 });
   const hits = useRef<Hit[]>([]);
   const drag = useRef<Drag | null>(null);

@@ -14,6 +14,9 @@ const OUT = process.argv[3] || null;
   const api = (cmd, args = {}) =>
     p.evaluate(async ([c, a]) => (await (await fetch("/api/" + c, { method: "POST", body: JSON.stringify(a) })).json()).ok, [cmd, args]);
   await p.goto(BASE);
+  // start from the default window layout (layouts persist between runs)
+  await p.evaluate(() => fetch("/api/layout.set", { method: "POST", body: JSON.stringify({ reset: true }) }));
+  await p.reload();
   await p.waitForSelector(".topbar");
   await p.click(".tabs button:has-text('Mixer')");
   await p.waitForSelector(".strip");

@@ -10,7 +10,7 @@
                       player.rs   render thread ─rtrb─▶ cpal device callback (or clocked null device)
                       recorder.rs input capture → BWF take at the heard position
                       MIDI (midir) → live spotting / pad performance
-                      devices.rs  device/port enumeration, per-user prefs (output, input, MIDI)
+                      devices.rs  device/port enumeration, per-user prefs (output, input, MIDI, UI layout)
                       serve.rs    browser mode + token-protected loopback media server (Range)
                                                            ▼
  crates/vcsd-core     model, timecode, mixer, editing, reports, export … (UI-agnostic)
@@ -103,7 +103,7 @@
 ## Roadmap
 
 1. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
-2. **App polish:** persisted window layout, signed installers and auto-update.
+2. **App polish:** signed installers and auto-update.
 3. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).
 4. **Interchange spike:** AAF/OTIO against a pinned Resolve version, implemented as an `InterchangeAdapter` that reports what it loses.
 5. **AI:** optical-flow or pose models for footfall detection behind the existing trait, plus an opt-in cloud provider with consent and retention controls.

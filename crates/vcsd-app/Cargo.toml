@@ -17,6 +17,7 @@ vcsd-engine = { path = "../vcsd-engine" }
 serde_json.workspace = true
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-window-state = "2"
 
 [features]
 # Embed the built UI (ui/dist). `tauri dev` disables default features to use the Vite dev server.

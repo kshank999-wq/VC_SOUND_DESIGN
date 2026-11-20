@@ -68,6 +68,8 @@ On first launch, choose **Create demo project…** to get a fully spotted 3-scen
 | Move a fader/pan in Touch/Latch/Write while playing | Records automation against the audio clock, heard live; committed as one undo step |
 | Folder header ▸/▾, double-click its name, M / S | Collapse (a collapsed folder shows its clips on one row), rename (subfolders follow), mute/solo everything inside |
 | Drag a track by its name onto a folder (or onto another track) | Move it into that folder; or type a path in the track inspector's *Folder* field |
+| Drag the edges between panels (double-click: default) | Resize the left panel, inspector, and picture/timeline split |
+| ☰ → Reset window layout | Back to the default panels and tabs |
 | Hold Alt while dragging | Disable frame snapping |
 | Shift-drag in the ruler | Loop range |
 
@@ -81,6 +83,10 @@ Open **☰ → Audio & MIDI devices…** (or click the device name in the status
 - **Input:** the device used for Foley recording.
 - **MIDI input:** the controller used for live spotting and pad performance, with an activity
   light and the last message received. The choice is remembered and reconnects at launch.
+
+The window layout is remembered the same way: panel sizes, open tabs, snap, each project's
+timeline zoom and scroll, and whether the detached mixer was open. In the desktop app every
+window's size, position and maximised state are restored as well.
 
 These settings belong to the computer, not the project. They are saved in `prefs.json` under
 the user config folder (`~/.config/vc-sound-design`, `~/Library/Application Support/VC Sound
@@ -164,4 +170,4 @@ playback and recording run through real ALSA streams without sound hardware.
 detached mixer); `ui/e2e/handles.cjs`, `ui/e2e/automation.cjs`, `ui/e2e/bus_automation.cjs` and
 `ui/e2e/write_automation.cjs` drag real trim/fade handles, automation breakpoints and mixer faders
 (writing Latch/Touch automation during playback) with the mouse; `ui/e2e/folders.cjs` covers track
-folders.
+folders and `ui/e2e/layout.cjs` the persisted window layout.

@@ -1376,6 +1376,24 @@ impl Engine {
                 self.disconnect_midi();
                 Ok(json!({}))
             }
+            "layout.get" => {
+                let l = self.prefs.lock().unwrap().ui_layout.clone();
+                Ok(if l.is_object() { l } else { json!({}) })
+            }
+            "layout.set" => {
+                // {patch: {...}} merges; {reset: true} clears the saved layout
+                {
+                    let mut p = self.prefs.lock().unwrap();
+                    if ob(a, "reset") || !p.ui_layout.is_object() {
+                        p.ui_layout = json!({});
+                    }
+                    if let Some(patch) = a.get("patch") {
+                        devices::merge_json(&mut p.ui_layout, patch);
+                    }
+                }
+                self.save_prefs()?;
+                Ok(self.prefs.lock().unwrap().ui_layout.clone())
+            }
             "devices.list" => Ok(self.devices_json()),
             "devices.status" => Ok(self.device_status_json()),
             "prefs.set" => {

@@ -13,8 +13,14 @@ interface Props {
   gotoRange: (a: number, b: number) => void;
 }
 
-export function LeftDock(p: Props) {
-  const [tab, setTab] = useState<"scenes" | "identities" | "library">("scenes");
+type DockTab = "scenes" | "identities" | "library";
+
+export function LeftDock(p: Props & { initialTab?: DockTab; onTab?: (t: DockTab) => void }) {
+  const [tab, setTabRaw] = useState<DockTab>(p.initialTab ?? "scenes");
+  const setTab = (t: DockTab) => {
+    setTabRaw(t);
+    p.onTab?.(t);
+  };
   return (
     <div className="leftdock">
       <div className="tabs">

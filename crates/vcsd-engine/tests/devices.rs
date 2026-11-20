@@ -87,3 +87,28 @@ fn select_output_input_and_midi_ports() {
     assert_eq!(d["prefs"]["input_device"], "Studio Interface B");
     assert_eq!(d["prefs"]["output_device"], "Studio Interface B");
 }
+
+#[test]
+fn ui_layout_is_merged_and_persisted() {
+    let dir = std::env::temp_dir().join(format!("vcsd_layout_{}", std::process::id()));
+    let prefs = dir.join("prefs.json");
+    let e = Engine::with_prefs(Some(prefs.clone()));
+    assert_eq!(call(&e, "layout.get", json!({})), json!({}));
+    call(&e, "layout.set", json!({"patch": {"leftW": 300, "lowerTab": "chart", "projects": {"/a": {"vp": {"start": 0, "spp": 400}}}}}));
+    // independent saves merge instead of clobbering
+    call(&e, "layout.set", json!({"patch": {"rightW": 340, "projects": {"/b": {"scrollY": 120}}}}));
+    let l = call(&e, "layout.set", json!({"patch": {"lowerTab": null}}));
+    assert_eq!(l["leftW"], 300);
+    assert_eq!(l["rightW"], 340);
+    assert!(l.get("lowerTab").is_none(), "null removes a key");
+    assert_eq!(l["projects"]["/a"]["vp"]["spp"], 400);
+    assert_eq!(l["projects"]["/b"]["scrollY"], 120);
+    // device prefs are untouched, and the layout survives a restart
+    call(&e, "prefs.set", json!({"midi_port": null}));
+    drop(e);
+    let e2 = Engine::with_prefs(Some(prefs.clone()));
+    assert_eq!(call(&e2, "layout.get", json!({}))["projects"]["/a"]["vp"]["spp"], 400);
+    assert_eq!(call(&e2, "layout.set", json!({"reset": true})), json!({}));
+    let saved: Value = serde_json::from_slice(&std::fs::read(&prefs).unwrap()).unwrap();
+    assert_eq!(saved["ui_layout"], json!({}));
+}

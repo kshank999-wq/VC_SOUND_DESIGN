@@ -29,6 +29,8 @@ fn main() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // remembers size, position and maximised state of every window (main + mixer)
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(engine)
         .invoke_handler(tauri::generate_handler![api])
         .run(tauri::generate_context!())

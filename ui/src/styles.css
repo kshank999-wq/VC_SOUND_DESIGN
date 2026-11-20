@@ -304,3 +304,12 @@ button.automode { min-width: 18px; font-weight: 700; }
 .folder-head .twisty { width: 18px; padding: 0; }
 .folder-name-edit { flex: 1; font-size: 11.5px; padding: 1px 4px; }
 .drag-grip { cursor: grab; }
+
+/* panel splitters */
+.app, .center { position: relative; }
+.splitter { position: absolute; z-index: 20; }
+.splitter.v { top: 44px; bottom: 24px; width: 6px; cursor: col-resize; }
+.splitter.h { left: 0; right: 0; height: 6px; cursor: row-resize; }
+.splitter:hover, .splitter:active { background: rgba(79, 157, 255, 0.35); }
+body.resizing-v, body.resizing-v * { cursor: col-resize !important; }
+body.resizing-h, body.resizing-h * { cursor: row-resize !important; }

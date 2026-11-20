@@ -57,8 +57,10 @@ export async function initApi() {
   }
 }
 
-/** Open the detachable mixer (second window / second monitor). */
+/** Open the detachable mixer (second window / second monitor). Its open
+ *  state is remembered so it comes back at the next launch. */
 export async function openMixerWindow() {
+  const { saveLayout } = await import("./layout");
   if (isTauri) {
     const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
     const existing = await WebviewWindow.getByLabel("mixer");
@@ -66,10 +68,35 @@ export async function openMixerWindow() {
       await existing.setFocus();
       return;
     }
-    new WebviewWindow("mixer", { url: "index.html?view=mixer", title: "VC Sound Design — Mixer", width: 1100, height: 520 });
+    const w = new WebviewWindow("mixer", { url: "index.html?view=mixer", title: "VC Sound Design — Mixer", width: 1100, height: 520 });
+    saveLayout({ mixerOpen: true });
+    w.once("tauri://destroyed", () => saveLayout({ mixerOpen: false }));
   } else {
-    window.open("?view=mixer", "vcsd-mixer", "width=1100,height=520");
+    const w = window.open("?view=mixer", "vcsd-mixer", "width=1100,height=520");
+    if (!w) return;
+    saveLayout({ mixerOpen: true });
+    const poll = setInterval(() => {
+      if (w.closed) {
+        clearInterval(poll);
+        saveLayout({ mixerOpen: false });
+      }
+    }, 1000);
   }
+}
+
+/** Desktop: save native window size/position/maximised state on resize/move
+ *  (restored automatically by the window-state plugin when windows open). */
+export async function trackWindowState() {
+  if (!isTauri) return;
+  const { saveWindowState, StateFlags } = await import("@tauri-apps/plugin-window-state");
+  let t: ReturnType<typeof setTimeout> | null = null;
+  const save = () => {
+    if (t) clearTimeout(t);
+    t = setTimeout(() => saveWindowState(StateFlags.ALL).catch(() => {}), 400);
+  };
+  window.addEventListener("resize", save);
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  getCurrentWindow().onMoved(save).catch(() => {});
 }
 
 /** Native folder/file picker in the desktop app; null in browser mode. */
