@@ -60,6 +60,13 @@ fn project(name: &str) -> (state::Session, std::path::PathBuf, String, String) {
     for (t, v) in [(2 * sr, 0.0f32), (3 * sr, -20.0)] {
         editing::set_automation(st, &gt, AutomationParam::VolumeDb, t, v).unwrap();
     }
+    // pan: a sweep on the glass track, and the stereo wind bed's balance held right of centre
+    for (t, v) in [(2 * sr, -1.0f32), (6 * sr, 1.0)] {
+        editing::set_automation(st, &gt, AutomationParam::Pan, t, v).unwrap();
+    }
+    let wind = cue_clip(st, "wind");
+    let wt = st.clips[&wind].track_id.clone();
+    st.tracks.get_mut(&wt).unwrap().pan = 0.5;
     let door = cue_clip(st, "door");
     let dt = st.clips[&door].track_id.clone();
     st.tracks.get_mut(&dt).unwrap().mute = true;
@@ -82,7 +89,7 @@ fn otio_rebuilds_the_timeline_in_opentimelineio() {
     let losses: Vec<&str> = rep["losses"].as_array().unwrap().iter().filter_map(|l| l.as_str()).collect();
     assert!(losses.iter().any(|l| l.starts_with("muted tracks left out (1)")), "{losses:?}");
     assert!(losses.iter().any(|l| l.starts_with("overlapping clips split onto extra tracks (1)")), "{losses:?}");
-    assert!(losses.iter().any(|l| l.starts_with("pan and pan automation carried as metadata only")), "{losses:?}");
+    assert!(losses.iter().any(|l| l.starts_with("pan uses the receiving app's pan law") && l.ends_with("(2)")), "{losses:?}");
     assert!(r.qa.iter().any(|q| q.code == "otio_loss"));
     let readme = std::fs::read_to_string(r.dir.join("README.md")).unwrap();
     assert!(readme.contains("same timeline as OpenTimelineIO") && readme.contains("`OTIO/Media/`"), "{readme}");
@@ -146,7 +153,10 @@ fn otio_rebuilds_the_timeline_in_opentimelineio() {
     assert_eq!(meta["volume_db"], serde_json::json!([[2 * sr - start, 0.0], [3 * sr - start, -20.0]]));
     let wind = tracks.iter().find(|t| t["name"].as_str().unwrap().contains("wind")).unwrap();
     assert_eq!(wind["metadata"]["vcsd"]["channels"], 2, "a stereo track is one OTIO track");
-    assert_eq!(wind["effects"], serde_json::json!([]), "no level effect at unity");
+    // the stereo bed: no level effect at unity; its balance as a constant pan
+    let we = wind["effects"].as_array().unwrap();
+    assert_eq!(we.len(), 1, "{we:?}");
+    assert_eq!((we[0]["name"].as_str(), we[0]["parameters"]["Pan"].as_str()), (Some("Mono Audio Pan"), Some("750000/1000000")));
 
     // levels as AAF-style gain effects (the OpenTimelineIO AAF adapter's encoding)
     let ce = &items[k]["effects"][0];
@@ -156,7 +166,7 @@ fn otio_rebuilds_the_timeline_in_opentimelineio() {
         "clip −6 dB"
     );
     let te = &layer["effects"];
-    assert_eq!(te.as_array().unwrap().len(), 1);
+    assert_eq!(te.as_array().unwrap().len(), 2, "gain, then pan");
     assert_eq!(te[0]["name"], "Mono Audio Gain");
     let amp = &te[0]["parameters"]["Amplitude"];
     assert_eq!((amp["_aaf_keyframed_property"].as_bool(), amp["keyframe_interpolation"].as_str()), (Some(true), Some("Linear")));
@@ -185,6 +195,31 @@ fn otio_rebuilds_the_timeline_in_opentimelineio() {
         let want = -3.0 + lane;
         let got = 20.0 * at((x - start) as f64 / len).log10();
         assert!((got - want).abs() < 0.12, "volume at {x}: {got:.3} dB vs {want:.3} dB");
+    }
+    // pan: the lane's breakpoints as keyframes (0 left … 1 right), so exact everywhere
+    let pan = &te[1];
+    assert_eq!(pan["name"], "Mono Audio Pan");
+    let pk: Vec<(f64, f64)> = pan["parameters"]["Pan"]["keyframe_values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| (k[0].as_f64().unwrap(), k[1].as_f64().unwrap()))
+        .collect();
+    assert!(pk.len() <= 4, "breakpoints, not a fit: {pk:?}");
+    let pat = |u: f64| {
+        let i = pk.partition_point(|p| p.0 <= u);
+        let (a, b) = (pk[i.saturating_sub(1)], pk[i.min(pk.len() - 1)]);
+        if b.0 > a.0 {
+            a.1 + (b.1 - a.1) * (u - a.0) / (b.0 - a.0)
+        } else {
+            a.1
+        }
+    };
+    for k in 0..=400 {
+        let x = start + (k as f64 / 400.0 * (len - 1.0)) as i64;
+        let lane = ((x - 2 * sr) as f64 / (4 * sr) as f64 * 2.0 - 1.0).clamp(-1.0, 1.0);
+        let want = (lane + 1.0) / 2.0;
+        assert!((pat((x - start) as f64 / len) - want).abs() < 1e-5, "pan at {x}");
     }
 
     // cues → timeline markers

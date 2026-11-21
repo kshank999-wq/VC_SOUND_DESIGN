@@ -188,6 +188,9 @@ fn levels_project(name: &str) -> (state::Session, std::path::PathBuf, i64) {
     for (dx, db) in [(0, 0.0), (sr / 4, -18.0), (sr / 2, 0.0)] {
         editing::set_automation(st, &tid, AutomationParam::VolumeDb, t0 + dx, db).unwrap();
     }
+    // a pan sweep from hard left to right of centre
+    editing::set_automation(st, &tid, AutomationParam::Pan, t0, -1.0).unwrap();
+    editing::set_automation(st, &tid, AutomationParam::Pan, t0 + sr / 2, 0.4).unwrap();
     (s, root, t0)
 }
 
@@ -215,6 +218,24 @@ fn level_at(st: &ProjectState, clip: &ClipInstance, x: i64) -> f64 {
     clip.gain_db as f64 + t.gain_db as f64 + v
 }
 
+/// The track's pan at `x`: its lane (held at the ends), else its static pan.
+fn pan_at(st: &ProjectState, clip: &ClipInstance, x: i64) -> f64 {
+    let t = &st.tracks[&clip.track_id];
+    let mut lane: Vec<(i64, f32)> =
+        st.automation.values().filter(|p| p.owner_id == t.id && p.param == AutomationParam::Pan).map(|p| (p.sample, p.value)).collect();
+    lane.sort_by_key(|p| p.0);
+    if lane.is_empty() {
+        return t.pan as f64;
+    }
+    let i = lane.partition_point(|p| p.0 <= x);
+    let (a, b) = (lane[i.saturating_sub(1)], lane[i.min(lane.len() - 1)]);
+    if b.0 > a.0 {
+        a.1 as f64 + (b.1 - a.1) as f64 * (x - a.0) as f64 / (b.0 - a.0) as f64
+    } else {
+        a.1 as f64
+    }
+}
+
 fn same_levels(a: &ProjectState, b: &ProjectState, t0: i64, tol: f64) {
     let ca = a.clips.values().find(|c| c.timeline_start == t0 && !c.muted).unwrap();
     let cb = b.clips.values().find(|c| c.timeline_start == t0 && c.length == ca.length).expect("the clip, in place");
@@ -222,6 +243,8 @@ fn same_levels(a: &ProjectState, b: &ProjectState, t0: i64, tol: f64) {
         let x = t0 + ca.length * k / 200;
         let (wa, wb) = (level_at(a, ca, x), level_at(b, cb, x));
         assert!((wa - wb).abs() < tol, "level at {x}: {wb:.3} dB imported vs {wa:.3} dB");
+        let (pa, pb) = (pan_at(a, ca, x), pan_at(b, cb, x));
+        assert!((pa - pb).abs() < 0.003, "pan at {x}: {pb:.4} imported vs {pa:.4}");
     }
 }
 

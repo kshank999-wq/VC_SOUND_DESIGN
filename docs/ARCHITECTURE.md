@@ -133,14 +133,16 @@ butt-spliced repeats, muted tracks and clips left out). It also shares its media
 | Fade between butted clips | Clip metadata only (a transition there would be a crossfade over handles) |
 | Clip gain | A "Mono Audio Gain" `Effect` on the clip, with a constant `Amplitude` (linear, as the AAF Rational string `"n/d"`) |
 | Track fader × volume automation | A "Mono Audio Gain" `Effect` on the track: a constant, or keyframes `[fraction of the track's length, linear gain]`, linear in amplitude and fitted within 0.1 dB of the lane (which ramps in dB) |
-| Clip fades, pan, bus, and the raw fader and lanes (offsets from the range start) | `metadata.vcsd` on the clip or track |
+| Track pan, pan automation | A "Mono Audio Pan" `Effect` on the track (`Pan`: 0 left, 0.5 centre, 1 right), constant or keyframed. The lane is linear in its value, as AAF keyframes are, so its breakpoints are the keyframes, exactly. On a stereo track the value is the mixer's balance (`metadata.vcsd.law`) |
+| Clip fades, bus, and the raw fader, pan and lanes (offsets from the range start) | `metadata.vcsd` on the clip or track |
 | Cues | Timeline markers, coloured by category, with the description as comment |
 
 OTIO has no audio mix model, so levels follow the one convention OTIO tools share. The
 OpenTimelineIO AAF adapter carries AAF's Mono Audio Gain as an `Effect` whose
 `metadata.AAF.Parameters.Amplitude` is a constant or keyframes (with `simplify=True` it sits on the
-track or clip), and the export writes levels in that encoding. Pan, bus routing and inserts are not
-carried; the export lists them in `OTIO/otio_report.json`, the README and QA.
+track or clip); Mono Audio Pan is the same, with `Pan`. The export writes levels and pan in that
+encoding. Bus routing and inserts are not carried. Pan sounds as the receiving app's pan law
+makes it. The export lists these in `OTIO/otio_report.json`, the README and QA.
 
 **Verification:** `crates/vcsd-core/tests/otio.rs` reads each file with the OpenTimelineIO
 library (`scripts/otio/otio_summary.py`) and checks the following:
@@ -150,6 +152,8 @@ library (`scripts/otio/otio_summary.py`) and checks the following:
 - the fade dissolves around the glass clip;
 - the clip's gain effect, and the track's gain keyframes against the mixer's level (fader plus
   lane) within 0.12 dB at 401 points;
+- the pan keyframes against the pan lane, exact at 401 points, and a stereo track's balance as a
+  constant pan;
 - the markers;
 - sharing the media and prints with the AAF.
 
@@ -192,7 +196,8 @@ library in an editor's layout (`scripts/otio/make_fixture.py`) and checks the fo
 - a nested stack trimmed to its range;
 - a missing reference reported, and the timeline and clip markers.
 
-Levels are checked two ways, each within 0.25 dB at 201 points of the automated clip:
+Levels and pan are checked two ways, each at 201 points of the automated clip (levels within
+0.25 dB, pan within 0.003):
 - our export with its `metadata.vcsd` stripped, read from the gain effects alone;
 - our AAF converted to OTIO by the OpenTimelineIO AAF adapter, then imported. The fader folded
   into clip gain comes back as −9 dB.

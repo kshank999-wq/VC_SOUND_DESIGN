@@ -14,10 +14,11 @@
 //! - Cues are markers on the timeline, coloured by category.
 //! - Printed tracks (optional, shared with the AAF) are one clip of their render.
 //!
-//! OTIO has no audio mix model: clip gain, the track fader and pan, and volume
-//! and pan automation go into `metadata.vcsd` on the clip or track, where tools
-//! that know them can read them and others ignore them. Losses are listed in the
-//! [`OtioReport`].
+//! OTIO has no audio mix model. Levels and pan follow the convention of the
+//! OpenTimelineIO AAF adapter: AAF's Mono Audio Gain and Mono Audio Pan as
+//! `Effect`s on the track (fader × volume automation, pan or pan automation) and
+//! clip (clip gain), constant or keyframed. The raw values also go into
+//! `metadata.vcsd`. Losses are listed in the [`OtioReport`].
 
 use crate::aaf::{bus_muted, clip_pieces, db_amp, gain_points, lane_db, trim, url_for, AafMedia, Losses, Piece};
 use crate::error::Result;
@@ -123,6 +124,48 @@ fn gain_effect(amplitude: Value, vcsd: Value) -> Value {
     })
 }
 
+/// The track's pan as AAF's Mono Audio Pan, in the same encoding as the gain
+/// (`Pan`: 0 left, 0.5 centre, 1 right). The pan lane is linear in its value, as
+/// AAF keyframes are, so its breakpoints are the keyframes, exactly. On a stereo
+/// track the value is the mixer's balance (`metadata.vcsd.law`). None when centred.
+fn track_pan(s: &ProjectState, t: &Track, start: i64, end: i64) -> Option<Value> {
+    let pts = lane(s, &t.id, AutomationParam::Pan, 0);
+    let law = if t.channels >= 2 { "balance" } else { "constant_power_-3dB" };
+    let vcsd = json!({ "param": "pan", "pan": t.pan, "automated": !pts.is_empty(), "law": law });
+    let effect = |pan: Value| {
+        json!({
+            "OTIO_SCHEMA": "Effect.1",
+            "metadata": {
+                "AAF": {
+                    "Operation": { "Name": "Mono Audio Pan", "Identification": "9d2ea893-0968-11d3-8a38-0050040ef7d2" },
+                    "Parameters": { "Pan": pan },
+                },
+                "vcsd": vcsd,
+            },
+            "name": "Mono Audio Pan",
+            "effect_name": "Mono Audio Pan",
+        })
+    };
+    let to_param = |p: f64| (p.clamp(-1.0, 1.0) + 1.0) / 2.0;
+    if pts.is_empty() {
+        return (t.pan.abs() > 1e-4).then(|| effect(json!(rational_str(to_param(t.pan as f64)))));
+    }
+    let last = end - 1;
+    let mut keys = vec![start];
+    keys.extend(pts.iter().map(|p| p.0).filter(|&x| x > start && x < last));
+    keys.push(last);
+    keys.dedup();
+    let len = (end - start).max(1) as f64;
+    let kf: Vec<Value> =
+        keys.iter().map(|&x| json!([(x - start) as f64 / len, (to_param(lane_db(&pts, x)) * 1e6).round() / 1e6])).collect();
+    Some(effect(json!({
+        "_aaf_keyframed_property": true,
+        "keyframe_values": kf,
+        "keyframe_interpolation": "Linear",
+        "keyframe_baked_values": null,
+    })))
+}
+
 /// The track's level over `[start, end)`: its fader times its volume lane, as the
 /// mixer plays it. Keyframes are fitted (linear amplitude) within 0.1 dB of the
 /// lane, which ramps in dB. None at unity.
@@ -165,9 +208,10 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     let mut report = OtioReport { timeline: o.name.clone(), printed_tracks: o.prints.len(), ..Default::default() };
 
     // ---- what OTIO can't hold
+    let pans = |t: &Track| t.pan.abs() > 1e-4 || s.automation.values().any(|p| p.owner_id == t.id && p.param == AutomationParam::Pan);
     losses.add(
-        "pan and pan automation carried as metadata only (OTIO has no audio mix model; levels go as AAF-style gain effects)",
-        s.tracks.values().filter(|t| !t.mute).count(),
+        "pan uses the receiving app's pan law (VC Sound Design: −3 dB constant power on mono tracks, balance on stereo tracks)",
+        s.tracks.values().filter(|t| !t.mute && pans(t)).count(),
     );
     losses.add("bus routing, levels and automation not carried", s.buses.values().filter(|b| b.parent_id.is_some()).count());
     let inserts: usize =
@@ -236,6 +280,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         let bus = s.buses.get(&t.bus_id).map(|b| b.name.clone()).unwrap_or_default();
         // the track's level (fader × volume automation) as a gain effect on each of its layers
         let volume = track_volume(s, t, start, end);
+        let pan = track_pan(s, t, start, end);
         for (li, lane_pieces) in lanes.iter().enumerate() {
             let mut items = vec![];
             let mut pos = start;
@@ -315,7 +360,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                     "pan_automation": points(AutomationParam::Pan),
                 } },
                 "name": name,
-                "source_range": null, "effects": volume.iter().collect::<Vec<_>>(), "markers": [], "enabled": true,
+                "source_range": null, "effects": volume.iter().chain(&pan).collect::<Vec<_>>(), "markers": [], "enabled": true,
                 "children": items,
                 "kind": "Audio",
             }));
