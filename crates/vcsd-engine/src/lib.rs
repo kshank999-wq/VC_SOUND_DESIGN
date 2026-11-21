@@ -1671,6 +1671,25 @@ impl Engine {
                 g.peaks.clear();
                 Ok(serde_json::to_value(rep).map_err(e)?)
             }
+            "aaf.import" => {
+                // an editor's timeline: tracks, clips, fades, gain/pan automation, markers
+                let path = PathBuf::from(s(a, "path")?);
+                let root = g.session.as_ref().and_then(|x| x.root.clone()).ok_or("no project folder")?;
+                let mut o = vcsd_core::aaf_import::AafImportOptions::for_project(&root, &path);
+                o.search_dirs = a
+                    .get("search_dirs")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .collect();
+                o.composition = os(a, "composition").map(String::from);
+                let tb = Self::st(g)?.tb();
+                o.at = os(a, "at_tc").filter(|t| !t.trim().is_empty()).map(|t| tb.sample_at_tc(t)).transpose().map_err(e)?;
+                let rep = self.edit(g, "import AAF", |st| vcsd_core::aaf_import::import(st, &path, &o))?;
+                Ok(serde_json::to_value(rep).map_err(e)?)
+            }
             "score.import" => {
                 let path = PathBuf::from(s(a, "path")?);
                 let id = self.edit(g, "import score", |st| integrations::import_score(st, &path))?;

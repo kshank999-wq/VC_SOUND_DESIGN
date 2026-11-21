@@ -230,6 +230,23 @@ pub fn read(path: &Path) -> Result<(WavInfo, AudioBuffer)> {
     Ok((p.info, buf))
 }
 
+/// The sample bytes of a WAV exactly as stored (interleaved, little-endian).
+pub fn read_raw(path: &Path) -> Result<(WavInfo, Vec<u8>)> {
+    let mut f = std::io::BufReader::new(std::fs::File::open(path)?);
+    let p = parse_header(&mut f)?;
+    f.seek(SeekFrom::Start(p.data_offset))?;
+    let mut raw = vec![];
+    f.take(p.data_len).read_to_end(&mut raw)?;
+    let block = p.info.channels as usize * p.info.format.bits() as usize / 8;
+    raw.truncate(raw.len() / block * block);
+    Ok((p.info, raw))
+}
+
+/// Write already-encoded interleaved little-endian samples as a WAV.
+pub fn write_raw(path: &Path, sample_rate: u32, channels: u16, format: SampleFormat, data: &[u8]) -> Result<()> {
+    finish(path, sample_rate, channels, format, None, data)
+}
+
 fn put_fixed(out: &mut Vec<u8>, s: &str, n: usize) {
     let b = s.as_bytes();
     let k = b.len().min(n);
@@ -242,7 +259,6 @@ fn put_fixed(out: &mut Vec<u8>, s: &str, n: usize) {
 pub fn write(path: &Path, buf: &AudioBuffer, format: SampleFormat, bext: Option<&Bext>) -> Result<()> {
     let ch = buf.channels;
     let bits = format.bits();
-    let block = ch as u32 * bits as u32 / 8;
     let mut pcm: Vec<u8> = Vec::with_capacity(buf.data.len() * bits as usize / 8);
     for &s in &buf.data {
         let s = if s.is_finite() { s } else { 0.0 };
@@ -256,14 +272,20 @@ pub fn write(path: &Path, buf: &AudioBuffer, format: SampleFormat, bext: Option<
             SampleFormat::Float32 => pcm.extend_from_slice(&s.to_le_bytes()),
         }
     }
+    finish(path, buf.sample_rate, ch, format, bext, &pcm)
+}
+
+fn finish(path: &Path, sample_rate: u32, ch: u16, format: SampleFormat, bext: Option<&Bext>, pcm: &[u8]) -> Result<()> {
+    let bits = format.bits();
+    let block = ch as u32 * bits as u32 / 8;
     let mut chunks: Vec<u8> = Vec::new();
     // fmt
     chunks.extend_from_slice(b"fmt ");
     chunks.extend_from_slice(&16u32.to_le_bytes());
     chunks.extend_from_slice(&(if format == SampleFormat::Float32 { 3u16 } else { 1u16 }).to_le_bytes());
     chunks.extend_from_slice(&ch.to_le_bytes());
-    chunks.extend_from_slice(&buf.sample_rate.to_le_bytes());
-    chunks.extend_from_slice(&(buf.sample_rate * block).to_le_bytes());
+    chunks.extend_from_slice(&sample_rate.to_le_bytes());
+    chunks.extend_from_slice(&(sample_rate * block).to_le_bytes());
     chunks.extend_from_slice(&(block as u16).to_le_bytes());
     chunks.extend_from_slice(&bits.to_le_bytes());
     if let Some(b) = bext {
@@ -300,7 +322,7 @@ pub fn write(path: &Path, buf: &AudioBuffer, format: SampleFormat, bext: Option<
         f.write_all(&(riff_len as u32).to_le_bytes())?;
         f.write_all(b"WAVE")?;
         f.write_all(&chunks)?;
-        f.write_all(&pcm)?;
+        f.write_all(pcm)?;
         if pcm.len() % 2 == 1 {
             f.write_all(&[0])?;
         }

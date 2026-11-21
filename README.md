@@ -32,7 +32,10 @@ How the code maps onto them is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
   and pan automation, bus levels, cue markers and timecode, linking copies of the source WAVs.
   Tracks with plugins can be printed into it with their plugins and automation. The AAF is checked with an
   independent reader but not yet in a specific Resolve version; see
-  [AAF export](docs/ARCHITECTURE.md#aaf-export-tier-2). See the
+  [AAF export](docs/ARCHITECTURE.md#aaf-export-tier-2). An editor's AAF can be imported
+  (File menu, or `vcsd import-aaf`) as new tracks. It brings in clips, fades and crossfades,
+  clip gain, volume and pan automation, stereo pairs and markers. Media can be linked,
+  embedded, or AIFF/MXF PCM; see [AAF import](docs/ARCHITECTURE.md#aaf-import). See the
 [roadmap](docs/ARCHITECTURE.md#roadmap).
 
 ## Desktop app

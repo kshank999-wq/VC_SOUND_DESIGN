@@ -192,6 +192,20 @@ enum Cmd {
     },
     /// Relink missing media by content hash
     Relink { dir: PathBuf, search: Vec<PathBuf> },
+    /// Import an AAF (an editor's timeline) as new tracks
+    ImportAaf {
+        dir: PathBuf,
+        aaf: PathBuf,
+        /// Place the composition's start here instead of at its own timecode
+        #[arg(long)]
+        at: Option<String>,
+        /// Composition to import, by name (default: the top-level one)
+        #[arg(long)]
+        composition: Option<String>,
+        /// Folders searched (by file name) for linked media that moved
+        #[arg(long = "search")]
+        search: Vec<PathBuf>,
+    },
     /// Import a VC Composer timecoded score (JSON contract)
     Score { dir: PathBuf, json: PathBuf },
     /// Import a VC Film Studio script breakdown (JSON contract)
@@ -598,6 +612,32 @@ fn run(cli: Cli) -> Result<()> {
             let (_, rep) =
                 mutate(&dir, "relink", |st| relink::relink_by_hash(st, &search.iter().map(|p| p.as_path()).collect::<Vec<_>>()))?;
             println!("scanned {} files · relinked {} · still missing {}", rep.scanned_files, rep.relinked.len(), rep.still_missing.len());
+        }
+        Cmd::ImportAaf { dir, aaf, at, composition, search } => {
+            let mut o = aaf_import::AafImportOptions::for_project(&dir, &aaf);
+            o.search_dirs = search;
+            o.composition = composition;
+            let (_, r) = mutate(&dir, "import AAF", |st| {
+                o.at = at.as_deref().map(|t| st.tb().sample_at_tc(t)).transpose()?;
+                aaf_import::import(st, &aaf, &o)
+            })?;
+            println!(
+                "'{}' at {}: {} tracks ({} stereo), {} clips, {} markers; media {} linked, {} written",
+                r.composition,
+                r.start_tc,
+                r.tracks.len(),
+                r.stereo_tracks,
+                r.clips,
+                r.markers,
+                r.media_linked,
+                r.media_written
+            );
+            for m in &r.missing_media {
+                println!("  missing: {m}");
+            }
+            for n in &r.notes {
+                println!("  note: {n}");
+            }
         }
         Cmd::Score { dir, json } => {
             let (s, id) = mutate(&dir, "import score", |st| integrations::import_score(st, &json))?;

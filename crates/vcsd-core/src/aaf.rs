@@ -43,7 +43,7 @@ const TEMPLATE: &[u8] = include_bytes!("../assets/aaf_template.aaf");
 
 // ---------------------------------------------------------------- object model
 
-mod class {
+pub(crate) mod class {
     pub const CONTENT_STORAGE: &str = "0d010101-0101-1800-060e-2b3402060101";
     pub const COMPOSITION_MOB: &str = "0d010101-0101-3500-060e-2b3402060101";
     pub const MASTER_MOB: &str = "0d010101-0101-3600-060e-2b3402060101";
@@ -65,7 +65,7 @@ mod class {
 }
 
 /// Definition keys (AUIDs as stored, i.e. little-endian GUID bytes).
-mod key {
+pub(crate) mod key {
     pub const SOUND: &str = "0202030100020000060e2b3404010101";
     pub const TIMECODE: &str = "0102030100010000060e2b3404010101";
     pub const DESCRIPTIVE: &str = "0102030100100000060e2b3404010101";
@@ -217,7 +217,7 @@ fn weak_table<F: Read + Seek>(cf: &mut cfb::CompoundFile<F>) -> Result<Vec<Vec<u
 }
 
 /// Properties stream ↔ list of (pid, stored form, data).
-fn parse_props(b: &[u8]) -> Result<Vec<(u16, u16, Vec<u8>)>> {
+pub(crate) fn parse_props(b: &[u8]) -> Result<Vec<(u16, u16, Vec<u8>)>> {
     if b.len() < 4 {
         return Err(invalid("AAF: short properties stream"));
     }
@@ -659,7 +659,7 @@ fn gain_points(keys: &[i64], start: i64, end: i64, amp: &dyn Fn(i64) -> f64) -> 
 
 /// Control points for `f` with corners at `keys`, split until linear interpolation
 /// between neighbours is no longer `bad(interpolated, actual)` at the midpoints.
-fn fit(keys: &[i64], start: i64, end: i64, f: &dyn Fn(i64) -> f64, bad: &dyn Fn(f64, f64) -> bool) -> Vec<(i64, f64)> {
+pub(crate) fn fit(keys: &[i64], start: i64, end: i64, f: &dyn Fn(i64) -> f64, bad: &dyn Fn(f64, f64) -> bool) -> Vec<(i64, f64)> {
     let last = end - 1;
     let mut ks = vec![start];
     ks.extend(keys.iter().copied().filter(|&t| t > start && t < last));

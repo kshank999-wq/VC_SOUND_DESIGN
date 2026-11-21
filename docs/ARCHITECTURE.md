@@ -115,6 +115,50 @@ the dry clips through the plugin and its automation. It has not been opened in
 DaVinci Resolve, Pro Tools or Media Composer yet. Pinning a Resolve version and recording its
 feature matrix is the next step.
 
+## AAF import
+
+`crates/vcsd-core/src/aaf_import.rs` reads AAF files from editors' systems: little-endian
+structured storage, as written by the AAF SDK (Media Composer, Pro Tools, Premiere, Resolve),
+pyaaf2 and VC Sound Design. It reads the object tree generically: property streams,
+strong-reference vectors and sets, weak-reference keys and data streams. It recognises classes
+by their storage CLSID, walking up the file's meta-dictionary for extension subclasses. The
+top-level composition (by name, or the one with the most sound clips) is placed at its timecode
+(or a given TC) and becomes new tracks in a folder `AAF/<composition>`:
+
+| AAF | Project |
+|---|---|
+| Sound track (any edit rate: positions are converted exactly, e.g. 1 frame at 25 fps = 1920 samples) | A track, its category guessed from the name ("DIA 1" → Dialogue). Picture tracks are ignored |
+| Two tracks playing channels 1 and 2 of the same stereo files, hard-panned L/R (or named "… L"/"… R") | One stereo track; the two sides' gains become volume plus balance |
+| `SourceClip` (through selectors, essence groups, nested scopes and effects) | A clip. Its source is followed through master and file mobs (edit rates and slot origins on the way) to a file and channel |
+| Clip fades; `Transition` | Fades; a transition is a crossfade of its length |
+| Mono Audio Gain on a clip (constant) | Clip gain |
+| Mono Audio Gain around a track (constant or varying), or a varying gain on a clip | Track gain, or a volume lane. AAF interpolates linear amplitude, so the lane is fitted within 0.1 dB, then thinned (collinear breakpoints dropped) |
+| Mono Audio Pan (constant or varying) | Track pan or a pan lane |
+| Comment and descriptive markers | Spotting markers in an "AAF markers" lane, for those inside a scene |
+
+**Media:** linked WAV/BWF is used where it is. When it has moved, it is searched for by name next
+to the AAF and in the given folders. Embedded essence is extracted to
+`Audio/Imported/AAF/<file>/`, bit-exact: WAVE, AIFC, or raw PCM per the descriptor. So are
+AIFF/AIFC and Avid OP-Atom MXF with PCM sound essence (BWF frame- or clip-wrapped; parameters
+from the MXF's WaveAudioDescriptor or the AAF's), and a channel of a multichannel file used on a
+mono track. Media at another sample rate is converted (linear). Files are named after their mob,
+so importing again reuses them, and assets are deduplicated by content.
+
+**Reported, not imported:** media that can't be found or read (per file, with the clip count),
+effects other than gain and pan, non-linear interpolation (read as linear), and markers outside
+every scene.
+
+**Verification:** `crates/vcsd-core/tests/aaf_import.rs` round-trips an export: the master mix
+of the imported project matches the original within the curve fits. It also imports an AAF
+written by pyaaf2 in an editor's layout (`scripts/aaf/make_fixture.py`) and checks the
+following:
+- 25 fps edit units, the transition as a crossfade, and a bit-exact channel extract of
+  embedded PCM;
+- moved linked media found by name or in a search folder;
+- clip gain, the varying track gain against the AAF curve, pan, and the marker.
+
+It has not yet been tested with files from Media Composer, Pro Tools or Resolve.
+
 ## Principles carried into code
 
 | Spec principle | Implementation |
@@ -168,7 +212,7 @@ feature matrix is the next step.
 - **Engine language and shell:** a Rust engine (deterministic and realtime-capable, cross-platform) inside a Tauri 2 desktop shell with a React UI. The webview only draws the interface; audio, recording and MIDI run natively in the engine, which follows the spec's rule against making browser JavaScript responsible for realtime audio.
 - **Native format:** a versioned SQLite DB with JSON documents per entity and external media, as the spec proposes.
 - **Placeholder licensing:** the bundled starter pack is generated procedurally by our own code, so it can be redistributed. Third-party packs carry their own license metadata, and QA flags anything not redistributable.
-- **Interchange:** Tier 1 (aligned BWF plus manifest) is implemented and tested. Tier 2 is an optional AAF of the editable timeline (see below), checked with an independent reader but not yet against a pinned Resolve/Fairlight version.
+- **Interchange:** Tier 1 (aligned BWF plus manifest) is implemented and tested. Tier 2 is an optional AAF of the editable timeline (see below), checked with an independent reader but not yet against a pinned Resolve/Fairlight version. AAF import reads editors' timelines (tested with pyaaf2-written files and round trips, not yet with files from Media Composer, Pro Tools or Resolve).
 
 ## Known limitations
 
@@ -196,6 +240,6 @@ feature matrix is the next step.
 2. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
 3. **Distribution:** cloud-HSM Windows signing (`signCommand`), a beta update channel, and delta updates.
 4. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).
-5. **Interchange:** open the AAF export in a pinned Resolve/Fairlight version (and Pro Tools), record the feature matrix (volume and pan automation especially: hosts differ in whether they
+5. **Interchange:** open the AAF export in a pinned Resolve/Fairlight version (and Pro Tools), import AAFs exported by Media Composer, Premiere, Resolve and Pro Tools (AES3 MXF, multichannel MXF), record the feature matrix (volume and pan automation especially: hosts differ in whether they
 read track-level gain/pan operations, and in their pan laws), then OTIO.
 6. **AI:** optical-flow or pose models for footfall detection behind the existing trait, plus an opt-in cloud provider with consent and retention controls.

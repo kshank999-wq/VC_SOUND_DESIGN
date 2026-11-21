@@ -9,6 +9,7 @@
 //! undo/redo and auditing. Timeline truth is integer samples.
 
 pub mod aaf;
+pub mod aaf_import;
 pub mod builder;
 pub mod editing;
 pub mod error;
