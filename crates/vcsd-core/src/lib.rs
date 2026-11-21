@@ -8,6 +8,7 @@
 //! [`state::ProjectState`], wrapped by [`state::Session::edit`] for
 //! undo/redo and auditing. Timeline truth is integer samples.
 
+pub mod aaf;
 pub mod builder;
 pub mod editing;
 pub mod error;

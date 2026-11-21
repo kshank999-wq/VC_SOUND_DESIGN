@@ -182,6 +182,9 @@ enum Cmd {
         date: Option<String>,
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Also write an AAF of the editable timeline (linked media in AAF/Media)
+        #[arg(long)]
+        aaf: bool,
     },
     /// Relink missing media by content hash
     Relink { dir: PathBuf, search: Vec<PathBuf> },
@@ -562,12 +565,13 @@ fn run(cli: Cli) -> Result<()> {
             let v = qa::run(&s.state, &qa::QaOptions { verify_hashes: hashes, exclude_temp_refs: true });
             print!("{}", qa::to_markdown(&v));
         }
-        Cmd::Export { dir, profile, scene, handles_ms, float, force, date, out } => {
+        Cmd::Export { dir, profile, scene, handles_ms, float, force, date, out, aaf } => {
             let mut s = open(&dir)?;
             let mut o = ExportOptions::new(ExportProfile::parse(&profile)?, &date.unwrap_or_else(today));
             o.handle_samples = handles_ms as i64 * s.state.project.sample_rate as i64 / 1000;
             o.force = force;
             o.out_dir = out;
+            o.aaf = aaf;
             if float {
                 o.format = wav::SampleFormat::Float32;
             }

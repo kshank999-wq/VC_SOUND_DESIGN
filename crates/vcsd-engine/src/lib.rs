@@ -1643,6 +1643,7 @@ impl Engine {
                 let mut o = ExportOptions::new(ExportProfile::parse(os(a, "profile").unwrap_or("resolve")).map_err(e)?, &today());
                 o.handle_samples = oi(a, "handles_ms").unwrap_or(0) * st.project.sample_rate as i64 / 1000;
                 o.force = ob(a, "force");
+                o.aaf = ob(a, "aaf");
                 if ob(a, "float") {
                     o.format = wav::SampleFormat::Float32;
                 }
@@ -1659,7 +1660,8 @@ impl Engine {
                 if let Some(sess) = g.session.as_mut() {
                     let _ = sess.save();
                 }
-                Ok(json!({"dir": r.dir.display().to_string(), "files": r.files.len(), "qa": r.qa}))
+                let aaf = r.files.iter().find(|f| f.ends_with(".aaf")).cloned();
+                Ok(json!({"dir": r.dir.display().to_string(), "files": r.files.len(), "qa": r.qa, "aaf": aaf}))
             }
             "relink.run" => {
                 let dirs: Vec<PathBuf> = serde_json::from_value(a.get("dirs").cloned().unwrap_or_default()).map_err(e)?;

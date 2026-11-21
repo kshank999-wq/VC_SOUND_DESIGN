@@ -2,8 +2,9 @@
 //!
 //! Tier 1 (guaranteed): sample-aligned BWF WAV stems/tracks/cues plus a
 //! machine-readable cue manifest that lets a receiving editor rebuild the
-//! intended layout without any interchange adapter. Tier 2 (AAF etc.) plugs
-//! in through [`InterchangeAdapter`] once validated against a pinned target.
+//! intended layout without any interchange adapter. Tier 2: an optional AAF of
+//! the editable timeline ([`crate::aaf`], `ExportOptions::aaf`); other formats can
+//! plug in through [`InterchangeAdapter`].
 
 use crate::error::{Error, Result};
 use crate::ids::{new_id, now_unix};
@@ -68,6 +69,8 @@ pub struct ExportOptions {
     pub out_dir: Option<PathBuf>,
     /// Hosted plugins for the render (None: plugin slots pass through, with a QA warning).
     pub plugins: Option<crate::mixer::PluginHostRef>,
+    /// Also write an AAF of the editable timeline (Tier 2, `AAF/`).
+    pub aaf: bool,
 }
 
 impl ExportOptions {
@@ -82,6 +85,7 @@ impl ExportOptions {
             exclude_temp_refs: profile != ExportProfile::QuickReview,
             out_dir: None,
             plugins: None,
+            aaf: false,
         }
     }
 }
@@ -286,6 +290,45 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
         }
     }
 
+    // ---- Tier-2 interchange: AAF of the editable timeline (optional)
+    let mut aaf_report = None;
+    if o.aaf {
+        let used: Vec<String> = st
+            .clips
+            .values()
+            .filter(|c| !c.muted && c.timeline_start < end && c.end() > start)
+            .filter(|c| st.tracks.get(&c.track_id).is_some_and(|t| !t.mute))
+            .map(|c| c.asset_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let (media, notes) = crate::aaf::prepare_media(st, &used, &dir.join("AAF/Media"))?;
+        for m in media.values() {
+            if let Ok(rel) = m.path.strip_prefix(std::fs::canonicalize(&dir).unwrap_or(dir.clone())) {
+                w.files.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        let rel = format!("AAF/{prefix}.aaf");
+        let label = match &scene_filter {
+            Some(id) => format!("{} — Scene {}", st.project.name, st.scenes.get(id).map(|x| x.number.as_str()).unwrap_or("")),
+            None => st.project.name.clone(),
+        };
+        let mut r = crate::aaf::write(
+            st,
+            &dir.join(&rel),
+            &media,
+            &crate::aaf::AafOptions { name: label, start, end, exclude_temp_refs: o.exclude_temp_refs },
+        )?;
+        r.file = rel.clone();
+        r.losses.extend(notes);
+        w.files.push(rel);
+        for l in &r.losses {
+            w.qa.push(QaIssue::new(Severity::Info, "aaf_loss", format!("AAF: {l}"), None));
+        }
+        w.text("AAF/aaf_report.json", serde_json::to_string_pretty(&r)?.as_bytes())?;
+        aaf_report = Some(r);
+    }
+
     // ---- manifests
     let manifest = cue_manifest(st, start, end, o, &tracks_meta, &stems_meta, &discrete, mix_file.as_deref());
     w.text("Manifests/cue_manifest.json", serde_json::to_string_pretty(&manifest)?.as_bytes())?;
@@ -332,7 +375,7 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
         qa.push(QaIssue::new(Severity::Warning, "render", wq.clone(), None));
     }
     qa.append(&mut w.qa);
-    w.text("README.md", readme(st, o, start, end, &qa).as_bytes())?;
+    w.text("README.md", readme(st, o, start, end, &qa, aaf_report.as_ref()).as_bytes())?;
     w.text("Reports/delivery_qa.md", crate::qa::to_markdown(&qa).as_bytes())?;
     w.text("Reports/delivery_qa.json", serde_json::to_string_pretty(&qa)?.as_bytes())?;
     let mut sums = String::new();
@@ -548,7 +591,28 @@ fn picture_history(s: &ProjectState) -> serde_json::Value {
     serde_json::json!(v.iter().map(|p| serde_json::json!({"label": p.label, "file": Path::new(&p.media_path).file_name().map(|f| f.to_string_lossy().to_string()), "fingerprint": p.fingerprint, "start_tc": fr.frames_to_tc(p.source_start_frame), "duration_frames": p.duration_frames, "previous": p.previous_id.as_ref().and_then(|x| s.pictures.get(x)).map(|x| x.label.clone()), "change_notes": p.change_notes, "current": s.project.current_picture_id.as_deref() == Some(p.id.as_str())})).collect::<Vec<_>>())
 }
 
-fn readme(s: &ProjectState, o: &ExportOptions, start: i64, end: i64, qa: &[QaIssue]) -> String {
+fn readme(s: &ProjectState, o: &ExportOptions, start: i64, end: i64, qa: &[QaIssue], aaf: Option<&crate::aaf::AafReport>) -> String {
+    let tier2 = match aaf {
+        None => "No timeline interchange (AAF/OTIO) is included in this package. Routing, plugins, clip fades,\n\
+automation and markers are therefore delivered as rendered audio plus the JSON/CSV manifests,\n\
+not as editable Fairlight timeline objects."
+            .to_string(),
+        Some(r) => format!(
+            "`{file}` holds the editable timeline: {tracks} mono tracks (stereo tracks as L/R pairs), {clips} clips\n\
+with source offsets, linear fades and clip gain (track fader folded in), {markers} cue markers and a\n\
+timecode track starting at the range start. Clips link to the WAVs in `AAF/Media/` by absolute path;\n\
+if the package has moved, relink to that folder (file names are unique).\n\n\
+Checked with an independent AAF reader (pyaaf2); not yet verified in a specific Resolve/Fairlight\n\
+version, so treat it as a convenience and the rendered stems/mix as the reference.\n\n\
+What the AAF does not carry (all of it is in the rendered audio):\n{losses}\n\
+Full details: `AAF/aaf_report.json`.",
+            file = r.file,
+            tracks = r.tracks,
+            clips = r.clips,
+            markers = r.markers,
+            losses = r.losses.iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n"),
+        ),
+    };
     let tb = s.tb();
     let fr = s.project.frame_rate;
     let contacts = if s.project.contacts.is_empty() {
@@ -580,9 +644,7 @@ history) and every marker. A receiving editor can reconstruct the intended track
 WAVs and this manifest alone. Bus routing is in `Manifests/routing_map.json`.
 
 ## Interchange (Tier 2)
-No timeline interchange (AAF/OTIO) is included in this package. Routing, plugins, clip fades,
-automation and markers are therefore delivered as rendered audio plus the JSON/CSV manifests,
-not as editable Fairlight timeline objects.
+{tier2}
 
 ## Contents
 - `Audio/` rendered audio · `Manifests/` cue manifest, media inventory, license manifest, routing map, picture history

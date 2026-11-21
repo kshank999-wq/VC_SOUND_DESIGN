@@ -81,13 +81,14 @@ export function QaExport({ eng }: { eng: EngineHook }) {
   const [scene, setScene] = useState("");
   const [handles, setHandles] = useState(500);
   const [float, setFloat] = useState(false);
-  const [result, setResult] = useState<{ dir: string; files: number; qa: QaIssue[] } | null>(null);
+  const [aaf, setAaf] = useState(false);
+  const [result, setResult] = useState<{ dir: string; files: number; qa: QaIssue[]; aaf?: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
   if (!view?.open) return null;
   const errs = qa?.filter((i) => i.severity === "error").length ?? 0;
   const doExport = async (force: boolean) => {
     setBusy(true);
-    const r = await run<{ dir: string; files: number; qa: QaIssue[] }>("export.run", { profile, scene_id: scene || undefined, handles_ms: handles, float, force }, "Export complete");
+    const r = await run<{ dir: string; files: number; qa: QaIssue[]; aaf: string | null }>("export.run", { profile, scene_id: scene || undefined, handles_ms: handles, float, force, aaf }, "Export complete");
     setBusy(false);
     if (r) setResult(r);
   };
@@ -124,6 +125,9 @@ export function QaExport({ eng }: { eng: EngineHook }) {
             </label>
             <label className="field"><span>Handles (ms)</span><input type="number" value={handles} onChange={(e) => setHandles(Number(e.target.value))} /></label>
             <label className="field"><span>Format</span><select value={float ? "f" : "i"} onChange={(e) => setFloat(e.target.value === "f")}><option value="i">24-bit PCM</option><option value="f">32-bit float</option></select></label>
+            <label className="small aaf-opt" title="Editable timeline (clips, fades, clip gain, cue markers, timecode) linking copies of the source WAVs. Checked with an independent AAF reader; not yet verified in a specific Resolve/Fairlight version — the rendered stems stay the reference. What it can't carry is listed in AAF/aaf_report.json.">
+              <input type="checkbox" checked={aaf} onChange={(e) => setAaf(e.target.checked)} /> Also write AAF (beta)
+            </label>
           </div>
           <div className="btns">
             <button className="primary" disabled={busy} onClick={() => doExport(false)}>{busy ? "Exporting…" : "Export"}</button>
@@ -133,6 +137,11 @@ export function QaExport({ eng }: { eng: EngineHook }) {
             <div className="small">
               <div>✔ {result.files} files → <span className="mono">{result.dir}</span></div>
               <div>QA: {result.qa.filter((i) => i.severity === "error").length} errors, {result.qa.filter((i) => i.severity === "warning").length} warnings</div>
+              {result.aaf && (
+                <div className="aaf-result">
+                  AAF: <span className="mono">{result.aaf}</span> · {result.qa.filter((i) => i.code === "aaf_loss").length} kinds of loss listed in <span className="mono">AAF/aaf_report.json</span>
+                </div>
+              )}
             </div>
           )}
           <h4>Previous exports</h4>

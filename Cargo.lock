@@ -4927,6 +4927,7 @@ dependencies = [
 name = "vcsd-core"
 version = "0.1.0"
 dependencies = [
+ "cfb",
  "rusqlite",
  "serde",
  "serde_json",

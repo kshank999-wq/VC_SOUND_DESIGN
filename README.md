@@ -27,7 +27,11 @@ How the code maps onto them is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - **Releases:** a tagged push builds macOS, Windows and Linux installers, signed when the
   certificates are configured, with in-app auto-update. See [`RELEASING.md`](RELEASING.md).
 
-**Not built yet:** AAF/Tier-2 interchange. See the
+- **Interchange:** every export has sample-aligned BWF stems, tracks and a cue manifest. As an
+  option (beta), it also has an AAF of the editable timeline: clips with fades and gain, cue
+  markers and timecode, linking copies of the source WAVs. The AAF is checked with an
+  independent reader but not yet in a specific Resolve version; see
+  [AAF export](docs/ARCHITECTURE.md#aaf-export-tier-2). See the
 [roadmap](docs/ARCHITECTURE.md#roadmap).
 
 ## Desktop app
