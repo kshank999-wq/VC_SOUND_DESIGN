@@ -1643,7 +1643,9 @@ impl Engine {
                 let mut o = ExportOptions::new(ExportProfile::parse(os(a, "profile").unwrap_or("resolve")).map_err(e)?, &today());
                 o.handle_samples = oi(a, "handles_ms").unwrap_or(0) * st.project.sample_rate as i64 / 1000;
                 o.force = ob(a, "force");
-                o.aaf = ob(a, "aaf") || ob(a, "aaf_print_plugins");
+                o.otio = ob(a, "otio");
+                // printing on its own (an older client) means the AAF
+                o.aaf = ob(a, "aaf") || (ob(a, "aaf_print_plugins") && !o.otio);
                 o.aaf_print_plugins = ob(a, "aaf_print_plugins");
                 if ob(a, "float") {
                     o.format = wav::SampleFormat::Float32;
@@ -1662,7 +1664,8 @@ impl Engine {
                     let _ = sess.save();
                 }
                 let aaf = r.files.iter().find(|f| f.ends_with(".aaf")).cloned();
-                Ok(json!({"dir": r.dir.display().to_string(), "files": r.files.len(), "qa": r.qa, "aaf": aaf}))
+                let otio = r.files.iter().find(|f| f.ends_with(".otio")).cloned();
+                Ok(json!({"dir": r.dir.display().to_string(), "files": r.files.len(), "qa": r.qa, "aaf": aaf, "otio": otio}))
             }
             "relink.run" => {
                 let dirs: Vec<PathBuf> = serde_json::from_value(a.get("dirs").cloned().unwrap_or_default()).map_err(e)?;

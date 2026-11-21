@@ -19,6 +19,7 @@ pub mod layout;
 pub mod library;
 pub mod mixer;
 pub mod model;
+pub mod otio;
 pub mod perform;
 pub mod picture;
 pub mod spotting;

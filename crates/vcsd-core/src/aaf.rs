@@ -518,14 +518,14 @@ pub fn url_for(path: &Path) -> String {
 
 /// A piece of a clip on one AAF track: source range, fades, gain.
 #[derive(Debug, Clone)]
-struct Piece {
-    at: i64,
-    len: i64,
-    source: i64,
-    fade_in: i64,
-    fade_out: i64,
-    gain: f32,
-    asset: String,
+pub(crate) struct Piece {
+    pub(crate) at: i64,
+    pub(crate) len: i64,
+    pub(crate) source: i64,
+    pub(crate) fade_in: i64,
+    pub(crate) fade_out: i64,
+    pub(crate) gain: f32,
+    pub(crate) asset: String,
 }
 
 fn piece_obj(p: &Piece, master: &[u8], channel: u32) -> Obj {
@@ -720,6 +720,11 @@ fn owner_lane(s: &ProjectState, owner: &str, param: AutomationParam) -> Vec<(i64
 
 /// Everything a track passes through after its own fader: its bus, that bus's
 /// parent, … the master — static gains, volume lanes and balance lanes.
+/// True when the bus or one above it is muted.
+pub(crate) fn bus_muted(s: &ProjectState, bus: &str) -> bool {
+    BusChain::of(s, bus).muted
+}
+
 struct BusChain {
     gain: f64,
     vols: Vec<Vec<(i64, f32)>>,
@@ -871,21 +876,21 @@ pub struct AafOptions {
 }
 
 #[derive(Default)]
-struct Losses(BTreeMap<&'static str, usize>);
+pub(crate) struct Losses(BTreeMap<&'static str, usize>);
 
 impl Losses {
-    fn add(&mut self, what: &'static str, n: usize) {
+    pub(crate) fn add(&mut self, what: &'static str, n: usize) {
         if n > 0 {
             *self.0.entry(what).or_default() += n;
         }
     }
-    fn list(&self) -> Vec<String> {
+    pub(crate) fn list(&self) -> Vec<String> {
         self.0.iter().map(|(k, n)| format!("{k} ({n})")).collect()
     }
 }
 
 /// Pieces of one clip on the timeline (loops expanded into butt-spliced repeats).
-fn clip_pieces(s: &ProjectState, c: &ClipInstance, track_gain_db: f32, losses: &mut Losses) -> Vec<Piece> {
+pub(crate) fn clip_pieces(s: &ProjectState, c: &ClipInstance, track_gain_db: f32, losses: &mut Losses) -> Vec<Piece> {
     let gain = 10f32.powf((c.gain_db + track_gain_db) / 20.0);
     let frames = s.assets.get(&c.asset_id).map(|a| a.length_samples).unwrap_or(c.length);
     let one = |at: i64, len: i64, source: i64, fade_in: i64, fade_out: i64| Piece {
@@ -921,7 +926,7 @@ fn clip_pieces(s: &ProjectState, c: &ClipInstance, track_gain_db: f32, losses: &
 }
 
 /// Trim a piece to `[start, end)`; None when it lies outside.
-fn trim(mut p: Piece, start: i64, end: i64) -> Option<Piece> {
+pub(crate) fn trim(mut p: Piece, start: i64, end: i64) -> Option<Piece> {
     if p.at + p.len <= start || p.at >= end {
         return None;
     }

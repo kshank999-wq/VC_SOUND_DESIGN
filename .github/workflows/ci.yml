@@ -19,8 +19,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: pyaaf2 (independent AAF reader used by the AAF tests)
-        run: python -m pip install pyaaf2==1.7.1
+      - name: pyaaf2 and OpenTimelineIO (independent readers used by the AAF and OTIO tests)
+        run: python -m pip install pyaaf2==1.7.1 opentimelineio==0.18.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

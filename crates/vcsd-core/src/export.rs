@@ -74,6 +74,9 @@ pub struct ExportOptions {
     /// In the AAF, print tracks that have plugins or insert effects (rendered
     /// with them and their automation, pre-fader) instead of linking their clips.
     pub aaf_print_plugins: bool,
+    /// Also write an OpenTimelineIO file of the editable timeline (`OTIO/`).
+    /// Shares the linked media (and prints, with `aaf_print_plugins`) with the AAF.
+    pub otio: bool,
 }
 
 impl ExportOptions {
@@ -90,6 +93,7 @@ impl ExportOptions {
             plugins: None,
             aaf: false,
             aaf_print_plugins: false,
+            otio: false,
         }
     }
 }
@@ -296,7 +300,10 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
 
     // ---- Tier-2 interchange: AAF of the editable timeline (optional)
     let mut aaf_report = None;
-    if o.aaf {
+    let mut otio_report = None;
+    if o.aaf || o.otio {
+        // linked media (and prints) live with the AAF, or the OTIO when there's no AAF
+        let media_rel = if o.aaf { "AAF/Media" } else { "OTIO/Media" };
         let used: Vec<String> = st
             .clips
             .values()
@@ -306,7 +313,7 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        let (media, notes) = crate::aaf::prepare_media(st, &used, &dir.join("AAF/Media"))?;
+        let (media, notes) = crate::aaf::prepare_media(st, &used, &dir.join(media_rel))?;
         for m in media.values() {
             if let Ok(rel) = m.path.strip_prefix(std::fs::canonicalize(&dir).unwrap_or(dir.clone())) {
                 w.files.push(rel.to_string_lossy().replace('\\', "/"));
@@ -333,7 +340,7 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
                     file = format!("{base}_{k}.wav");
                     k += 1;
                 }
-                let rel_print = format!("AAF/Media/{file}");
+                let rel_print = format!("{media_rel}/{file}");
                 let bext = Bext {
                     description: format!("{} — printed with inserts (pre-fader)", st.tracks[&tid].name),
                     originator: "VC Sound Design".into(),
@@ -357,20 +364,39 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
                 );
             }
         }
-        let mut r = crate::aaf::write(
-            st,
-            &dir.join(&rel),
-            &media,
-            &crate::aaf::AafOptions { name: label, start, end, exclude_temp_refs: o.exclude_temp_refs, prints },
-        )?;
-        r.file = rel.clone();
-        r.losses.extend(notes);
-        w.files.push(rel);
-        for l in &r.losses {
-            w.qa.push(QaIssue::new(Severity::Info, "aaf_loss", format!("AAF: {l}"), None));
+        if o.aaf {
+            let mut r = crate::aaf::write(
+                st,
+                &dir.join(&rel),
+                &media,
+                &crate::aaf::AafOptions { name: label.clone(), start, end, exclude_temp_refs: o.exclude_temp_refs, prints: prints.clone() },
+            )?;
+            r.file = rel.clone();
+            r.losses.extend(notes.clone());
+            w.files.push(rel);
+            for l in &r.losses {
+                w.qa.push(QaIssue::new(Severity::Info, "aaf_loss", format!("AAF: {l}"), None));
+            }
+            w.text("AAF/aaf_report.json", serde_json::to_string_pretty(&r)?.as_bytes())?;
+            aaf_report = Some(r);
         }
-        w.text("AAF/aaf_report.json", serde_json::to_string_pretty(&r)?.as_bytes())?;
-        aaf_report = Some(r);
+        if o.otio {
+            let rel = format!("OTIO/{prefix}.otio");
+            let mut r = crate::otio::write(
+                st,
+                &dir.join(&rel),
+                &media,
+                &crate::otio::OtioOptions { name: label, start, end, exclude_temp_refs: o.exclude_temp_refs, prints },
+            )?;
+            r.file = rel.clone();
+            r.losses.extend(notes);
+            w.files.push(rel);
+            for l in &r.losses {
+                w.qa.push(QaIssue::new(Severity::Info, "otio_loss", format!("OTIO: {l}"), None));
+            }
+            w.text("OTIO/otio_report.json", serde_json::to_string_pretty(&r)?.as_bytes())?;
+            otio_report = Some(r);
+        }
     }
 
     // ---- manifests
@@ -419,7 +445,7 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
         qa.push(QaIssue::new(Severity::Warning, "render", wq.clone(), None));
     }
     qa.append(&mut w.qa);
-    w.text("README.md", readme(st, o, start, end, &qa, aaf_report.as_ref()).as_bytes())?;
+    w.text("README.md", readme(st, o, start, end, &qa, aaf_report.as_ref(), otio_report.as_ref()).as_bytes())?;
     w.text("Reports/delivery_qa.md", crate::qa::to_markdown(&qa).as_bytes())?;
     w.text("Reports/delivery_qa.json", serde_json::to_string_pretty(&qa)?.as_bytes())?;
     let mut sums = String::new();
@@ -635,12 +661,17 @@ fn picture_history(s: &ProjectState) -> serde_json::Value {
     serde_json::json!(v.iter().map(|p| serde_json::json!({"label": p.label, "file": Path::new(&p.media_path).file_name().map(|f| f.to_string_lossy().to_string()), "fingerprint": p.fingerprint, "start_tc": fr.frames_to_tc(p.source_start_frame), "duration_frames": p.duration_frames, "previous": p.previous_id.as_ref().and_then(|x| s.pictures.get(x)).map(|x| x.label.clone()), "change_notes": p.change_notes, "current": s.project.current_picture_id.as_deref() == Some(p.id.as_str())})).collect::<Vec<_>>())
 }
 
-fn readme(s: &ProjectState, o: &ExportOptions, start: i64, end: i64, qa: &[QaIssue], aaf: Option<&crate::aaf::AafReport>) -> String {
-    let tier2 = match aaf {
-        None => "No timeline interchange (AAF/OTIO) is included in this package. Routing, plugins, clip fades,\n\
-automation and markers are therefore delivered as rendered audio plus the JSON/CSV manifests,\n\
-not as editable Fairlight timeline objects."
-            .to_string(),
+fn readme(
+    s: &ProjectState,
+    o: &ExportOptions,
+    start: i64,
+    end: i64,
+    qa: &[QaIssue],
+    aaf: Option<&crate::aaf::AafReport>,
+    otio: Option<&crate::otio::OtioReport>,
+) -> String {
+    let aaf_text = match aaf {
+        None => String::new(),
         Some(r) => format!(
             "`{file}` holds the editable timeline: {tracks} mono tracks (stereo tracks as L/R pairs), {clips} clips\n\
 with source offsets, linear fades and clip gain (track fader folded in), track volume automation\n\
@@ -671,6 +702,40 @@ levels stay editable around them.",
             },
             losses = r.losses.iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n"),
         ),
+    };
+    let otio_text = otio.map(|r| {
+        format!(
+            "`{file}` is the same timeline as OpenTimelineIO: {tracks} audio tracks (stereo tracks as one\n\
+track of stereo clips), {clips} clips with exact source ranges (times in samples; the start\n\
+timecode is the timeline's `global_start_time`), {fades} fades to or from silence as dissolve\n\
+transitions, and {markers} cue markers coloured by category.{printed} OTIO has no audio mix model, so clip\n\
+gain, fader, pan and volume/pan automation are in each clip's and track's `metadata.vcsd`.\n\
+Clips link to the WAVs in `{media}/` by absolute path.\n\n\
+Checked with the OpenTimelineIO library; not yet verified in a specific editor.\n\n\
+What the OTIO does not carry (all of it is in the rendered audio):\n{losses}\n\
+Full details: `OTIO/otio_report.json`.",
+            file = r.file,
+            tracks = r.tracks,
+            clips = r.clips,
+            fades = r.fade_transitions,
+            markers = r.markers,
+            printed = if r.printed_tracks > 0 {
+                format!(" {} tracks with plugins or insert effects are printed (one clip of their render each).", r.printed_tracks)
+            } else {
+                String::new()
+            },
+            media = if aaf.is_some() { "AAF/Media" } else { "OTIO/Media" },
+            losses = r.losses.iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n"),
+        )
+    });
+    let tier2 = match (aaf.is_some(), otio_text) {
+        (false, None) => "No timeline interchange (AAF/OTIO) is included in this package. Routing, plugins, clip fades,\n\
+automation and markers are therefore delivered as rendered audio plus the JSON/CSV manifests,\n\
+not as editable Fairlight timeline objects."
+            .to_string(),
+        (true, None) => aaf_text,
+        (false, Some(t)) => t,
+        (true, Some(t)) => format!("{aaf_text}\n\n{t}"),
     };
     let tb = s.tb();
     let fr = s.project.frame_rate;

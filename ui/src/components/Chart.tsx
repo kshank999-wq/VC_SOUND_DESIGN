@@ -83,13 +83,15 @@ export function QaExport({ eng }: { eng: EngineHook }) {
   const [float, setFloat] = useState(false);
   const [aaf, setAaf] = useState(false);
   const [aafPrint, setAafPrint] = useState(false);
-  const [result, setResult] = useState<{ dir: string; files: number; qa: QaIssue[]; aaf?: string | null } | null>(null);
+  const [otio, setOtio] = useState(false);
+  const [result, setResult] = useState<{ dir: string; files: number; qa: QaIssue[]; aaf?: string | null; otio?: string | null } | null>(null);
+  const interchange = aaf || otio;
   const [busy, setBusy] = useState(false);
   if (!view?.open) return null;
   const errs = qa?.filter((i) => i.severity === "error").length ?? 0;
   const doExport = async (force: boolean) => {
     setBusy(true);
-    const r = await run<{ dir: string; files: number; qa: QaIssue[]; aaf: string | null }>("export.run", { profile, scene_id: scene || undefined, handles_ms: handles, float, force, aaf, aaf_print_plugins: aaf && aafPrint }, "Export complete");
+    const r = await run<{ dir: string; files: number; qa: QaIssue[]; aaf: string | null; otio: string | null }>("export.run", { profile, scene_id: scene || undefined, handles_ms: handles, float, force, aaf, otio, aaf_print_plugins: interchange && aafPrint }, "Export complete");
     setBusy(false);
     if (r) setResult(r);
   };
@@ -129,8 +131,11 @@ export function QaExport({ eng }: { eng: EngineHook }) {
             <label className="small aaf-opt" title="Editable timeline (clips, fades, clip gain, cue markers, timecode) linking copies of the source WAVs. Checked with an independent AAF reader; not yet verified in a specific Resolve/Fairlight version — the rendered stems stay the reference. What it can't carry is listed in AAF/aaf_report.json.">
               <input type="checkbox" checked={aaf} onChange={(e) => setAaf(e.target.checked)} /> Also write AAF (beta)
             </label>
-            <label className={"small aaf-opt sub" + (aaf ? "" : " muted")} title="AAF can't carry VST3/AU plugins or insert effects. With this on, tracks that use them are rendered with them (and their parameter automation), pre-fader, and placed in the AAF as one clip each, so they sound right in the receiving app. Their fader, volume, pan and bus levels stay editable; their clips don't.">
-              <input type="checkbox" disabled={!aaf} checked={aaf && aafPrint} onChange={(e) => setAafPrint(e.target.checked)} /> Print tracks with plugins
+            <label className="small aaf-opt" title="The same editable timeline as OpenTimelineIO (.otio): clips with exact source ranges, fades to and from silence as dissolves, cue markers, start timecode. OTIO has no audio mix model, so clip gain, fader, pan and automation are in its metadata. What it can't carry is listed in OTIO/otio_report.json.">
+              <input type="checkbox" checked={otio} onChange={(e) => setOtio(e.target.checked)} /> Also write OTIO (beta)
+            </label>
+            <label className={"small aaf-opt sub" + (interchange ? "" : " muted")} title="AAF and OTIO can't carry VST3/AU plugins or insert effects. With this on, tracks that use them are rendered with them (and their parameter automation), pre-fader, and placed in the AAF/OTIO as one clip each, so they sound right in the receiving app. Their fader, volume, pan and bus levels stay editable; their clips don't.">
+              <input type="checkbox" disabled={!interchange} checked={interchange && aafPrint} onChange={(e) => setAafPrint(e.target.checked)} /> Print tracks with plugins
             </label>
           </div>
           <div className="btns">
@@ -144,6 +149,11 @@ export function QaExport({ eng }: { eng: EngineHook }) {
               {result.aaf && (
                 <div className="aaf-result">
                   AAF: <span className="mono">{result.aaf}</span> · {result.qa.filter((i) => i.code === "aaf_loss").length} kinds of loss listed in <span className="mono">AAF/aaf_report.json</span>
+                </div>
+              )}
+              {result.otio && (
+                <div className="aaf-result">
+                  OTIO: <span className="mono">{result.otio}</span> · {result.qa.filter((i) => i.code === "otio_loss").length} kinds of loss listed in <span className="mono">OTIO/otio_report.json</span>
                 </div>
               )}
             </div>

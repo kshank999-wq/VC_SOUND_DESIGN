@@ -115,6 +115,41 @@ the dry clips through the plugin and its automation. It has not been opened in
 DaVinci Resolve, Pro Tools or Media Composer yet. Pinning a Resolve version and recording its
 feature matrix is the next step.
 
+## OTIO export (Tier 2)
+
+`crates/vcsd-core/src/otio.rs` writes the editable timeline as OpenTimelineIO JSON
+(`OTIO/<name>.otio`; schemas `Timeline.1`, `Stack.1`, `Track.1`, `Clip.2`, `Gap.1`,
+`Transition.1`, `ExternalReference.1`, `Marker.2`, readable by OpenTimelineIO 0.15 and later).
+It shares the AAF's layout rules (track order, overlapping clips on extra tracks, loops as
+butt-spliced repeats, muted tracks and clips left out). It also shares its media: copies in
+`AAF/Media/`, or `OTIO/Media/` when there is no AAF, and the prints of tracks with plugins.
+
+| Project | OTIO |
+|---|---|
+| Track | An audio track (OTIO has no channel count: a stereo track is one track of stereo clips; `channels` in its metadata) |
+| Clip | A clip with its exact source range, linking its WAV (`ExternalReference`, absolute `file://` URL, available range = the file). Times are in samples, rate = the sample rate |
+| Start timecode | `global_start_time` at the project frame rate |
+| Fade next to silence | An `SMPTE_Dissolve` transition against the gap or track edge (in/out offset = the fade) |
+| Fade between butted clips | Clip metadata only (a transition there would be a crossfade over handles) |
+| Clip gain, fades | `metadata.vcsd` on the clip |
+| Track fader, pan, bus, volume and pan automation (offsets from the range start) | `metadata.vcsd` on the track |
+| Cues | Timeline markers, coloured by category, with the description as comment |
+
+OTIO has no audio mix model, so gain, pan and automation are metadata only. The export lists
+this, together with bus routing and inserts, in `OTIO/otio_report.json`, the README and QA.
+
+**Verification:** `crates/vcsd-core/tests/otio.rs` reads each file with the OpenTimelineIO
+library (`scripts/otio/otio_summary.py`) and checks the following:
+- the start timecode, and that every track spans the range;
+- every audible clip's position, length and source offset, and that its media exists;
+- the overlapping layer and the left-out muted track;
+- the fade dissolves around the glass clip, and its gain and the track's automation in
+  metadata;
+- the markers;
+- sharing the media and prints with the AAF.
+
+It has not been opened in an editor yet.
+
 ## AAF import
 
 `crates/vcsd-core/src/aaf_import.rs` reads AAF files from editors' systems: little-endian
@@ -233,7 +268,7 @@ It has not yet been tested with files from Media Composer, Pro Tools or Resolve.
 - **Engine language and shell:** a Rust engine (deterministic and realtime-capable, cross-platform) inside a Tauri 2 desktop shell with a React UI. The webview only draws the interface; audio, recording and MIDI run natively in the engine, which follows the spec's rule against making browser JavaScript responsible for realtime audio.
 - **Native format:** a versioned SQLite DB with JSON documents per entity and external media, as the spec proposes.
 - **Placeholder licensing:** the bundled starter pack is generated procedurally by our own code, so it can be redistributed. Third-party packs carry their own license metadata, and QA flags anything not redistributable.
-- **Interchange:** Tier 1 (aligned BWF plus manifest) is implemented and tested. Tier 2 is an optional AAF of the editable timeline (see below), checked with an independent reader but not yet against a pinned Resolve/Fairlight version. AAF import reads editors' timelines (tested with pyaaf2-written files and round trips, not yet with files from Media Composer, Pro Tools or Resolve).
+- **Interchange:** Tier 1 (aligned BWF plus manifest) is implemented and tested. Tier 2 is an optional AAF of the editable timeline (see below), checked with an independent reader but not yet against a pinned Resolve/Fairlight version, and optionally the same timeline as OTIO (checked with the OpenTimelineIO library). AAF import reads editors' timelines (tested with pyaaf2-written files and round trips, not yet with files from Media Composer, Pro Tools or Resolve).
 
 ## Known limitations
 
@@ -262,5 +297,5 @@ It has not yet been tested with files from Media Composer, Pro Tools or Resolve.
 3. **Distribution:** cloud-HSM Windows signing (`signCommand`), a beta update channel, and delta updates.
 4. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).
 5. **Interchange:** open the AAF export in a pinned Resolve/Fairlight version (and Pro Tools), import AAFs exported by Media Composer, Premiere, Resolve and Pro Tools (with real AES3/D-10 and multitrack OP1a MXF), record the feature matrix (volume and pan automation especially: hosts differ in whether they
-read track-level gain/pan operations, and in their pan laws), then OTIO.
+read track-level gain/pan operations, and in their pan laws), and the OTIO export in Resolve and an OTIO-based conform tool.
 6. **AI:** optical-flow or pose models for footfall detection behind the existing trait, plus an opt-in cloud provider with consent and retention controls.
