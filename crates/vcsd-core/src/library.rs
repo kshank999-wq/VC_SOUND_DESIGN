@@ -185,7 +185,8 @@ pub struct Query {
     pub redistributable_only: bool,
 }
 
-/// Search assets. All query words must match the name, tags or path.
+/// Search assets. All query words must match the name, tags or file name
+/// (not the folders above it: a library in "SFX 2024-02" must not match "02").
 pub fn search<'a>(s: &'a ProjectState, q: &Query) -> Vec<&'a Asset> {
     // unlike tag extraction, queries keep numeric words ("smash 02")
     let words: Vec<String> =
@@ -198,7 +199,8 @@ pub fn search<'a>(s: &'a ProjectState, q: &Query) -> Vec<&'a Asset> {
         .filter(|a| !q.redistributable_only || a.license.as_ref().is_some_and(|l| l.redistributable))
         .filter(|a| q.tags.iter().all(|t| a.tags.iter().any(|x| x.eq_ignore_ascii_case(t))))
         .filter(|a| {
-            let hay = format!("{} {} {}", a.name, a.tags.join(" "), a.path).to_ascii_lowercase();
+            let file = std::path::Path::new(&a.path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            let hay = format!("{} {} {}", a.name, a.tags.join(" "), file).to_ascii_lowercase();
             words.iter().all(|w| hay.contains(w.as_str()))
         })
         .collect();

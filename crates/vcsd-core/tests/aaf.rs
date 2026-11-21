@@ -316,7 +316,7 @@ fn export_package_includes_the_aaf_its_media_and_what_it_loses() {
     assert!(export::verify_checksums(&r.dir).unwrap().is_empty(), "AAF files are in the checksums");
     let readme = std::fs::read_to_string(r.dir.join("README.md")).unwrap();
     assert!(readme.contains(&format!("`{aaf_file}` holds the editable timeline")));
-    assert!(readme.contains("bus routing and bus gain not carried"));
+    assert!(readme.contains("bus routing not carried: tracks are flat, with bus levels and automation folded into each track"));
     assert!(r.qa.iter().any(|q| q.code == "aaf_loss"));
     // without the option, nothing AAF
     let o2 = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-21");
@@ -327,5 +327,130 @@ fn export_package_includes_the_aaf_its_media_and_what_it_loses() {
         assert_eq!(v["timecode"]["start"], 10 * 3600 * 25);
         assert_eq!(v["timecode"]["fps"], 25);
         assert_eq!(v["markers"].as_array().unwrap().len(), 1);
+    }
+}
+
+/// What a listener hears from the AAF in a host with a −3 dB constant-power pan law,
+/// vs what VC Sound Design's mixer plays, for tracks whose buses have levels,
+/// volume automation and balance automation (AAF has no buses: they are folded in).
+#[test]
+fn bus_levels_and_automation_are_folded_into_each_track() {
+    let Some(py) = python() else {
+        eprintln!("SKIPPED: pyaaf2 not installed (python3 -m pip install pyaaf2==1.7.1)");
+        return;
+    };
+    let (mut s, root) = session("aafbus", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:08:00", "wind exterior", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let track_of = |st: &ProjectState, what: &str| {
+        let cue = st.cues.values().find(|c| c.description.contains(what)).unwrap().id.clone();
+        st.clips.values().find(|c| c.cue_id.as_deref() == Some(cue.as_str())).unwrap().track_id.clone()
+    };
+    let (glass, wind) = (track_of(st, "glass"), track_of(st, "wind"));
+    assert_eq!((st.tracks[&glass].channels, st.tracks[&wind].channels), (1, 2));
+    let (gbus, wbus) = (st.tracks[&glass].bus_id.clone(), st.tracks[&wind].bus_id.clone());
+    assert_ne!(gbus, wbus);
+    let master = mixer::master_bus(st).unwrap().id.clone();
+    // the glass: panned left → right; its bus −3 dB with a balance move across the centre
+    for (t, v) in [(2 * sr, -0.5f32), (7 * sr, 0.5)] {
+        editing::set_automation(st, &glass, AutomationParam::Pan, t, v).unwrap();
+    }
+    st.buses.get_mut(&gbus).unwrap().gain_db = -3.0;
+    for (t, v) in [(sr, -0.4f32), (6 * sr, 0.6)] {
+        editing::set_automation(st, &gbus, AutomationParam::Pan, t, v).unwrap();
+    }
+    // the wind's bus −6 dB; the master dips 12 dB in the middle
+    st.buses.get_mut(&wbus).unwrap().gain_db = -6.0;
+    for (t, v) in [(3 * sr, 0.0f32), (4 * sr, -12.0), (5 * sr, 0.0)] {
+        editing::set_automation(st, &master, AutomationParam::VolumeDb, t, v).unwrap();
+    }
+
+    let (start, end) = (sr, 9 * sr);
+    let used: Vec<String> = st.clips.values().map(|c| c.asset_id.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let (media, _) = aaf::prepare_media(st, &used, &root.join("Exports/aafbus/Media")).unwrap();
+    let file = root.join("Exports/aafbus/bus.aaf");
+    let rep = aaf::write(st, &file, &media, &AafOptions { name: "bus".into(), start, end, exclude_temp_refs: false }).unwrap();
+    assert!(!rep.losses.iter().any(|l| l.contains("automation not carried")), "{:?}", rep.losses);
+    assert!(rep.losses.iter().any(|l| l.starts_with("bus routing not carried: tracks are flat, with bus levels")));
+    assert!(rep.losses.iter().any(|l| l.starts_with("bus balance on mono tracks folded") && l.ends_with("(1)")), "{:?}", rep.losses);
+    let v = inspect(&py, &file);
+    let tracks = v["tracks"].as_array().unwrap();
+
+    // the mixer's side of it
+    let st = &s.state;
+    let lane = |owner: &str, p: AutomationParam| {
+        let mut l: Vec<(i64, f32)> =
+            st.automation.values().filter(|x| x.owner_id == owner && x.param == p).map(|x| (x.sample, x.value)).collect();
+        l.sort_by_key(|x| x.0);
+        l
+    };
+    let at = |l: &[(i64, f32)], t: i64| {
+        let i = l.partition_point(|p| p.0 <= t);
+        (match (i.checked_sub(1).map(|k| l[k]), l.get(i)) {
+            (Some(a), Some(b)) => a.1 + (b.1 - a.1) * ((t - a.0) as f32 / (b.0 - a.0) as f32),
+            (Some(a), None) => a.1,
+            (None, Some(b)) => b.1,
+            _ => 0.0,
+        }) as f64
+    };
+    let bal = |p: f64| if p <= 0.0 { (1.0, 1.0 + p) } else { (1.0 - p, 1.0) };
+    let db = |x: f64| 10f64.powf(x / 20.0);
+    let (gpan, gbal, mvol) =
+        (lane(&glass, AutomationParam::Pan), lane(&gbus, AutomationParam::Pan), lane(&master, AutomationParam::VolumeDb));
+    // the AAF side: a curve's value at a fraction of the range (control points, linear)
+    let curve = |t: &serde_json::Value, key: &str, rel: f64, default: f64| -> f64 {
+        let fx = &t[key];
+        if fx.is_null() {
+            return default;
+        }
+        if let Some(c) = fx["constant"].as_f64() {
+            return c;
+        }
+        let pts: Vec<(f64, f64)> =
+            fx["points"].as_array().unwrap().iter().map(|p| (p[0].as_f64().unwrap(), p[1].as_f64().unwrap())).collect();
+        let i = pts.partition_point(|p| p.0 <= rel).max(1) - 1;
+        let (a, b) = (pts[i], pts[(i + 1).min(pts.len() - 1)]);
+        if b.0 > a.0 {
+            a.1 + (b.1 - a.1) * (rel - a.0) / (b.0 - a.0)
+        } else {
+            a.1
+        }
+    };
+    let close = |got: f64, want: f64, what: &str| {
+        if want > 0.002 {
+            assert!((20.0 * (got / want).log10()).abs() < 0.15, "{what}: {got} vs {want}");
+        } else {
+            assert!((got - want).abs() < 0.002, "{what}: {got} vs {want}");
+        }
+    };
+    let span = (end - start) as f64;
+    let gname = st.tracks[&glass].name.clone();
+    let wname = st.tracks[&wind].name.clone();
+    for k in 0..400 {
+        let rel = k as f64 / 400.0 * (span - 2.0) / span;
+        let x = start + (rel * span).round() as i64;
+        let master_lvl = db(at(&mvol, x));
+        // mono glass: constant-power pan, then the bus's balance and levels
+        let (gl, gr) = mixer::pan_gains(at(&gpan, x) as f32);
+        let (bl, br) = bal(at(&gbal, x));
+        let lvl = db(-3.0) * master_lvl;
+        let (want_l, want_r) = (lvl * gl as f64 * bl, lvl * gr as f64 * br);
+        let t = tracks.iter().find(|t| t["name"] == gname.as_str()).expect("glass track");
+        let g = curve(t, "volume", rel, 1.0);
+        let q = curve(t, "pan", rel, 0.5) * std::f64::consts::FRAC_PI_2;
+        close(g * q.cos(), want_l, &format!("glass L at {rel:.3}"));
+        close(g * q.sin(), want_r, &format!("glass R at {rel:.3}"));
+        // stereo wind: each side's gain carries its bus and the master
+        for (suffix, left) in [(" L", true), (" R", false)] {
+            let t = tracks.iter().find(|t| t["name"] == format!("{wname}{suffix}").as_str()).expect("wind side");
+            assert_eq!(t["pan"]["constant"], if left { 0.0 } else { 1.0 });
+            close(curve(t, "volume", rel, 1.0), db(-6.0) * master_lvl, &format!("wind{suffix} at {rel:.3}"));
+        }
     }
 }

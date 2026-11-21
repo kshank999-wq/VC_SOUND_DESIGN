@@ -13,6 +13,8 @@
 //!   track (Amplitude `VaryingValue`, linear control points);
 //! - pan: Mono Audio Pan on mono tracks (static or automated); stereo tracks
 //!   as hard-panned L/R with the balance in each side's gain;
+//! - bus levels: AAF has no buses, so each bus's static gain, volume lane and
+//!   balance lane (down to the master) are folded into the tracks it carries;
 //! - cue markers (`CommentMarker`s with code and description).
 //!
 //! The fixed parts of the file — the meta-dictionary (class and type
@@ -20,7 +22,7 @@
 //! definitions) — come from `assets/aaf_template.aaf`, generated with pyaaf2
 //! by `scripts/aaf/make_template.py`. Everything else is written here.
 //!
-//! What AAF can't carry (bus/plugin automation, bus routing, plugins, loop
+//! What AAF can't carry (plugin automation, bus routing and effects, plugins, loop
 //! crossfades, mutes…) is listed in the [`AafReport`]: the rendered stems in
 //! the same package include all of it.
 
@@ -631,7 +633,8 @@ fn db_amp(db: f64) -> f64 {
 /// AAF interpolates linearly in amplitude while the mixer ramps in dB, so
 /// segments are split until the two agree within 0.1 dB (or 0.001 absolute
 /// near silence).
-pub(crate) fn volume_points(pts: &[(i64, f32)], start: i64, end: i64) -> Vec<(i64, f64)> {
+#[cfg(test)]
+fn volume_points(pts: &[(i64, f32)], start: i64, end: i64) -> Vec<(i64, f64)> {
     let keys: Vec<i64> = pts.iter().map(|p| p.0).collect();
     gain_points(&keys, start, end, &|t| db_amp(lane_db(pts, t)))
 }
@@ -639,29 +642,40 @@ pub(crate) fn volume_points(pts: &[(i64, f32)], start: i64, end: i64) -> Vec<(i6
 /// Control points for any gain curve `amp(t)` with corners at `keys`: split until
 /// amplitude-linear interpolation stays within 0.1 dB of it (0.001 absolute near silence).
 fn gain_points(keys: &[i64], start: i64, end: i64, amp: &dyn Fn(i64) -> f64) -> Vec<(i64, f64)> {
+    fit(keys, start, end, amp, &|lin, v| {
+        if v > 0.001 && lin > 0.001 {
+            (20.0 * (lin / v).log10()).abs() > 0.1
+        } else {
+            (lin - v).abs() > 0.001
+        }
+    })
+}
+
+/// Control points for `f` with corners at `keys`, split until linear interpolation
+/// between neighbours is no longer `bad(interpolated, actual)` at the midpoints.
+fn fit(keys: &[i64], start: i64, end: i64, f: &dyn Fn(i64) -> f64, bad: &dyn Fn(f64, f64) -> bool) -> Vec<(i64, f64)> {
     let last = end - 1;
     let mut ks = vec![start];
     ks.extend(keys.iter().copied().filter(|&t| t > start && t < last));
     ks.push(last);
     ks.sort();
     ks.dedup();
-    fn split(a: i64, b: i64, amp: &dyn Fn(i64) -> f64, out: &mut Vec<(i64, f64)>, depth: u32) {
+    fn split(a: i64, b: i64, f: &dyn Fn(i64) -> f64, bad: &dyn Fn(f64, f64) -> bool, out: &mut Vec<(i64, f64)>, depth: u32) {
         if b - a > 1 && depth < 12 {
             let m = a + (b - a) / 2;
-            let (va, vb, vm) = (amp(a), amp(b), amp(m));
+            let (va, vb) = (f(a), f(b));
             let lin = va + (vb - va) * (m - a) as f64 / (b - a) as f64;
-            let off = if vm > 0.001 && lin > 0.001 { (20.0 * (lin / vm).log10()).abs() > 0.1 } else { (lin - vm).abs() > 0.001 };
-            if off {
-                split(a, m, amp, out, depth + 1);
-                split(m, b, amp, out, depth + 1);
+            if bad(lin, f(m)) {
+                split(a, m, f, bad, out, depth + 1);
+                split(m, b, f, bad, out, depth + 1);
                 return;
             }
         }
-        out.push((b, amp(b)));
+        out.push((b, f(b)));
     }
-    let mut out = vec![(start, amp(start))];
+    let mut out = vec![(start, f(start))];
     for w in ks.windows(2) {
-        split(w[0], w[1], amp, &mut out, 0);
+        split(w[0], w[1], f, bad, &mut out, 0);
     }
     out
 }
@@ -673,62 +687,159 @@ struct Mix {
     pan: Option<Curve>,
 }
 
-/// Gain and pan for each channel of a project track over `[start, end)`.
-/// Mono tracks: volume lane → gain, pan lane (or static pan) → Mono Audio Pan,
-/// mapped exactly (both interpolate pan linearly). Stereo tracks: L/R are hard
-/// panned and the mixer's balance (with the volume lane) becomes each side's gain.
-fn track_mix(s: &ProjectState, t: &Track, start: i64, end: i64) -> Vec<Mix> {
-    let lane = |param: AutomationParam| {
-        let mut v: Vec<(i64, f32)> =
-            s.automation.values().filter(|p| p.owner_id == t.id && p.param == param).map(|p| (p.sample, p.value)).collect();
-        v.sort_by_key(|p| p.0);
-        v
-    };
-    let (vol, pan) = (lane(AutomationParam::VolumeDb), lane(AutomationParam::Pan));
-    let pan_at = |x: i64| if pan.is_empty() { t.pan as f64 } else { lane_db(&pan, x) };
-    let vol_at = |x: i64| if vol.is_empty() { 1.0 } else { db_amp(lane_db(&vol, x)) };
-    let keys: Vec<i64> = vol.iter().chain(&pan).map(|p| p.0).collect();
-    if t.channels < 2 {
-        let gain = (!vol.is_empty()).then(|| Curve::from_points(volume_points(&vol, start, end)));
-        let pan_curve = if pan.is_empty() {
-            (t.pan.abs() > 0.001).then(|| Curve::Const((t.pan as f64 + 1.0) / 2.0))
-        } else {
-            // linear in both: the breakpoints are enough
-            let last = end - 1;
-            let mut ks = vec![start];
-            ks.extend(pan.iter().map(|p| p.0).filter(|&x| x > start && x < last));
-            ks.push(last);
-            ks.dedup();
-            Some(Curve::from_points(ks.into_iter().map(|x| (x, (pan_at(x).clamp(-1.0, 1.0) + 1.0) / 2.0)).collect()))
-        };
-        return vec![Mix { gain, pan: pan_curve }];
+/// The mixer's stereo balance (centre = unity on both sides): (left, right).
+fn balance(p: f64) -> (f64, f64) {
+    let p = p.clamp(-1.0, 1.0);
+    if p <= 0.0 {
+        (1.0, 1.0 + p)
+    } else {
+        (1.0 - p, 1.0)
     }
-    let side = |left: bool| {
-        let bal = move |p: f64| {
-            if left {
-                if p <= 0.0 {
-                    1.0
-                } else {
-                    1.0 - p
-                }
-            } else if p <= 0.0 {
-                1.0 + p
-            } else {
-                1.0
+}
+
+/// Where a pan/balance lane crosses the centre (the balance law has a corner there).
+fn centre_crossings(lane: &[(i64, f32)]) -> Vec<i64> {
+    lane.windows(2)
+        .filter(|w| (w[0].1 < 0.0) != (w[1].1 < 0.0) && (w[1].1 - w[0].1).abs() > 1e-9)
+        .map(|w| w[0].0 + ((0.0 - w[0].1) / (w[1].1 - w[0].1) * (w[1].0 - w[0].0) as f32) as i64)
+        .collect()
+}
+
+fn owner_lane(s: &ProjectState, owner: &str, param: AutomationParam) -> Vec<(i64, f32)> {
+    let mut v: Vec<(i64, f32)> =
+        s.automation.values().filter(|p| p.owner_id == owner && p.param == param).map(|p| (p.sample, p.value)).collect();
+    v.sort_by_key(|p| p.0);
+    v
+}
+
+/// Everything a track passes through after its own fader: its bus, that bus's
+/// parent, … the master — static gains, volume lanes and balance lanes.
+struct BusChain {
+    gain: f64,
+    vols: Vec<Vec<(i64, f32)>>,
+    bals: Vec<Vec<(i64, f32)>>,
+    muted: bool,
+}
+
+impl BusChain {
+    fn of(s: &ProjectState, bus: &str) -> BusChain {
+        let mut c = BusChain { gain: 1.0, vols: vec![], bals: vec![], muted: false };
+        let mut cur = s.buses.get(bus);
+        let mut guard = 0;
+        while let Some(b) = cur {
+            c.gain *= 10f64.powf(b.gain_db as f64 / 20.0);
+            c.muted |= b.mute;
+            let (v, p) = (owner_lane(s, &b.id, AutomationParam::VolumeDb), owner_lane(s, &b.id, AutomationParam::Pan));
+            if !v.is_empty() {
+                c.vols.push(v);
             }
-        };
-        let f = |x: i64| vol_at(x) * bal(pan_at(x).clamp(-1.0, 1.0));
-        // the balance has a corner where the pan crosses the centre
-        let mut ks = keys.clone();
-        for w in pan.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            if (a.1 < 0.0) != (b.1 < 0.0) && (b.1 - a.1).abs() > 1e-9 {
-                ks.push(a.0 + ((0.0 - a.1) / (b.1 - a.1) * (b.0 - a.0) as f32) as i64);
+            if !p.is_empty() {
+                c.bals.push(p);
+            }
+            cur = b.parent_id.as_ref().and_then(|p| s.buses.get(p));
+            guard += 1;
+            if guard > 64 {
+                break; // a routing loop can't be rendered either
             }
         }
-        let gain = match Curve::from_points(gain_points(&ks, start, end, &f)) {
-            Curve::Const(v) if (v - 1.0).abs() < 1e-9 => None,
-            c => Some(c),
+        c
+    }
+    /// Level at `x` (static gains × volume lanes; −96 dB is silence).
+    fn amp(&self, x: i64) -> f64 {
+        self.vols.iter().fold(self.gain, |g, l| g * db_amp(lane_db(l, x)))
+    }
+    /// Balance at `x` as (left, right) factors.
+    fn bal(&self, x: i64) -> (f64, f64) {
+        self.bals.iter().fold((1.0, 1.0), |(l, r), lane| {
+            let (bl, br) = balance(lane_db(lane, x));
+            (l * bl, r * br)
+        })
+    }
+    fn keys(&self) -> Vec<i64> {
+        let mut k: Vec<i64> = self.vols.iter().chain(&self.bals).flatten().map(|p| p.0).collect();
+        for l in &self.bals {
+            k.extend(centre_crossings(l));
+        }
+        k
+    }
+    fn is_flat(&self) -> bool {
+        self.vols.is_empty() && self.bals.is_empty() && (self.gain - 1.0).abs() < 1e-9
+    }
+}
+
+/// Gain and pan for each channel of a project track over `[start, end)`,
+/// including what its buses do to it (AAF tracks are flat: no buses).
+///
+/// Mono tracks: track volume × bus levels → gain; the track's pan → Mono Audio
+/// Pan (exact: both sides interpolate pan linearly). A bus balance moves the
+/// panned signal's left/right levels; with a −3 dB constant-power pan law that
+/// is exactly a new pan plus a gain, which is what gets written.
+/// Stereo tracks: L/R hard panned; volume, balance and bus levels/balance
+/// become each side's gain. Curves are fitted within 0.1 dB (pan within 0.002).
+fn track_mix(s: &ProjectState, t: &Track, start: i64, end: i64) -> Vec<Mix> {
+    let (vol, pan) = (owner_lane(s, &t.id, AutomationParam::VolumeDb), owner_lane(s, &t.id, AutomationParam::Pan));
+    let bus = BusChain::of(s, &t.bus_id);
+    let pan_at = |x: i64| if pan.is_empty() { t.pan as f64 } else { lane_db(&pan, x) };
+    let vol_at = |x: i64| if vol.is_empty() { 1.0 } else { db_amp(lane_db(&vol, x)) };
+    let mut keys: Vec<i64> = vol.iter().chain(&pan).map(|p| p.0).collect();
+    keys.extend(bus.keys());
+    let as_gain = |c: Curve| match c {
+        Curve::Const(v) if (v - 1.0).abs() < 1e-9 => None,
+        c => Some(c),
+    };
+    if t.channels < 2 {
+        if bus.bals.is_empty() {
+            // no bus balance: the track's pan maps exactly; levels multiply
+            let gain = if vol.is_empty() && bus.vols.is_empty() {
+                as_gain(Curve::Const(bus.gain))
+            } else {
+                as_gain(Curve::from_points(gain_points(&keys, start, end, &|x| vol_at(x) * bus.amp(x))))
+            };
+            let pan_curve = if pan.is_empty() {
+                (t.pan.abs() > 0.001).then(|| Curve::Const((t.pan as f64 + 1.0) / 2.0))
+            } else {
+                let last = end - 1;
+                let mut ks = vec![start];
+                ks.extend(pan.iter().map(|p| p.0).filter(|&x| x > start && x < last));
+                ks.push(last);
+                ks.dedup();
+                Some(Curve::from_points(ks.into_iter().map(|x| (x, (pan_at(x).clamp(-1.0, 1.0) + 1.0) / 2.0)).collect()))
+            };
+            return vec![Mix { gain, pan: pan_curve }];
+        }
+        // the panned signal's left/right after the buses' balance
+        let lr = |x: i64| {
+            let (gl, gr) = crate::mixer::pan_gains(pan_at(x) as f32);
+            let (bl, br) = bus.bal(x);
+            (gl as f64 * bl, gr as f64 * br)
+        };
+        let gain = as_gain(Curve::from_points(gain_points(&keys, start, end, &|x| {
+            let (l, r) = lr(x);
+            vol_at(x) * bus.amp(x) * (l * l + r * r).sqrt()
+        })));
+        let pan_param = |x: i64| {
+            let (l, r) = lr(x);
+            if l <= 0.0 && r <= 0.0 {
+                0.5
+            } else {
+                r.atan2(l) / std::f64::consts::FRAC_PI_2
+            }
+        };
+        let pan_curve = Curve::from_points(fit(&keys, start, end, &pan_param, &|lin, v| (lin - v).abs() > 0.002));
+        return vec![Mix { gain, pan: Some(pan_curve).filter(|c| *c != Curve::Const(0.5)) }];
+    }
+    let side = |left: bool| {
+        let f = |x: i64| {
+            let (tl, tr) = balance(pan_at(x));
+            let (bl, br) = bus.bal(x);
+            vol_at(x) * bus.amp(x) * if left { tl * bl } else { tr * br }
+        };
+        let mut ks = keys.clone();
+        ks.extend(centre_crossings(&pan));
+        let gain = if vol.is_empty() && pan.is_empty() && t.pan.abs() < 0.001 && bus.is_flat() {
+            None
+        } else {
+            as_gain(Curve::from_points(gain_points(&ks, start, end, &f)))
         };
         Mix { gain, pan: Some(Curve::Const(if left { 0.0 } else { 1.0 })) }
     };
@@ -829,7 +940,6 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
 
     // ---- what the timeline can't hold
     let n_auto = |f: &dyn Fn(&AutomationPoint) -> bool| s.automation.values().filter(|p| f(p)).count();
-    losses.add("bus and master volume/balance automation not carried", n_auto(&|p| s.buses.contains_key(&p.owner_id)));
     losses.add("plugin parameter automation not carried", n_auto(&|p| matches!(p.param, AutomationParam::Plugin(_))));
     let pans = |t: &Track| t.pan.abs() > 0.001 || s.automation.values().any(|p| p.owner_id == t.id && p.param == AutomationParam::Pan);
     losses.add(
@@ -838,7 +948,14 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     );
     let inserts = s.tracks.values().map(|t| t.inserts.len()).chain(s.buses.values().map(|b| b.inserts.len())).sum();
     losses.add("insert effects and plugins not carried (rendered in stems and mix)", inserts);
-    losses.add("bus routing and bus gain not carried: tracks are flat", s.buses.values().filter(|b| b.parent_id.is_some()).count());
+    losses.add(
+        "bus routing not carried: tracks are flat, with bus levels and automation folded into each track",
+        s.buses.values().filter(|b| b.parent_id.is_some()).count(),
+    );
+    losses.add(
+        "bus balance on mono tracks folded into their pan and gain (exact with a −3 dB constant-power pan law)",
+        s.tracks.values().filter(|t| !t.mute && t.channels < 2 && !BusChain::of(s, &t.bus_id).bals.is_empty()).count(),
+    );
     let static_gain = s.tracks.values().filter(|t| t.gain_db.abs() > 0.001).count();
     losses.add("track fader gain folded into clip gain", static_gain);
 
@@ -849,6 +966,10 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     let mut audio_slots: Vec<(String, u32, Vec<Piece>, String)> = vec![];
     let mut clip_count = 0;
     for t in tracks {
+        if BusChain::of(s, &t.bus_id).muted {
+            losses.add("tracks on muted buses left out", 1);
+            continue;
+        }
         if t.mute {
             losses.add("muted tracks left out", 1);
             continue;

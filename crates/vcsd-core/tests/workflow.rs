@@ -717,3 +717,21 @@ fn plugin_parameter_lanes_become_per_block_curves() {
     s.state.tracks.get_mut(&track).unwrap().inserts.clear();
     assert_eq!(editing::drop_orphan_plugin_automation(&mut s.state), 3);
 }
+
+#[test]
+fn search_ignores_the_folders_a_library_lives_in() {
+    let (mut s, _r) = session("search", "24", "01:00:00:00");
+    with_pack(&mut s);
+    // every asset sits under a folder named like a version or date
+    for a in s.state.assets.values_mut() {
+        let p = std::path::Path::new(&a.path);
+        a.path = p.parent().unwrap().join("SFX 2024-02 v02").join(p.file_name().unwrap()).to_string_lossy().into_owned();
+    }
+    let hits = assets(&s, "glass smash 02");
+    assert!(!hits.is_empty());
+    assert!(
+        hits.iter().all(|id| s.state.assets[id].name.contains("02")),
+        "only the 02 take matches: {:?}",
+        hits.iter().map(|i| &s.state.assets[i].name).collect::<Vec<_>>()
+    );
+}

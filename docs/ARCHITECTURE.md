@@ -88,6 +88,7 @@ content.
 | Stereo tracks | Two mono tracks hard-panned L/R; stereo media is linked per channel |
 | Pan on mono tracks, static or automated | Mono Audio Pan (Pan = (pan + 1) / 2) around the track; the breakpoints map exactly because both sides interpolate pan linearly. The receiving app's pan law applies (the app uses −3 dB constant power) |
 | Balance on stereo tracks, static or automated | Folded into each side's gain curve (with any volume automation), fitted within 0.1 dB, including the corner where the balance crosses centre |
+| Bus and master levels: static gain, volume automation, balance automation | AAF has no buses, so each bus's levels down to the master are multiplied into the gain of every track it carries. On mono tracks a bus balance moves the panned signal's left/right; with a −3 dB constant-power pan law that is exactly a new pan plus a gain, which is written (pan fitted within 0.002). Tracks on muted buses are left out |
 | Clip gain (+ static track fader, folded in) | Mono Audio Gain `OperationGroup`, constant Amplitude |
 | Linear fades in/out | `SourceClip` FadeIn/FadeOut length and type |
 | Track volume automation | Mono Audio Gain around the track with a `VaryingValue` Amplitude: linear control points at exact rational times, split until amplitude-linear interpolation matches the app's dB ramps within 0.1 dB |
@@ -97,8 +98,7 @@ content.
 | Start timecode, frame rate, drop frame | Timecode track |
 
 **Not carried** (listed in `AAF/aaf_report.json`, the README and delivery QA; all of it is in the
-rendered audio): bus and master automation, plugin parameter automation, inserts and
-plugins, bus routing and bus gain, loop crossfades, muted tracks and clips (left out), and the right channel of stereo
+rendered audio): plugin parameter automation, inserts and plugins (on tracks and buses), bus routing and bus gain, loop crossfades, muted tracks and clips (left out), and the right channel of stereo
 sources on mono tracks. Media is copied into `AAF/Media/` (converted to the project rate when it
 differs) and linked by absolute `file://` URL.
 
@@ -106,7 +106,9 @@ differs) and linked by absolute `file://` URL.
 (`scripts/aaf/inspect.py`). It walks every object and checks clips, sources, fades, gain, media
 links, layers, trimming, timecode and markers against the project. It also checks that the
 volume curve matches the project's lane within 0.12 dB at 400 points. Mono pan is checked as
-exact, and stereo balance gains within 0.12 dB across a move that crosses the centre. It has not been opened in
+exact, and stereo balance gains within 0.12 dB across a move that crosses the centre. With bus
+gain, bus balance and master automation, the left/right levels a constant-power host plays from
+the AAF match the mixer's within 0.15 dB. It has not been opened in
 DaVinci Resolve, Pro Tools or Media Composer yet. Pinning a Resolve version and recording its
 feature matrix is the next step.
 

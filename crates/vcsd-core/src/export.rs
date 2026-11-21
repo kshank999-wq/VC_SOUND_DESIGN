@@ -601,8 +601,9 @@ not as editable Fairlight timeline objects."
             "`{file}` holds the editable timeline: {tracks} mono tracks (stereo tracks as L/R pairs), {clips} clips\n\
 with source offsets, linear fades and clip gain (track fader folded in), track volume automation\n\
 as time-varying track gain ({automated} tracks), pan ({panned} tracks: Mono Audio Pan on mono tracks,\n\
-stereo tracks as hard-panned L/R pairs with the balance in each side's gain), {markers} cue markers\n\
-and a timecode track starting at the range start. Clips link to the WAVs in `AAF/Media/` by absolute path;\n\
+stereo tracks as hard-panned L/R pairs with the balance in each side's gain), bus and master\n\
+levels and automation folded into each track (AAF has no buses), {markers} cue markers and a\n\
+timecode track starting at the range start. Clips link to the WAVs in `AAF/Media/` by absolute path;\n\
 if the package has moved, relink to that folder (file names are unique).\n\n\
 Checked with an independent AAF reader (pyaaf2); not yet verified in a specific Resolve/Fairlight\n\
 version, so treat it as a convenience and the rendered stems/mix as the reference.\n\n\
