@@ -79,8 +79,13 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
     let used: Vec<String> = st.clips.values().map(|c| c.asset_id.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     let (media, _notes) = aaf::prepare_media(st, &used, &root.join("Exports/aaf/Media")).unwrap();
     let file = root.join("Exports/aaf/test.aaf");
-    let rep =
-        aaf::write(st, &file, &media, &AafOptions { name: "Gravel Road — scene 1".into(), start, end, exclude_temp_refs: false }).unwrap();
+    let rep = aaf::write(
+        st,
+        &file,
+        &media,
+        &AafOptions { name: "Gravel Road — scene 1".into(), start, end, exclude_temp_refs: false, prints: Default::default() },
+    )
+    .unwrap();
     assert!(rep.losses.iter().any(|l| l.starts_with("muted tracks left out (1)")), "{:?}", rep.losses);
     assert!(rep.losses.iter().any(|l| l.starts_with("overlapping clips split")), "{:?}", rep.losses);
     assert!(rep.losses.iter().any(|l| l.starts_with("track fader gain folded")), "{:?}", rep.losses);
@@ -375,7 +380,9 @@ fn bus_levels_and_automation_are_folded_into_each_track() {
     let used: Vec<String> = st.clips.values().map(|c| c.asset_id.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     let (media, _) = aaf::prepare_media(st, &used, &root.join("Exports/aafbus/Media")).unwrap();
     let file = root.join("Exports/aafbus/bus.aaf");
-    let rep = aaf::write(st, &file, &media, &AafOptions { name: "bus".into(), start, end, exclude_temp_refs: false }).unwrap();
+    let rep =
+        aaf::write(st, &file, &media, &AafOptions { name: "bus".into(), start, end, exclude_temp_refs: false, prints: Default::default() })
+            .unwrap();
     assert!(!rep.losses.iter().any(|l| l.contains("automation not carried")), "{:?}", rep.losses);
     assert!(rep.losses.iter().any(|l| l.starts_with("bus routing not carried: tracks are flat, with bus levels")));
     assert!(rep.losses.iter().any(|l| l.starts_with("bus balance on mono tracks folded") && l.ends_with("(1)")), "{:?}", rep.losses);
@@ -452,5 +459,152 @@ fn bus_levels_and_automation_are_folded_into_each_track() {
             assert_eq!(t["pan"]["constant"], if left { 0.0 } else { 1.0 });
             close(curve(t, "volume", rel, 1.0), db(-6.0) * master_lvl, &format!("wind{suffix} at {rel:.3}"));
         }
+    }
+}
+
+/// A stand-in plugin: gain = 2 × its parameter 0, sample by sample from the automation it's given.
+struct GainPlugin;
+
+impl mixer::PluginHost for GainPlugin {
+    fn process(
+        &self,
+        _slot: &PluginInsert,
+        buf: &mut wav::AudioBuffer,
+        _pos: i64,
+        auto: &[mixer::ParamCurve],
+    ) -> std::result::Result<(), String> {
+        let ch = buf.channels as usize;
+        for f in 0..buf.frames() {
+            let v = auto.iter().find(|c| c.id == 0).map(|c| {
+                let i = c.points.partition_point(|p| p.0 as usize <= f).max(1) - 1;
+                let (a, b) = (c.points[i], c.points[(i + 1).min(c.points.len() - 1)]);
+                if b.0 > a.0 {
+                    a.1 + (b.1 - a.1) * (f as f64 - a.0 as f64) / (b.0 - a.0) as f64
+                } else {
+                    a.1
+                }
+            });
+            let g = 2.0 * v.unwrap_or(0.5) as f32;
+            for c in 0..ch {
+                buf.data[f * ch + c] *= g;
+            }
+        }
+        Ok(())
+    }
+    fn latency(&self, _slot: &PluginInsert) -> i64 {
+        0
+    }
+}
+
+#[test]
+fn printing_bakes_plugins_and_their_automation_into_the_aaf() {
+    let (mut s, root) = session("aafprint", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:06:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:01:00", "01:00:01:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:05:00", "wind exterior", None);
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:04:00", "01:00:04:00", "door slam", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let glass = {
+        let cue = st.cues.values().find(|c| c.description.contains("glass")).unwrap().id.clone();
+        st.clips.values().find(|c| c.cue_id.as_deref() == Some(cue.as_str())).unwrap().track_id.clone()
+    };
+    // a plugin on the glass track whose gain is automated from ×0 up to ×2, and a −6 dB fader
+    let t = st.tracks.get_mut(&glass).unwrap();
+    t.gain_db = -6.0;
+    t.inserts.push(Insert::Plugin(PluginInsert {
+        id: "slot_g".into(),
+        plugin_id: "vst3:test".into(),
+        format: "vst3".into(),
+        name: "Gain".into(),
+        vendor: String::new(),
+        path: String::new(),
+        bypass: false,
+        state: None,
+        params: Default::default(),
+    }));
+    editing::set_automation(st, "slot_g", AutomationParam::Plugin(0), sr / 2, 0.0).unwrap();
+    editing::set_automation(st, "slot_g", AutomationParam::Plugin(0), 2 * sr, 1.0).unwrap();
+    // another track with the same name (names repeat across scenes) and a built-in effect: printed too, to its own file
+    let wind = {
+        let cue = st.cues.values().find(|c| c.description.contains("wind")).unwrap().id.clone();
+        st.clips.values().find(|c| c.cue_id.as_deref() == Some(cue.as_str())).unwrap().track_id.clone()
+    };
+    let gname0 = st.tracks[&glass].name.clone();
+    let w = st.tracks.get_mut(&wind).unwrap();
+    w.name = gname0;
+    w.inserts = vec![Insert::HighPass { hz: 200.0, q: 0.7 }];
+
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-21");
+    o.aaf_print_plugins = true;
+    o.aaf = true;
+    o.force = true;
+    o.plugins = Some(mixer::PluginHostRef(std::sync::Arc::new(GainPlugin)));
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let st = &s.state;
+    let (start, end) = export::resolve_range(st, &export::ExportRange::All).unwrap();
+    let gname = st.tracks[&glass].name.clone();
+    let prints: Vec<&String> = r.files.iter().filter(|f| f.contains("_print")).collect();
+    assert_eq!(prints.len(), 2, "two prints, two files: {prints:?}");
+    for f in &prints {
+        assert!(f.starts_with(&format!("AAF/Media/{}_print", vcsd_core::layout::safe_name(&gname))), "{f}");
+    }
+
+    // the glass print = the dry clips × the plugin's automated gain (pre-fader: no −6 dB)
+    let dry = mixer::Mixer::new(st, mixer::RenderOptions::default()).render_track_prefader(&glass, start, (end - start) as usize).unwrap();
+    let lane = |x: i64| ((x - sr / 2) as f64 / (1.5 * sr as f64)).clamp(0.0, 1.0);
+    assert!(dry.peak() > 0.01);
+    let ch = dry.channels as usize;
+    let diff = |rel: &str| {
+        let (_, print) = wav::read(&r.dir.join(rel)).unwrap();
+        (0..dry.frames())
+            .map(|f| (dry.data[f * ch] as f64 * 2.0 * lane(start + f as i64) - print.data[f * ch] as f64).abs())
+            .fold(0.0f64, f64::max)
+    };
+    let (print_rel, max) = prints.iter().map(|f| ((*f).clone(), diff(f))).min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+    assert!(max < 1e-4, "plugin and its automation baked in (max diff {max})");
+
+    let rep: serde_json::Value = serde_json::from_slice(&std::fs::read(r.dir.join("AAF/aaf_report.json")).unwrap()).unwrap();
+    assert_eq!(rep["printed_tracks"], 2);
+    let losses: Vec<&str> = rep["losses"].as_array().unwrap().iter().filter_map(|l| l.as_str()).collect();
+    assert!(losses.iter().any(|l| l.starts_with("tracks printed with their plugins")), "{losses:?}");
+    assert!(!losses.iter().any(|l| l.starts_with("plugin parameter automation not carried")), "{losses:?}");
+    assert!(std::fs::read_to_string(r.dir.join("README.md")).unwrap().contains("tracks with plugins or insert effects are printed"));
+
+    if let Some(py) = python() {
+        let v = inspect(&py, &r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap()));
+        let tracks = v["tracks"].as_array().unwrap();
+        let glass_file = print_rel.rsplit('/').next().unwrap().to_string();
+        let gt = tracks
+            .iter()
+            .find(|t| {
+                t["components"].as_array().unwrap().iter().any(|c| c["media"]["urls"][0].as_str().is_some_and(|u| u.ends_with(&glass_file)))
+            })
+            .expect("printed glass track");
+        assert_eq!(gt["name"], gname.as_str());
+        let clips: Vec<&serde_json::Value> = gt["components"].as_array().unwrap().iter().filter(|c| c["kind"] == "SourceClip").collect();
+        assert_eq!(clips.len(), 1, "one clip: the print");
+        assert_eq!(clips[0]["length"], end - start);
+        // the two same-named tracks link to different files
+        let urls: std::collections::BTreeSet<String> = tracks
+            .iter()
+            .flat_map(|t| t["components"].as_array().unwrap())
+            .filter_map(|c| c["media"]["urls"][0].as_str())
+            .filter(|u| u.contains("_print"))
+            .map(String::from)
+            .collect();
+        assert_eq!(urls.len(), 2, "{urls:?}");
+        // its fader stays editable as track gain (it isn't in the print)
+        let g = gt["volume"]["constant"].as_f64().expect("fader as constant track gain");
+        assert!((20.0 * g.log10() + 6.0).abs() < 0.01, "{g}");
+        // other tracks keep their editable clips
+        assert!(tracks.iter().any(|t| t["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["kind"] == "SourceClip" && !c["media"]["urls"][0].as_str().unwrap().contains("_print"))));
     }
 }

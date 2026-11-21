@@ -185,6 +185,10 @@ enum Cmd {
         /// Also write an AAF of the editable timeline (linked media in AAF/Media)
         #[arg(long)]
         aaf: bool,
+        /// In the AAF, print tracks with plugins or insert effects (rendered with
+        /// them and their automation) instead of linking their clips. Implies --aaf
+        #[arg(long)]
+        aaf_print_plugins: bool,
     },
     /// Relink missing media by content hash
     Relink { dir: PathBuf, search: Vec<PathBuf> },
@@ -565,13 +569,14 @@ fn run(cli: Cli) -> Result<()> {
             let v = qa::run(&s.state, &qa::QaOptions { verify_hashes: hashes, exclude_temp_refs: true });
             print!("{}", qa::to_markdown(&v));
         }
-        Cmd::Export { dir, profile, scene, handles_ms, float, force, date, out, aaf } => {
+        Cmd::Export { dir, profile, scene, handles_ms, float, force, date, out, aaf, aaf_print_plugins } => {
             let mut s = open(&dir)?;
             let mut o = ExportOptions::new(ExportProfile::parse(&profile)?, &date.unwrap_or_else(today));
             o.handle_samples = handles_ms as i64 * s.state.project.sample_rate as i64 / 1000;
             o.force = force;
             o.out_dir = out;
-            o.aaf = aaf;
+            o.aaf = aaf || aaf_print_plugins;
+            o.aaf_print_plugins = aaf_print_plugins;
             if float {
                 o.format = wav::SampleFormat::Float32;
             }

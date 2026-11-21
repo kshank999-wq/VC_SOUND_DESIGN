@@ -82,13 +82,14 @@ export function QaExport({ eng }: { eng: EngineHook }) {
   const [handles, setHandles] = useState(500);
   const [float, setFloat] = useState(false);
   const [aaf, setAaf] = useState(false);
+  const [aafPrint, setAafPrint] = useState(false);
   const [result, setResult] = useState<{ dir: string; files: number; qa: QaIssue[]; aaf?: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
   if (!view?.open) return null;
   const errs = qa?.filter((i) => i.severity === "error").length ?? 0;
   const doExport = async (force: boolean) => {
     setBusy(true);
-    const r = await run<{ dir: string; files: number; qa: QaIssue[]; aaf: string | null }>("export.run", { profile, scene_id: scene || undefined, handles_ms: handles, float, force, aaf }, "Export complete");
+    const r = await run<{ dir: string; files: number; qa: QaIssue[]; aaf: string | null }>("export.run", { profile, scene_id: scene || undefined, handles_ms: handles, float, force, aaf, aaf_print_plugins: aaf && aafPrint }, "Export complete");
     setBusy(false);
     if (r) setResult(r);
   };
@@ -127,6 +128,9 @@ export function QaExport({ eng }: { eng: EngineHook }) {
             <label className="field"><span>Format</span><select value={float ? "f" : "i"} onChange={(e) => setFloat(e.target.value === "f")}><option value="i">24-bit PCM</option><option value="f">32-bit float</option></select></label>
             <label className="small aaf-opt" title="Editable timeline (clips, fades, clip gain, cue markers, timecode) linking copies of the source WAVs. Checked with an independent AAF reader; not yet verified in a specific Resolve/Fairlight version — the rendered stems stay the reference. What it can't carry is listed in AAF/aaf_report.json.">
               <input type="checkbox" checked={aaf} onChange={(e) => setAaf(e.target.checked)} /> Also write AAF (beta)
+            </label>
+            <label className={"small aaf-opt sub" + (aaf ? "" : " muted")} title="AAF can't carry VST3/AU plugins or insert effects. With this on, tracks that use them are rendered with them (and their parameter automation), pre-fader, and placed in the AAF as one clip each, so they sound right in the receiving app. Their fader, volume, pan and bus levels stay editable; their clips don't.">
+              <input type="checkbox" disabled={!aaf} checked={aaf && aafPrint} onChange={(e) => setAafPrint(e.target.checked)} /> Print tracks with plugins
             </label>
           </div>
           <div className="btns">

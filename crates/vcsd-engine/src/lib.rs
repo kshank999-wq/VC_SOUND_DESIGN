@@ -1643,7 +1643,8 @@ impl Engine {
                 let mut o = ExportOptions::new(ExportProfile::parse(os(a, "profile").unwrap_or("resolve")).map_err(e)?, &today());
                 o.handle_samples = oi(a, "handles_ms").unwrap_or(0) * st.project.sample_rate as i64 / 1000;
                 o.force = ob(a, "force");
-                o.aaf = ob(a, "aaf");
+                o.aaf = ob(a, "aaf") || ob(a, "aaf_print_plugins");
+                o.aaf_print_plugins = ob(a, "aaf_print_plugins");
                 if ob(a, "float") {
                     o.format = wav::SampleFormat::Float32;
                 }

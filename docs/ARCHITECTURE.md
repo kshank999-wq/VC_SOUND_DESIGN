@@ -95,10 +95,12 @@ content.
 | Overlapping clips | Extra tracks ("Name (2)") |
 | Looped clips | Butt-spliced repeats of the loop span |
 | Cue markers | `CommentMarker`s ("code description") on an event track |
+| Plugins, insert effects and plugin parameter automation (option "print tracks with plugins") | AAF can't carry VST3/AU plugins, so tracks with active inserts are rendered pre-fader (clips → inserts with their automation and delay compensation) to `AAF/Media/*_print.wav` and linked as one clip each. Their fader, volume, pan and bus levels stay editable around the print; their clips don't |
 | Start timecode, frame rate, drop frame | Timecode track |
 
 **Not carried** (listed in `AAF/aaf_report.json`, the README and delivery QA; all of it is in the
-rendered audio): plugin parameter automation, inserts and plugins (on tracks and buses), bus routing and bus gain, loop crossfades, muted tracks and clips (left out), and the right channel of stereo
+rendered audio): plugins and insert effects on buses, and on tracks unless printed, with
+their automation, bus routing and bus gain, loop crossfades, muted tracks and clips (left out), and the right channel of stereo
 sources on mono tracks. Media is copied into `AAF/Media/` (converted to the project rate when it
 differs) and linked by absolute `file://` URL.
 
@@ -108,7 +110,8 @@ links, layers, trimming, timecode and markers against the project. It also check
 volume curve matches the project's lane within 0.12 dB at 400 points. Mono pan is checked as
 exact, and stereo balance gains within 0.12 dB across a move that crosses the centre. With bus
 gain, bus balance and master automation, the left/right levels a constant-power host plays from
-the AAF match the mixer's within 0.15 dB. It has not been opened in
+the AAF match the mixer's within 0.15 dB. A printed track is checked sample by sample against
+the dry clips through the plugin and its automation. It has not been opened in
 DaVinci Resolve, Pro Tools or Media Composer yet. Pinning a Resolve version and recording its
 feature matrix is the next step.
 

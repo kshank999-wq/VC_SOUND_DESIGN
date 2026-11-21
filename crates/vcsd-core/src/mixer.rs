@@ -602,6 +602,18 @@ impl<'a> Mixer<'a> {
     /// track's own channel count. Used for consolidated track deliverables.
     pub fn render_track_print(&self, track_id: &str, start: i64, frames: usize) -> Result<AudioBuffer> {
         let t = self.s.track(track_id)?;
+        let mut buf = self.render_track_prefader(track_id, start, frames)?;
+        if t.frozen_asset_id.as_ref().is_some_and(|f| self.s.assets.contains_key(f)) {
+            return Ok(buf); // a frozen render already has the fader in it
+        }
+        self.apply_fader(t, &mut buf, start);
+        Ok(buf)
+    }
+
+    /// A track up to its fader: clips through its inserts (plugins with their
+    /// automation and delay compensation), at the track's channel count.
+    pub fn render_track_prefader(&self, track_id: &str, start: i64, frames: usize) -> Result<AudioBuffer> {
+        let t = self.s.track(track_id)?;
         let mut buf = AudioBuffer::silent(self.s.project.sample_rate, t.channels.max(1), frames);
         if let Some(fz) = t.frozen_asset_id.as_ref().and_then(|f| self.s.assets.get(f)) {
             let pos = fz.time_reference.map(|r| r as i64 - self.s.tb().origin_since_midnight()).unwrap_or(0);
@@ -642,7 +654,12 @@ impl<'a> Mixer<'a> {
             self.render_clip_into(c, &mut buf, start + lat)?;
         }
         self.run_inserts(format!("t:{track_id}"), &t.inserts, &mut buf, start + lat);
-        let mut vol = self.cursor(track_id, AutomationParam::VolumeDb, 0.0);
+        Ok(buf)
+    }
+
+    /// The track fader and its volume automation.
+    fn apply_fader(&self, t: &Track, buf: &mut AudioBuffer, start: i64) {
+        let mut vol = self.cursor(&t.id, AutomationParam::VolumeDb, 0.0);
         let ch = buf.channels as usize;
         let base = db_to_lin(t.gain_db);
         if vol.is_empty() {
@@ -650,7 +667,7 @@ impl<'a> Mixer<'a> {
                 buf.data.iter_mut().for_each(|v| *v *= base);
             }
         } else {
-            for f in 0..frames {
+            for f in 0..buf.frames() {
                 let db = vol.at(start + f as i64);
                 let g = if db <= -96.0 { 0.0 } else { base * db_to_lin(db) };
                 for c in 0..ch {
@@ -658,7 +675,6 @@ impl<'a> Mixer<'a> {
                 }
             }
         }
-        Ok(buf)
     }
 
     fn track_audible(&self, t: &Track) -> bool {

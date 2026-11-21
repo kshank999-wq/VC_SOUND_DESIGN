@@ -363,3 +363,5 @@ body.resizing-h, body.resizing-h * { cursor: row-resize !important; }
 .auto-add select { max-width: 100%; font-size: 11px; }
 .param-row .has-auto { color: #c9b6f2; border-color: #7d68b3; }
 .param-row.writing input[type="range"] { accent-color: #ff5a4f; }
+
+.aaf-opt.sub { padding-left: 18px; }

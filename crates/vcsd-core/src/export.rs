@@ -71,6 +71,9 @@ pub struct ExportOptions {
     pub plugins: Option<crate::mixer::PluginHostRef>,
     /// Also write an AAF of the editable timeline (Tier 2, `AAF/`).
     pub aaf: bool,
+    /// In the AAF, print tracks that have plugins or insert effects (rendered
+    /// with them and their automation, pre-fader) instead of linking their clips.
+    pub aaf_print_plugins: bool,
 }
 
 impl ExportOptions {
@@ -86,6 +89,7 @@ impl ExportOptions {
             out_dir: None,
             plugins: None,
             aaf: false,
+            aaf_print_plugins: false,
         }
     }
 }
@@ -313,11 +317,51 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
             Some(id) => format!("{} — Scene {}", st.project.name, st.scenes.get(id).map(|x| x.number.as_str()).unwrap_or("")),
             None => st.project.name.clone(),
         };
+        // printed tracks: clips through plugins/inserts (with their automation), pre-fader
+        let mut prints = std::collections::BTreeMap::new();
+        if o.aaf_print_plugins {
+            let canon = std::fs::canonicalize(&dir).unwrap_or(dir.clone());
+            // track names needn't be unique (one "FOLEY • Greg • Boots" per scene): file names must be
+            let mut taken: std::collections::HashSet<String> =
+                media.values().filter_map(|m| m.path.file_name().map(|f| f.to_string_lossy().to_lowercase())).collect();
+            for tid in crate::aaf::tracks_to_print(st, start, end) {
+                let buf = mixer.render_track_prefader(&tid, start, frames)?;
+                let base = format!("{}_print", safe_name(&st.tracks[&tid].name));
+                let mut file = format!("{base}.wav");
+                let mut k = 2;
+                while !taken.insert(file.to_lowercase()) {
+                    file = format!("{base}_{k}.wav");
+                    k += 1;
+                }
+                let rel_print = format!("AAF/Media/{file}");
+                let bext = Bext {
+                    description: format!("{} — printed with inserts (pre-fader)", st.tracks[&tid].name),
+                    originator: "VC Sound Design".into(),
+                    time_reference: (tb.origin_since_midnight() + start) as u64,
+                    ..Default::default()
+                };
+                let path = dir.join(&rel_print);
+                crate::wav::write(&path, &buf, o.format, Some(&bext))?;
+                let abs_path = std::fs::canonicalize(&path).unwrap_or(path.clone());
+                if let Ok(r) = abs_path.strip_prefix(&canon) {
+                    w.files.push(r.to_string_lossy().replace('\\', "/"));
+                }
+                prints.insert(
+                    tid.clone(),
+                    crate::aaf::AafMedia {
+                        path: abs_path,
+                        channels: buf.channels,
+                        sample_rate: buf.sample_rate,
+                        frames: buf.frames() as i64,
+                    },
+                );
+            }
+        }
         let mut r = crate::aaf::write(
             st,
             &dir.join(&rel),
             &media,
-            &crate::aaf::AafOptions { name: label, start, end, exclude_temp_refs: o.exclude_temp_refs },
+            &crate::aaf::AafOptions { name: label, start, end, exclude_temp_refs: o.exclude_temp_refs, prints },
         )?;
         r.file = rel.clone();
         r.losses.extend(notes);
@@ -603,7 +647,7 @@ with source offsets, linear fades and clip gain (track fader folded in), track v
 as time-varying track gain ({automated} tracks), pan ({panned} tracks: Mono Audio Pan on mono tracks,\n\
 stereo tracks as hard-panned L/R pairs with the balance in each side's gain), bus and master\n\
 levels and automation folded into each track (AAF has no buses), {markers} cue markers and a\n\
-timecode track starting at the range start. Clips link to the WAVs in `AAF/Media/` by absolute path;\n\
+timecode track starting at the range start.{printed} Clips link to the WAVs in `AAF/Media/` by absolute path;\n\
 if the package has moved, relink to that folder (file names are unique).\n\n\
 Checked with an independent AAF reader (pyaaf2); not yet verified in a specific Resolve/Fairlight\n\
 version, so treat it as a convenience and the rendered stems/mix as the reference.\n\n\
@@ -615,6 +659,16 @@ Full details: `AAF/aaf_report.json`.",
             markers = r.markers,
             automated = r.automated_tracks,
             panned = r.panned_tracks,
+            printed = if r.printed_tracks > 0 {
+                format!(
+                    "\n\n{} tracks with plugins or insert effects are printed: rendered with them and their automation\n\
+(pre-fader) to `AAF/Media/*_print.wav` and placed as one clip each; fader, volume, pan and bus\n\
+levels stay editable around them.",
+                    r.printed_tracks
+                )
+            } else {
+                String::new()
+            },
             losses = r.losses.iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n"),
         ),
     };

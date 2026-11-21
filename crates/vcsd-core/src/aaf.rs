@@ -22,7 +22,11 @@
 //! definitions) — come from `assets/aaf_template.aaf`, generated with pyaaf2
 //! by `scripts/aaf/make_template.py`. Everything else is written here.
 //!
-//! What AAF can't carry (plugin automation, bus routing and effects, plugins, loop
+//! Optionally, tracks with plugins or insert effects are printed: rendered
+//! pre-fader with their inserts and plugin automation, and linked as one clip
+//! (fader, volume, pan and bus levels stay editable around it).
+//!
+//! What AAF can't carry (unprinted plugins and their automation, bus routing and effects, loop
 //! crossfades, mutes…) is listed in the [`AafReport`]: the rendered stems in
 //! the same package include all of it.
 
@@ -386,6 +390,8 @@ pub struct AafReport {
     pub automated_tracks: usize,
     /// Tracks with a pan (static or automated) in the AAF.
     pub panned_tracks: usize,
+    /// Tracks printed with their plugins and insert effects.
+    pub printed_tracks: usize,
 }
 
 /// RIFF header + `fmt ` chunk of a WAV (the WAVEDescriptor `Summary`).
@@ -776,9 +782,14 @@ impl BusChain {
 /// is exactly a new pan plus a gain, which is what gets written.
 /// Stereo tracks: L/R hard panned; volume, balance and bus levels/balance
 /// become each side's gain. Curves are fitted within 0.1 dB (pan within 0.002).
-fn track_mix(s: &ProjectState, t: &Track, start: i64, end: i64) -> Vec<Mix> {
+/// `fader`: also apply the track's static fader (printed tracks, whose clips
+/// can't carry it as clip gain).
+fn track_mix(s: &ProjectState, t: &Track, start: i64, end: i64, fader: bool) -> Vec<Mix> {
     let (vol, pan) = (owner_lane(s, &t.id, AutomationParam::VolumeDb), owner_lane(s, &t.id, AutomationParam::Pan));
-    let bus = BusChain::of(s, &t.bus_id);
+    let mut bus = BusChain::of(s, &t.bus_id);
+    if fader {
+        bus.gain *= 10f64.powf(t.gain_db as f64 / 20.0);
+    }
     let pan_at = |x: i64| if pan.is_empty() { t.pan as f64 } else { lane_db(&pan, x) };
     let vol_at = |x: i64| if vol.is_empty() { 1.0 } else { db_amp(lane_db(&vol, x)) };
     let mut keys: Vec<i64> = vol.iter().chain(&pan).map(|p| p.0).collect();
@@ -854,6 +865,9 @@ pub struct AafOptions {
     pub start: i64,
     pub end: i64,
     pub exclude_temp_refs: bool,
+    /// Tracks rendered with their plugins and insert effects (pre-fader), by
+    /// track id: each goes into the AAF as one clip of this file.
+    pub prints: BTreeMap<String, AafMedia>,
 }
 
 #[derive(Default)]
@@ -931,6 +945,16 @@ fn trim(mut p: Piece, start: i64, end: i64) -> Option<Piece> {
 /// Build the AAF and write it to `out`. `media` maps asset ids to the linked WAVs.
 pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o: &AafOptions) -> Result<AafReport> {
     let now = crate::ids::now_unix();
+    // printed tracks link to their render like any other media
+    let print_key = |tid: &str| format!("print:{tid}");
+    let mut media = media.clone();
+    for (tid, m) in &o.prints {
+        media.insert(print_key(tid), m.clone());
+    }
+    let media = &media;
+    let printed = |track: &str| o.prints.contains_key(track);
+    // the track a plugin lane's slot sits on
+    let slot_track = |slot: &str| crate::editing::plugin_slot(s, slot).map(|(_, owner)| owner.to_string());
     let sr = s.project.sample_rate as i32;
     let (start, end) = (o.start, o.end.max(o.start + 1));
     let len = end - start;
@@ -940,13 +964,18 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
 
     // ---- what the timeline can't hold
     let n_auto = |f: &dyn Fn(&AutomationPoint) -> bool| s.automation.values().filter(|p| f(p)).count();
-    losses.add("plugin parameter automation not carried", n_auto(&|p| matches!(p.param, AutomationParam::Plugin(_))));
+    losses.add(
+        "plugin parameter automation not carried (on unprinted tracks and buses)",
+        n_auto(&|p| matches!(p.param, AutomationParam::Plugin(_)) && !slot_track(&p.owner_id).is_some_and(|t| printed(&t))),
+    );
+    losses.add("tracks printed with their plugins and insert effects: one rendered clip each, not editable clip by clip", o.prints.len());
     let pans = |t: &Track| t.pan.abs() > 0.001 || s.automation.values().any(|p| p.owner_id == t.id && p.param == AutomationParam::Pan);
     losses.add(
         "mono track pan uses the receiving app's pan law (VC Sound Design: −3 dB constant power)",
         s.tracks.values().filter(|t| !t.mute && t.channels < 2 && pans(t)).count(),
     );
-    let inserts = s.tracks.values().map(|t| t.inserts.len()).chain(s.buses.values().map(|b| b.inserts.len())).sum();
+    let inserts =
+        s.tracks.values().filter(|t| !printed(&t.id)).map(|t| t.inserts.len()).chain(s.buses.values().map(|b| b.inserts.len())).sum();
     losses.add("insert effects and plugins not carried (rendered in stems and mix)", inserts);
     losses.add(
         "bus routing not carried: tracks are flat, with bus levels and automation folded into each track",
@@ -956,7 +985,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         "bus balance on mono tracks folded into their pan and gain (exact with a −3 dB constant-power pan law)",
         s.tracks.values().filter(|t| !t.mute && t.channels < 2 && !BusChain::of(s, &t.bus_id).bals.is_empty()).count(),
     );
-    let static_gain = s.tracks.values().filter(|t| t.gain_db.abs() > 0.001).count();
+    let static_gain = s.tracks.values().filter(|t| t.gain_db.abs() > 0.001 && !printed(&t.id)).count();
     losses.add("track fader gain folded into clip gain", static_gain);
 
     // ---- tracks → slots of pieces
@@ -972,6 +1001,20 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         }
         if t.mute {
             losses.add("muted tracks left out", 1);
+            continue;
+        }
+        if printed(&t.id) {
+            // one clip of the track's render, across the range, on one layer
+            let p = Piece { at: start, len, source: 0, fade_in: 0, fade_out: 0, gain: 1.0, asset: print_key(&t.id) };
+            clip_count += 1;
+            let chans = t.channels.clamp(1, 2) as u32;
+            for ch in 1..=chans {
+                let mut name = t.name.clone();
+                if chans == 2 {
+                    name.push_str(if ch == 1 { " L" } else { " R" });
+                }
+                audio_slots.push((name, ch, vec![p.clone()], t.id.clone()));
+            }
             continue;
         }
         let mut pieces = vec![];
@@ -1055,7 +1098,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     let mut mixes: BTreeMap<String, Vec<Mix>> = BTreeMap::new();
     for (_, _, _, tid) in &audio_slots {
         if !mixes.contains_key(tid) {
-            mixes.insert(tid.clone(), track_mix(s, &s.tracks[tid], start, end));
+            mixes.insert(tid.clone(), track_mix(s, &s.tracks[tid], start, end, printed(tid)));
         }
     }
     for (i, (name, ch, pieces, tid)) in audio_slots.iter().enumerate() {
@@ -1118,6 +1161,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         clips: clip_count,
         markers,
         media_files: masters.len(),
+        printed_tracks: o.prints.len(),
         automated_tracks: s
             .automation
             .values()
@@ -1180,6 +1224,21 @@ pub fn prepare_media(s: &ProjectState, asset_ids: &[String], dir: &Path) -> Resu
 
 fn abs(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Tracks worth printing over `[start, end)`: audible (not muted, not on a
+/// muted bus), with an active insert (a plugin that isn't bypassed, or a
+/// built-in effect) and at least one audible clip in the range.
+pub fn tracks_to_print(s: &ProjectState, start: i64, end: i64) -> Vec<String> {
+    let mut v: Vec<&Track> = s
+        .tracks
+        .values()
+        .filter(|t| !t.mute && !BusChain::of(s, &t.bus_id).muted)
+        .filter(|t| t.inserts.iter().any(|i| i.as_plugin().is_none_or(|p| !p.bypass)))
+        .filter(|t| s.clips.values().any(|c| c.track_id == t.id && !c.muted && c.timeline_start < end && c.end() > start))
+        .collect();
+    v.sort_by(|a, b| (&a.folder, a.order, &a.name).cmp(&(&b.folder, b.order, &b.name)));
+    v.into_iter().map(|t| t.id.clone()).collect()
 }
 
 #[cfg(test)]
