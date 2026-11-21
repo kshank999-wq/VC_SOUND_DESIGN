@@ -34,7 +34,8 @@ How the code maps onto them is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
   independent reader but not yet in a specific Resolve version; see
   [AAF export](docs/ARCHITECTURE.md#aaf-export-tier-2). The same timeline can be written as
   OpenTimelineIO (`.otio`), checked with the OpenTimelineIO library; see
-  [OTIO export](docs/ARCHITECTURE.md#otio-export-tier-2). An editor's AAF can be imported
+  [OTIO export](docs/ARCHITECTURE.md#otio-export-tier-2). OTIO timelines can be imported too
+  (`vcsd import-otio`, or the menu); see [OTIO import](docs/ARCHITECTURE.md#otio-import). An editor's AAF can be imported
   (File menu, or `vcsd import-aaf`) as new tracks. It brings in clips, fades and crossfades,
   clip gain, volume and pan automation, stereo pairs and markers. Media can be linked,
   embedded, AIFF, or MXF (PCM, AES3 or D-10, single- or multitrack); see [AAF import](docs/ARCHITECTURE.md#aaf-import). See the

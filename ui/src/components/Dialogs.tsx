@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { call, isTauri, nativePick } from "../api";
-import { aafSummary, type AafReport } from "../aafReport";
+import { aafSummary, otioSummary, type AafReport, type OtioReport } from "../aafReport";
 import type { EngineHook } from "../store";
 
 interface Entry { name: string; path: string; dir: boolean; project: boolean }
@@ -136,7 +136,7 @@ export function Welcome({ eng, onDevices }: { eng: EngineHook; onDevices: () => 
   );
 }
 
-export type ImportKind = "picture" | "aaf" | "score" | "script" | "relink" | "take" | null;
+export type ImportKind = "picture" | "aaf" | "otio" | "score" | "script" | "relink" | "take" | null;
 
 
 export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; eng: EngineHook; onClose: () => void; cueId?: string }) {
@@ -145,7 +145,7 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
   const [tc, setTc] = useState("");
   const [log, setLog] = useState<string[]>([]);
   if (!kind) return null;
-  const titles = { picture: "Import picture reference", aaf: "Import AAF (editor's timeline)", score: "Import VC Composer score (.json)", script: "Import VC Film Studio breakdown (.json)", relink: "Relink missing media (search folder)", take: "Add a recorded take (.wav)" };
+  const titles = { picture: "Import picture reference", aaf: "Import AAF (editor's timeline)", otio: "Import OpenTimelineIO (.otio)", score: "Import VC Composer score (.json)", script: "Import VC Film Studio breakdown (.json)", relink: "Relink missing media (search folder)", take: "Add a recorded take (.wav)" };
   const go = async () => {
     let ok = null;
     if (kind === "picture") ok = await eng.run("picture.import", { path, label, start_tc: tc || undefined }, "Picture imported");
@@ -155,6 +155,14 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
         eng.toast(`AAF imported: ${r.tracks.length} tracks, ${r.clips} clips`);
         // keep the dialog open to show what was left out
         if (r.missing_media.length || r.notes.length) return setLog(aafSummary(r));
+      }
+      ok = r;
+    }
+    if (kind === "otio") {
+      const r = await eng.run<OtioReport>("otio.import", { path, at_tc: tc || undefined });
+      if (r) {
+        eng.toast(`OTIO imported: ${r.tracks.length} tracks, ${r.clips} clips`);
+        if (r.missing_media.length || r.notes.length) return setLog(otioSummary(r));
       }
       ok = r;
     }
@@ -179,8 +187,8 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
             <label className="field"><span>Start TC (blank = read from file)</span><input className="mono" value={tc} placeholder="01:00:00:00" onChange={(e) => setTc(e.target.value)} /></label>
           </div>
         )}
-        {kind === "aaf" && (
-          <label className="field"><span>Start TC (blank = the AAF's own timecode)</span><input className="mono" value={tc} placeholder="01:00:00:00" onChange={(e) => setTc(e.target.value)} /></label>
+        {(kind === "aaf" || kind === "otio") && (
+          <label className="field"><span>Start TC (blank = the file's own start)</span><input className="mono" value={tc} placeholder="01:00:00:00" onChange={(e) => setTc(e.target.value)} /></label>
         )}
         {log.length > 0 && <pre className="log">{log.join("\n")}</pre>}
         <div className="btns">

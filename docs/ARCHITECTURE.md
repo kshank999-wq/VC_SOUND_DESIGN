@@ -150,6 +150,42 @@ library (`scripts/otio/otio_summary.py`) and checks the following:
 
 It has not been opened in an editor yet.
 
+## OTIO import
+
+`crates/vcsd-core/src/otio_import.rs` reads `.otio` JSON: a `Timeline` (or the first one in a
+`SerializableCollection`), with `Clip.1` or `Clip.2` media references. It rebuilds the audio
+tracks as new tracks in a folder `OTIO/<timeline>`, placed at `global_start_time` or at a given TC:
+
+| OTIO | Project |
+|---|---|
+| Audio track (video tracks are ignored) | A track, its category guessed from the name; stereo when its media is |
+| Clip, at any rate | A clip with its source range, converted to samples. When the media's available range starts at a timecode (BWF media from editors), the offset into the file is relative to that |
+| Transition next to a gap | A fade in or out of `in + out` |
+| Transition between clips | A crossfade: the clip before runs on past the cut by the out offset, the clip after starts before it by the in offset (into their handles, as OTIO defines it). Handles the media doesn't have shorten it |
+| Nested stack (compound clip) | Its audio tracks as extra tracks ("outer / inner"), trimmed to the stack's range |
+| Disabled track or clip | Muted |
+| Markers on the timeline, tracks and clips | Spotting markers in an "OTIO markers" lane (name — comment), for those inside a scene |
+| `metadata.vcsd` (our own export) | Clip gain and fades, track fader, pan, channels, volume and pan automation |
+
+**Media:** `file://` URLs, absolute paths, or paths relative to the `.otio`. WAV/BWF is used
+where it is; moved media is searched for by name next to the file and in the given folders.
+AIFF and MXF are converted like the AAF import's, as is media at another sample rate. Files are
+written to `Audio/Imported/OTIO/<file>/`. Missing references and unreadable media are reported
+per file.
+
+OTIO has no audio mix model. Other tools' files therefore come in at unity gain, centred, and the
+report says so.
+
+**Verification:** `crates/vcsd-core/tests/otio_import.rs` round-trips an OTIO export, with no
+library needed. The imported mix matches the original to within 1e-5 per sample, and the
+automation lane comes back exactly. It also imports a timeline written with the OpenTimelineIO
+library in an editor's layout (`scripts/otio/make_fixture.py`) and checks the following:
+- 25 fps, media ranges at 10:00:00:00 and a relative URL;
+- a fade in from a gap, a dissolve with handles, and a disabled clip;
+- a moved AIFF found by name and byte-swapped correctly;
+- a nested stack trimmed to its range;
+- a missing reference reported, and the timeline and clip markers.
+
 ## AAF import
 
 `crates/vcsd-core/src/aaf_import.rs` reads AAF files from editors' systems: little-endian
@@ -268,7 +304,7 @@ It has not yet been tested with files from Media Composer, Pro Tools or Resolve.
 - **Engine language and shell:** a Rust engine (deterministic and realtime-capable, cross-platform) inside a Tauri 2 desktop shell with a React UI. The webview only draws the interface; audio, recording and MIDI run natively in the engine, which follows the spec's rule against making browser JavaScript responsible for realtime audio.
 - **Native format:** a versioned SQLite DB with JSON documents per entity and external media, as the spec proposes.
 - **Placeholder licensing:** the bundled starter pack is generated procedurally by our own code, so it can be redistributed. Third-party packs carry their own license metadata, and QA flags anything not redistributable.
-- **Interchange:** Tier 1 (aligned BWF plus manifest) is implemented and tested. Tier 2 is an optional AAF of the editable timeline (see below), checked with an independent reader but not yet against a pinned Resolve/Fairlight version, and optionally the same timeline as OTIO (checked with the OpenTimelineIO library). AAF import reads editors' timelines (tested with pyaaf2-written files and round trips, not yet with files from Media Composer, Pro Tools or Resolve).
+- **Interchange:** Tier 1 (aligned BWF plus manifest) is implemented and tested. Tier 2 is an optional AAF of the editable timeline (see below), checked with an independent reader but not yet against a pinned Resolve/Fairlight version, and optionally the same timeline as OTIO (checked with the OpenTimelineIO library). AAF and OTIO import reads editors' timelines (tested with pyaaf2-written files and round trips, not yet with files from Media Composer, Pro Tools or Resolve).
 
 ## Known limitations
 

@@ -210,6 +210,17 @@ enum Cmd {
         #[arg(long = "search")]
         search: Vec<PathBuf>,
     },
+    /// Import an OpenTimelineIO timeline (.otio) as new tracks
+    ImportOtio {
+        dir: PathBuf,
+        otio: PathBuf,
+        /// Place the timeline's start here instead of at its own start time
+        #[arg(long)]
+        at: Option<String>,
+        /// Folders searched (by file name) for media that moved
+        #[arg(long = "search")]
+        search: Vec<PathBuf>,
+    },
     /// Import a VC Composer timecoded score (JSON contract)
     Score { dir: PathBuf, json: PathBuf },
     /// Import a VC Film Studio script breakdown (JSON contract)
@@ -629,6 +640,31 @@ fn run(cli: Cli) -> Result<()> {
             println!(
                 "'{}' at {}: {} tracks ({} stereo), {} clips, {} markers; media {} linked, {} written",
                 r.composition,
+                r.start_tc,
+                r.tracks.len(),
+                r.stereo_tracks,
+                r.clips,
+                r.markers,
+                r.media_linked,
+                r.media_written
+            );
+            for m in &r.missing_media {
+                println!("  missing: {m}");
+            }
+            for n in &r.notes {
+                println!("  note: {n}");
+            }
+        }
+        Cmd::ImportOtio { dir, otio, at, search } => {
+            let mut o = otio_import::OtioImportOptions::for_project(&dir, &otio);
+            o.search_dirs = search;
+            let (_, r) = mutate(&dir, "import OTIO", |st| {
+                o.at = at.as_deref().map(|t| st.tb().sample_at_tc(t)).transpose()?;
+                otio_import::import(st, &otio, &o)
+            })?;
+            println!(
+                "'{}' at {}: {} tracks ({} stereo), {} clips, {} markers; media {} linked, {} written",
+                r.timeline,
                 r.start_tc,
                 r.tracks.len(),
                 r.stereo_tracks,

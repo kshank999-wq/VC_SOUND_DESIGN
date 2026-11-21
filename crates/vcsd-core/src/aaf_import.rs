@@ -758,7 +758,7 @@ struct Media<'a> {
     written: usize,
 }
 
-fn decode_url(u: &str) -> String {
+pub(crate) fn decode_url(u: &str) -> String {
     let rest = u.strip_prefix("file://localhost").or_else(|| u.strip_prefix("file://")).unwrap_or(u);
     let b = rest.as_bytes();
     let mut out = vec![];
@@ -783,15 +783,15 @@ fn decode_url(u: &str) -> String {
     s
 }
 
-fn file_name_of(p: &str) -> String {
+pub(crate) fn file_name_of(p: &str) -> String {
     p.rsplit(['/', '\\']).next().unwrap_or(p).to_string()
 }
 
-fn ext_of(p: &Path) -> String {
+pub(crate) fn ext_of(p: &Path) -> String {
     p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
 }
 
-fn index_dir(dir: &Path, depth: u32, out: &mut HashMap<String, PathBuf>) {
+pub(crate) fn index_dir(dir: &Path, depth: u32, out: &mut HashMap<String, PathBuf>) {
     if depth > 5 || out.len() > 50_000 {
         return;
     }
@@ -1000,7 +1000,7 @@ fn ext80(b: &[u8]) -> f64 {
 }
 
 /// AIFF / AIFC (PCM, big- or little-endian) → WAV.
-fn aiff_to_wav(b: &[u8], out: &Path) -> std::result::Result<(), String> {
+pub(crate) fn aiff_to_wav(b: &[u8], out: &Path) -> std::result::Result<(), String> {
     if b.len() < 12 || &b[0..4] != b"FORM" || !(&b[8..12] == b"AIFF" || &b[8..12] == b"AIFC") {
         return Err("not an AIFF file".into());
     }
@@ -1060,7 +1060,7 @@ struct MxfTrack {
 /// parameters from the descriptor linked to it (track number → track ID →
 /// `LinkedTrackID`). The WAV has every track's channels, in track order, so
 /// channel `k` of the AAF's file mob is the file's `k`-th channel.
-fn mxf_to_wav(b: &[u8], aaf_params: Option<Pcm>, out: &Path) -> std::result::Result<(), String> {
+pub(crate) fn mxf_to_wav(b: &[u8], aaf_params: Option<Pcm>, out: &Path) -> std::result::Result<(), String> {
     const ESSENCE: [u8; 12] = [0x06, 0x0e, 0x2b, 0x34, 0x01, 0x02, 0x01, 0x01, 0x0d, 0x01, 0x03, 0x01];
     const SET: [u8; 14] = [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x53, 0x01, 0x01, 0x0d, 0x01, 0x01, 0x01, 0x01, 0x01];
     let same = |k: &[u8], p: &[u8]| k.len() >= p.len() && k.iter().zip(p).enumerate().all(|(i, (a, b))| i == 7 || a == b);
@@ -1217,7 +1217,7 @@ struct Planned {
     right: Option<Lane>,
 }
 
-fn amp_db(a: f64) -> f64 {
+pub(crate) fn amp_db(a: f64) -> f64 {
     if a <= 1e-5 {
         -96.0
     } else {
@@ -1521,7 +1521,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
                 notes.add("markers outside every scene left out (add scenes, then import again)", 1);
                 continue;
             }
-            let lane = marker_lane(s);
+            let lane = marker_lane(s, "AAF markers", "aaf");
             let nm = crate::spotting::NewMarker {
                 lane_id: lane,
                 scene_id: None,
@@ -1548,7 +1548,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
 
 /// Drop breakpoints that lie (within `tol`) on the line between their
 /// neighbours (Ramer–Douglas–Peucker on the value).
-fn simplify(p: &[(i64, f64)], tol: f64) -> Vec<(i64, f64)> {
+pub(crate) fn simplify(p: &[(i64, f64)], tol: f64) -> Vec<(i64, f64)> {
     fn keep(p: &[(i64, f64)], a: usize, b: usize, tol: f64, out: &mut Vec<bool>) {
         if b <= a + 1 {
             return;
@@ -1572,22 +1572,22 @@ fn simplify(p: &[(i64, f64)], tol: f64) -> Vec<(i64, f64)> {
     p.iter().zip(k).filter(|x| x.1).map(|x| *x.0).collect()
 }
 
-fn add_point(s: &mut ProjectState, owner: &str, param: AutomationParam, sample: i64, value: f32) {
+pub(crate) fn add_point(s: &mut ProjectState, owner: &str, param: AutomationParam, sample: i64, value: f32) {
     let id = new_id("aut");
     s.automation.insert(id.clone(), AutomationPoint { id, owner_id: owner.into(), param, sample, value });
 }
 
-fn marker_lane(s: &mut ProjectState) -> String {
-    const NAME: &str = "AAF markers";
-    if let Some(l) = s.lanes.values().find(|l| l.name == NAME) {
+/// The marker lane named `name` (made when missing) for imported markers.
+pub(crate) fn marker_lane(s: &mut ProjectState, name: &str, tag: &str) -> String {
+    if let Some(l) = s.lanes.values().find(|l| l.name == name) {
         return l.id.clone();
     }
     let order = s.lanes.values().map(|l| l.order + 1).max().unwrap_or(0);
-    crate::spotting::add_lane(s, NAME, Category::Custom("aaf".into()), "#8a8f98", order)
+    crate::spotting::add_lane(s, name, Category::Custom(tag.into()), "#8a8f98", order)
 }
 
 /// A category from a track name's first word ("FX 1", "DIA • Greg", "BG L"…).
-fn guess_category(name: &str) -> Category {
+pub(crate) fn guess_category(name: &str) -> Category {
     for word in name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).take(2) {
         let w = word.trim_end_matches(|c: char| c.is_ascii_digit());
         let c = Category::parse(w);

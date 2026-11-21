@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aafSummary } from "../src/aafReport.ts";
+import { aafSummary, otioSummary } from "../src/aafReport.ts";
 
 const base = { composition: "Reel 1 v3", start_tc: "10:00:00:00", tracks: ["a", "b"], stereo_tracks: 1, clips: 1, markers: 0, media_linked: 2, media_written: 1, missing_media: [], notes: [] };
 
@@ -15,4 +15,11 @@ test("missing media and notes are listed", () => {
   const l = aafSummary({ ...base, stereo_tracks: 0, missing_media: ["music.wav not found — 1 clip"], notes: ["markers outside every scene left out (2)"] });
   assert.ok(!l[0].includes("stereo"));
   assert.deepEqual(l.slice(2), ["", "Missing media (clips left out):", "  music.wav not found — 1 clip", "", "Notes:", "  markers outside every scene left out (2)"]);
+});
+
+test("OTIO summaries name the timeline and their media folder", () => {
+  const { composition: _, ...rest } = base;
+  const l = otioSummary({ ...rest, timeline: "Reel 2" });
+  assert.ok(l[0].startsWith('"Reel 2" at 10:00:00:00'));
+  assert.equal(l[1], "Media: 2 linked in place, 1 written to Audio/Imported/OTIO");
 });

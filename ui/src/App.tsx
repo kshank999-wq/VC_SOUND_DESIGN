@@ -162,6 +162,7 @@ export function App() {
               <hr />
               <div onClick={() => setImp("picture")}>Import picture…</div>
               <div onClick={() => setImp("aaf")}>Import AAF…</div>
+              <div onClick={() => setImp("otio")}>Import OTIO…</div>
               <div onClick={() => setImp("script")}>Import Film Studio breakdown…</div>
               <div onClick={() => setImp("score")}>Import Composer score…</div>
               <div onClick={() => setImp("relink")}>Relink missing media…</div>
