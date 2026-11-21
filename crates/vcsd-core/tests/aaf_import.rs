@@ -138,8 +138,8 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     assert_eq!(rep.composition, "Reel 1 v3");
     assert_eq!(rep.start_tc, "10:00:00:00");
     assert!(rep.missing_media.is_empty(), "{:?}", rep.missing_media);
-    assert_eq!(rep.tracks.len(), 2, "two sound tracks (the picture track is ignored): {rep:?}");
-    assert_eq!(rep.clips, 3);
+    assert_eq!(rep.tracks.len(), 3, "three sound tracks (the picture track is ignored): {rep:?}");
+    assert_eq!(rep.clips, 4);
     assert_eq!(rep.markers, 1);
     let st = &s.state;
     let f = 1920; // samples per frame at 25 fps
@@ -203,6 +203,16 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
         assert!((at(x) - want).abs() < 0.11, "volume at {u:.2}: {} vs {want}", at(x));
     }
 
+    // FX 3: channel 3 of the two-track MXF (its second track's right channel), bit-exact
+    let fx = track("FX 3");
+    let x = clips(&fx.id);
+    assert_eq!((x.len(), x[0].timeline_start, x[0].length), (1, 0, 50 * f));
+    let xa = &st.assets[&x[0].asset_id];
+    assert_eq!(xa.channels, 1);
+    let (_, got) = wav::read_raw(Path::new(&xa.path)).unwrap();
+    let (_, want) = wav::read_raw(&dir.join("fx_ch3.wav")).unwrap();
+    assert!(got == want, "channel 3 of the MXF");
+
     // the marker, in its own lane
     let mk = st.markers.values().next().unwrap();
     assert_eq!((mk.start_sample, mk.label.as_str(), mk.origin), (50 * f, "door knock", TimingOrigin::Imported));
@@ -212,7 +222,7 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     std::fs::rename(dir.join("music.wav"), dir.join("music.moved")).unwrap();
     let (mut s2, root2) = session("aafimp2", "25", "10:00:00:00");
     let rep = s2.edit("i", |st| import(st, &aaf, &opts(&root2))).unwrap();
-    assert_eq!(rep.clips, 2);
+    assert_eq!(rep.clips, 3);
     assert_eq!(rep.missing_media.len(), 1, "{:?}", rep.missing_media);
     assert!(rep.missing_media[0].contains("music.wav not found"), "{:?}", rep.missing_media);
     assert!(rep.notes.iter().any(|n| n.starts_with("markers outside every scene")), "{:?}", rep.notes);

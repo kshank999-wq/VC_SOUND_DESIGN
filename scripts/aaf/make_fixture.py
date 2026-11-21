@@ -4,15 +4,18 @@ independent AAF implementation), for the AAF import tests:
 
     python3 scripts/aaf/make_fixture.py OUT_DIR
 
-OUT_DIR gets fixture.aaf, dialog.wav (embedded in the AAF too) and music.wav
-(linked, from a folder that no longer exists, so it must be found by name).
+OUT_DIR gets fixture.aaf, dialog.wav (embedded in the AAF too), music.wav
+(linked, from a folder that no longer exists, so it must be found by name), and
+fx.mxf: an OP1a MXF with two sound tracks (mono, then stereo; 3 channels), linked
+as one 3-channel file, plus fx_ch3.wav, the channel the AAF uses (for checking).
 
 The composition "Reel 1 v3" runs at 25 fps from 10:00:00:00:
 - "DIA 1": filler, clip, transition (crossfade), clip; channel 1 of the
   embedded stereo dialog file;
 - "MX": a clip with a constant Mono Audio Gain of 0.5, the whole track inside a
   Mono Audio Gain whose Amplitude varies 1 → 0.25 → 1, and a Mono Audio Pan of 0.75;
-- "Music" a picture-only track (ignored), a timecode track, and a descriptive
+- "FX 3": channel 3 of fx.mxf (the right channel of its second track);
+- a picture-only track (ignored), a timecode track, and a descriptive
   marker "door knock" at frame 50.
 """
 import math
@@ -45,6 +48,35 @@ def wav(path, chans, bits, frames, fn):
     }
 
 
+def klv(key, value):
+    return bytes(key) + b"\x83" + len(value).to_bytes(3, "big") + value
+
+
+def local_set(items):
+    return b"".join(struct.pack(">HH", tag, len(v)) + v for tag, v in items)
+
+
+def mxf(path, frames, tracks):
+    """A minimal OP1a MXF: timeline tracks, linked wave descriptors, then
+    frame-wrapped content packages (one BWF element per sound track, 24-bit)."""
+    set_key = lambda kind: [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x53, 0x01, 0x01, 0x0d, 0x01, 0x01, 0x01, 0x01, 0x01, kind, 0x00]
+    out = b""
+    for n, (chans, _) in enumerate(tracks):
+        tid, num = 2 + n, 0x16000101 + (len(tracks) << 16) + n
+        out += klv(set_key(0x3b), local_set([(0x4801, struct.pack(">I", tid)), (0x4804, struct.pack(">I", num))]))
+        out += klv(set_key(0x48), local_set([(0x3d03, struct.pack(">ii", RATE, 1)), (0x3d07, struct.pack(">I", chans)),
+                                            (0x3d01, struct.pack(">I", 24)), (0x3006, struct.pack(">I", tid))]))
+    per = RATE // FPS
+    for start in range(0, frames, per):
+        for n, (chans, fn) in enumerate(tracks):
+            num = 0x16000101 + (len(tracks) << 16) + n
+            data = b"".join(struct.pack("<i", int(round(fn(i, c) * (2 ** 23 - 1))))[:3]
+                            for i in range(start, min(start + per, frames)) for c in range(chans))
+            out += klv([0x06, 0x0e, 0x2b, 0x34, 0x01, 0x02, 0x01, 0x01, 0x0d, 0x01, 0x03, 0x01] + list(num.to_bytes(4, "big")), data)
+    with open(path, "wb") as f:
+        f.write(out)
+
+
 def defs(f):
     amp = f.create.ParameterDef("e4962321-2267-11d3-8a4c-0050040ef7d2", "Amplitude", "", "Rational")
     f.dictionary.register_def(amp)
@@ -75,6 +107,17 @@ def build(out):
     secs = 4
     wav(dialog, 2, 16, RATE * secs, lambda i, c: (0.5 if c == 0 else 0.25) * math.sin(2 * math.pi * (440 if c == 0 else 660) * i / RATE))
     meta = wav(music, 1, 24, RATE * secs, lambda i, c: 0.4 * math.sin(2 * math.pi * 220 * i / RATE))
+    # the MXF: track 1 mono, track 2 stereo (its right channel is the file's channel 3)
+    fx_frames = RATE * 2
+    right = lambda i, c: 0.3 * math.sin(2 * math.pi * 550 * i / RATE)
+    mxf(os.path.join(out, "fx.mxf"), fx_frames, [
+        (1, lambda i, c: 0.2 * math.sin(2 * math.pi * 110 * i / RATE)),
+        (2, lambda i, c: right(i, c) if c == 1 else -0.1),
+    ])
+    wav(os.path.join(out, "fx_ch3.wav"), 1, 24, fx_frames, right)
+    # AMA metadata for a 3-channel file of the same length (the link then points at the MXF)
+    fx_ref = os.path.join(out, "fx_ref.wav")
+    fx_meta = wav(fx_ref, 3, 24, fx_frames, lambda i, c: 0.0)
 
     with aaf2.open(os.path.join(out, "fixture.aaf"), "w") as f:
         amp, gain, pan, panop, dissolve = defs(f)
@@ -87,6 +130,9 @@ def build(out):
         # linked: AMA-style master → file → tape, its location since moved
         mmaster, msource, _ = create_media_link(f, music, meta)
         msource.descriptor["Locator"][0]["URLString"].value = "file:///Volumes/Gone/Audio%20Files/music.wav"
+
+        xmaster, xsource, _ = create_media_link(f, fx_ref, fx_meta)
+        xsource.descriptor["Locator"][0]["URLString"].value = "file://" + os.path.abspath(os.path.join(out, "fx.mxf"))
 
         comp = f.create.CompositionMob("Reel 1 v3")
         f.content.mobs.append(comp)
@@ -139,6 +185,13 @@ def build(out):
         po["Parameters"].append(f.create.ConstantValue(pan, AAFRational(3, 4)))
         a2.segment = po
 
+        # FX 3: channel 3 of the MXF, 50 frames from its start
+        a3 = comp.create_sound_slot(FPS)
+        a3.name = "FX 3"
+        clip = xmaster.create_source_clip(3, start=0, length=50 * RATE // FPS)
+        clip.length = 50
+        a3.segment.components.append(clip)
+
         ev = f.create.EventMobSlot()
         ev["SlotID"].value = 50
         ev["EditRate"].value = FPS
@@ -155,3 +208,4 @@ def build(out):
 
 if __name__ == "__main__":
     build(sys.argv[1])
+    os.remove(os.path.join(sys.argv[1], "fx_ref.wav"))

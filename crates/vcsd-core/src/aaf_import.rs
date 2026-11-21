@@ -1035,17 +1035,40 @@ fn aiff_to_wav(b: &[u8], out: &Path) -> std::result::Result<(), String> {
     write_pcm(out, sr, ch, (bps * 8) as u16, &pcm)
 }
 
+/// Audio parameters: (sample rate, channels, bits).
+type Pcm = (u32, u16, u16);
+
+/// One sound track of an MXF file: its essence, by kind.
+#[derive(Default)]
+struct MxfTrack {
+    /// BWF or SMPTE 382 AES3 sample bytes (interleaved little-endian).
+    pcm: Vec<u8>,
+    /// D-10 AES3 elements (SMPTE 331).
+    d10: Vec<Vec<u8>>,
+}
+
 /// MXF sound essence → WAV. Reads:
 /// - BWF elements (SMPTE 382, frame- or clip-wrapped): Avid OP-Atom and most files;
 /// - AES3 elements of SMPTE 382 (frame- or clip-wrapped): the samples are stored as
 ///   in BWF (the AES3 channel status is descriptor metadata);
 /// - D-10 / IMX AES3 elements (SMPTE 331/386): a 4-byte header, then 8 channel
 ///   slots per sample of 32-bit little-endian AES3 subframes, audio in bits 4–27.
-fn mxf_to_wav(b: &[u8], aaf_params: Option<(u32, u16, u16)>, out: &Path) -> std::result::Result<(), String> {
+///
+/// A file can carry several sound tracks (OP1a: one element per track in each
+/// content package, or one clip-wrapped element each). Elements are told apart
+/// by their track number (the key's last 4 bytes); each track takes its
+/// parameters from the descriptor linked to it (track number → track ID →
+/// `LinkedTrackID`). The WAV has every track's channels, in track order, so
+/// channel `k` of the AAF's file mob is the file's `k`-th channel.
+fn mxf_to_wav(b: &[u8], aaf_params: Option<Pcm>, out: &Path) -> std::result::Result<(), String> {
     const ESSENCE: [u8; 12] = [0x06, 0x0e, 0x2b, 0x34, 0x01, 0x02, 0x01, 0x01, 0x0d, 0x01, 0x03, 0x01];
-    const SOUND_DESC: [u8; 14] = [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x53, 0x01, 0x01, 0x0d, 0x01, 0x01, 0x01, 0x01, 0x01];
+    const SET: [u8; 14] = [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x53, 0x01, 0x01, 0x0d, 0x01, 0x01, 0x01, 0x01, 0x01];
     let same = |k: &[u8], p: &[u8]| k.len() >= p.len() && k.iter().zip(p).enumerate().all(|(i, (a, b))| i == 7 || a == b);
-    let (mut pcm, mut d10, mut params, mut other) = (vec![], vec![], None, false);
+    let mut tracks: BTreeMap<u32, MxfTrack> = BTreeMap::new();
+    // descriptors: (linked track id, parameters); timeline tracks: track number → track id
+    let mut descs: Vec<(Option<u32>, Option<Pcm>)> = vec![];
+    let mut track_ids: HashMap<u32, u32> = HashMap::new();
+    let mut other = false;
     let mut i = 0;
     while i + 17 <= b.len() {
         let k = &b[i..i + 16];
@@ -1061,59 +1084,115 @@ fn mxf_to_wav(b: &[u8], aaf_params: Option<(u32, u16, u16)>, out: &Path) -> std:
         };
         let v0 = i + 16 + hl;
         let v = &b[v0.min(b.len())..(v0 + len).min(b.len())];
-        if same(k, &ESSENCE) && k[12] == 0x16 {
-            match k[14] {
-                // BWF and AES3, frame- or clip-wrapped
-                0x01..=0x04 => pcm.extend_from_slice(v),
-                _ => other = true,
-            }
-        } else if same(k, &ESSENCE) && k[12] == 0x06 {
-            match k[14] {
-                0x10 => d10.push(v),
-                _ => other = true,
-            }
-        } else if same(k, &SOUND_DESC) && matches!(k[14], 0x42 | 0x47 | 0x48) {
-            // generic sound, AES3 or wave descriptor — a local set: tag (2), length (2), value, big-endian
-            let (mut sr, mut ch, mut bits) = (0u32, 0u16, 0u16);
+        let number = u32::from_be_bytes(k[12..16].try_into().unwrap());
+        if same(k, &ESSENCE) && k[12] == 0x16 && matches!(k[14], 0x01..=0x04) {
+            // BWF and AES3, frame- or clip-wrapped
+            tracks.entry(number).or_default().pcm.extend_from_slice(v);
+        } else if same(k, &ESSENCE) && k[12] == 0x06 && k[14] == 0x10 {
+            tracks.entry(number).or_default().d10.push(v.to_vec());
+        } else if same(k, &ESSENCE) && (k[12] == 0x16 || k[12] == 0x06) {
+            other = true;
+        } else if same(k, &SET) && matches!(k[14], 0x42 | 0x47 | 0x48 | 0x3b) {
+            // local set: tag (2), length (2), value — big-endian
+            let (mut sr, mut ch, mut bits, mut linked, mut id, mut num) = (0u32, 0u16, 0u16, None, None, None);
             let mut j = 0;
             while j + 4 <= v.len() {
                 let tag = u16::from_be_bytes([v[j], v[j + 1]]);
                 let l = u16::from_be_bytes([v[j + 2], v[j + 3]]) as usize;
                 let d = &v[(j + 4).min(v.len())..(j + 4 + l).min(v.len())];
+                let u = || u32::from_be_bytes(d.try_into().unwrap());
                 match (tag, d.len()) {
                     (0x3d03, 8) => {
                         let n = i32::from_be_bytes(d[0..4].try_into().unwrap());
                         let den = i32::from_be_bytes(d[4..8].try_into().unwrap()).max(1);
                         sr = (n as f64 / den as f64).round() as u32;
                     }
-                    (0x3d07, 4) => ch = u32::from_be_bytes(d.try_into().unwrap()) as u16,
-                    (0x3d01, 4) => bits = u32::from_be_bytes(d.try_into().unwrap()) as u16,
+                    (0x3d07, 4) => ch = u() as u16,
+                    (0x3d01, 4) => bits = u() as u16,
+                    (0x3006, 4) => linked = Some(u()),
+                    (0x4801, 4) => id = Some(u()),
+                    (0x4804, 4) => num = Some(u()),
                     _ => {}
                 }
                 j += 4 + l;
             }
-            if sr > 0 && ch > 0 && bits > 0 && params.is_none() {
-                params = Some((sr, ch, bits));
+            if k[14] == 0x3b {
+                if let (Some(id), Some(num)) = (id, num) {
+                    track_ids.insert(num, id);
+                }
+            } else {
+                descs.push((linked, (sr > 0 && ch > 0 && bits > 0).then_some((sr, ch, bits))));
             }
         }
         i = v0 + len;
     }
-    if !pcm.is_empty() {
-        let (sr, ch, bits) = params.or(aaf_params).ok_or("MXF without audio parameters")?;
-        return write_pcm(out, sr, ch, bits, &pcm);
+    if tracks.is_empty() {
+        return Err(if other { "MXF sound essence of an unsupported kind (not PCM or AES3)".into() } else { "no audio in the MXF".into() });
     }
-    if !d10.is_empty() {
-        let (sr, ch, bits) = params.or(aaf_params).unwrap_or((48000, 0, 24));
-        // the channels in use: as described, else those the first element flags valid
-        let ch = if ch > 0 { ch.min(8) } else { (d10[0].get(3).copied().unwrap_or(0xff).count_ones() as u16).max(1) };
-        let bits = if bits <= 16 { 16 } else { 24 };
-        return write_pcm(out, sr, ch, bits, &d10_samples(&d10, ch as usize, bits));
+    // parameters per track: its linked descriptor, else the only one there is, else the AAF's
+    let known: Vec<Pcm> = descs.iter().filter_map(|d| d.1).collect();
+    let single = tracks.len() == 1;
+    let params = |number: u32| -> Option<Pcm> {
+        let linked = track_ids.get(&number).and_then(|id| descs.iter().find(|d| d.0 == Some(*id))).and_then(|d| d.1);
+        linked
+            .or_else(|| (known.len() == 1 || known.windows(2).all(|w| w[0] == w[1])).then(|| known.first().copied()).flatten())
+            .or(if single { aaf_params } else { None })
+    };
+    // track order: by track id where known, else by element key
+    let mut order: Vec<u32> = tracks.keys().copied().collect();
+    order.sort_by_key(|n| (track_ids.get(n).copied().unwrap_or(u32::MAX), *n));
+    // every track as (channels, frames of left-justified 32-bit samples)
+    let mut decoded: Vec<(usize, Vec<i32>, u16, u32)> = vec![];
+    for n in order {
+        let t = &tracks[&n];
+        let (sr, ch, bits, data) = if !t.pcm.is_empty() {
+            let (sr, ch, bits) = params(n).ok_or("MXF without audio parameters")?;
+            if ch == 0 || !(8..=32).contains(&bits) {
+                return Err(format!("MXF audio of {ch} channels at {bits} bits"));
+            }
+            let bps = (bits as usize).div_ceil(8);
+            let s: Vec<i32> = t
+                .pcm
+                .chunks_exact(bps)
+                .map(|c| c.iter().rev().fold(0u32, |a, &x| a << 8 | x as u32) as i32)
+                .map(|v| v << (32 - 8 * bps))
+                .collect();
+            (sr, ch, bits, s)
+        } else {
+            let (sr, ch, bits) = params(n).unwrap_or((48000, 0, 24));
+            // the channels in use: as described, else those the first element flags valid
+            let ch = if ch > 0 { ch.min(8) } else { (t.d10[0].get(3).copied().unwrap_or(0xff).count_ones() as u16).max(1) };
+            (sr, ch, if bits <= 16 { 16 } else { 24 }, d10_samples(&t.d10, ch as usize))
+        };
+        decoded.push((ch as usize, data, bits, sr));
     }
-    Err(if other { "MXF sound essence of an unsupported kind (not PCM or AES3)".into() } else { "no audio in the MXF".into() })
+    let sr = decoded[0].3;
+    if decoded.iter().any(|d| d.3 != sr) {
+        return Err("MXF sound tracks at different sample rates".into());
+    }
+    // interleave all tracks' channels; a shorter track is padded with silence
+    let channels: usize = decoded.iter().map(|d| d.0).sum();
+    let frames = decoded.iter().map(|d| d.1.len() / d.0).max().unwrap_or(0);
+    let bits = decoded.iter().map(|d| d.2).max().unwrap_or(24);
+    let bps = (bits as usize).div_ceil(8).clamp(2, 4);
+    let mut pcm = Vec::with_capacity(frames * channels * bps);
+    for f in 0..frames {
+        for (ch, data, ..) in &decoded {
+            for c in 0..*ch {
+                let v = data.get(f * ch + c).copied().unwrap_or(0);
+                pcm.extend_from_slice(&v.to_le_bytes()[4 - bps..]);
+            }
+        }
+    }
+    if channels > u16::MAX as usize {
+        return Err("too many channels".into());
+    }
+    write_pcm(out, sr, channels as u16, (bps * 8) as u16, &pcm)
 }
 
-/// D-10 AES3 elements (SMPTE 331) → interleaved little-endian PCM of `ch` channels.
-fn d10_samples(elements: &[&[u8]], ch: usize, bits: u16) -> Vec<u8> {
+/// D-10 AES3 elements (SMPTE 331) → interleaved left-justified 32-bit samples of
+/// `ch` channels (24 bits of audio).
+fn d10_samples(elements: &[Vec<u8>], ch: usize) -> Vec<i32> {
     let mut out = vec![];
     for e in elements {
         let Some(data) = e.get(4..) else { continue };
@@ -1122,11 +1201,7 @@ fn d10_samples(elements: &[&[u8]], ch: usize, bits: u16) -> Vec<u8> {
         for frame in data.chunks_exact(32).take(n) {
             for w in frame.chunks_exact(4).take(ch) {
                 let w = u32::from_le_bytes(w.try_into().unwrap());
-                if bits == 16 {
-                    out.extend_from_slice(&(((w >> 12) & 0xffff) as u16).to_le_bytes());
-                } else {
-                    out.extend_from_slice(&((w >> 4) & 0xff_ffff).to_le_bytes()[0..3]);
-                }
+                out.push((((w >> 4) & 0xff_ffff) << 8) as i32);
             }
         }
     }
@@ -1683,6 +1758,101 @@ mod tests {
         assert_eq!(raw, [0x34, 0x12, 0xf0, 0xff]);
         mxf_to_wav(&klv(&key, &e), None, &out).unwrap();
         assert_eq!(wav::read_info(&out).unwrap().channels, 4, "four valid flags");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+    fn local_set(items: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let mut v = vec![];
+        for (tag, val) in items {
+            v.extend(tag.to_be_bytes());
+            v.extend((val.len() as u16).to_be_bytes());
+            v.extend(val);
+        }
+        v
+    }
+
+    fn klv(k: &[u8], v: &[u8]) -> Vec<u8> {
+        let mut o = k.to_vec();
+        o.extend([0x83, (v.len() >> 16) as u8, (v.len() >> 8) as u8, v.len() as u8]);
+        o.extend(v);
+        o
+    }
+
+    fn set_key(kind: u8) -> [u8; 16] {
+        [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x53, 0x01, 0x01, 0x0d, 0x01, 0x01, 0x01, 0x01, 0x01, kind, 0x00]
+    }
+
+    fn sound_key(number: u32) -> [u8; 16] {
+        let mut k = [0x06, 0x0e, 0x2b, 0x34, 0x01, 0x02, 0x01, 0x01, 0x0d, 0x01, 0x03, 0x01, 0, 0, 0, 0];
+        k[12..16].copy_from_slice(&number.to_be_bytes());
+        k
+    }
+
+    fn sound_desc(linked: Option<u32>, ch: u32, bits: u32) -> Vec<u8> {
+        let mut items = vec![
+            (0x3d03u16, [&48000i32.to_be_bytes()[..], &1i32.to_be_bytes()[..]].concat()),
+            (0x3d07, ch.to_be_bytes().to_vec()),
+            (0x3d01, bits.to_be_bytes().to_vec()),
+        ];
+        if let Some(l) = linked {
+            items.push((0x3006, l.to_be_bytes().to_vec()));
+        }
+        klv(&set_key(0x48), &local_set(&items))
+    }
+
+    #[test]
+    fn multitrack_mxf_becomes_one_multichannel_wav() {
+        let dir = std::env::temp_dir().join(format!("vcsd_mxfmt_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // OP1a, frame-wrapped: track 3 (mono 24-bit, element 2) and track 2 (stereo 16-bit,
+        // element 1); the descriptors come in the opposite order to the elements
+        let (mono, stereo) = (0x1602_0102u32, 0x1602_0101u32);
+        let track = |id: u32, num: u32| {
+            klv(&set_key(0x3b), &local_set(&[(0x4801, id.to_be_bytes().to_vec()), (0x4804, num.to_be_bytes().to_vec())]))
+        };
+        let mut f = track(2, stereo);
+        f.extend(track(3, mono));
+        f.extend(sound_desc(Some(3), 1, 24));
+        f.extend(sound_desc(Some(2), 2, 16));
+        let pic = [0x06, 0x0e, 0x2b, 0x34, 0x01, 0x02, 0x01, 0x01, 0x0d, 0x01, 0x03, 0x01, 0x15, 0x01, 0x05, 0x01];
+        // two content packages of 2 frames: mono samples m, stereo (l, r)
+        let m = |k: i32| k * 1000;
+        for p in 0..2 {
+            f.extend(klv(&pic, &[0; 16]));
+            let mut mb = vec![];
+            let mut sb = vec![];
+            for j in 0..2 {
+                let k = p * 2 + j;
+                mb.extend(&m(k).to_le_bytes()[0..3]);
+                sb.extend((k as i16 * 10).to_le_bytes());
+                sb.extend((-(k as i16) * 10).to_le_bytes());
+            }
+            f.extend(klv(&sound_key(mono), &mb));
+            f.extend(klv(&sound_key(stereo), &sb));
+        }
+        let out = dir.join("op1a.wav");
+        mxf_to_wav(&f, None, &out).unwrap();
+        let (info, raw) = wav::read_raw(&out).unwrap();
+        assert_eq!((info.channels, info.frames, info.format.bits()), (3, 4, 24), "2 + 1 channels at the widest depth");
+        let got: Vec<i32> = raw.chunks_exact(3).map(|c| ((c[2] as i32) << 24 | (c[1] as i32) << 16 | (c[0] as i32) << 8) >> 8).collect();
+        // track 2 (stereo) first, by track id; 16-bit samples shifted up to 24
+        let want: Vec<i32> = (0..4).flat_map(|k| [(k * 10) << 8, (-k * 10) << 8, m(k)]).collect();
+        assert_eq!(got, want);
+
+        // clip-wrapped, one unlinked descriptor for both mono tracks, no track sets: element order
+        let mut g = sound_desc(None, 1, 16);
+        g.extend(klv(&sound_key(0x1602_0202), &[3, 0, 4, 0]));
+        g.extend(klv(&sound_key(0x1602_0201), &[1, 0, 2, 0, 9, 9]));
+        mxf_to_wav(&g, None, &out).unwrap();
+        let (info, raw) = wav::read_raw(&out).unwrap();
+        assert_eq!((info.channels, info.frames), (2, 3), "the shorter track padded");
+        assert_eq!(raw, [1, 0, 3, 0, 2, 0, 4, 0, 9, 9, 0, 0]);
+
+        // tracks with different parameters and nothing linking them can't be guessed
+        let mut h = sound_desc(None, 1, 16);
+        h.extend(sound_desc(None, 2, 24));
+        h.extend(klv(&sound_key(0x1602_0201), &[0; 4]));
+        h.extend(klv(&sound_key(0x1602_0202), &[0; 6]));
+        assert!(mxf_to_wav(&h, None, &out).unwrap_err().contains("parameters"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

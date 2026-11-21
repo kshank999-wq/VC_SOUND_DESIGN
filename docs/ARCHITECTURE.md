@@ -151,6 +151,15 @@ MXF sound essence comes in three forms:
   slots per sample of 32-bit AES3 subframes. The audio sits in bits 4–27 and is kept at 24 bits,
   or at its top 16 bits for 16-bit audio. The channel and V/U/C/P bits are dropped.
 
+A file can carry several sound tracks: OP1a has one element per track in each content package,
+or one clip-wrapped element each. Elements are told apart by their track number (the last four
+bytes of the key). Each track is decoded with its own descriptor, found by following track
+number → timeline track ID → the descriptor's `LinkedTrackID`. When nothing links them, a single
+descriptor (or identical ones) serves every track. The tracks become one WAV, their channels in
+track order, so the AAF file mob's channel `k` (its PhysicalTrackNumber) is the file's channel
+`k`, and it is extracted like any multichannel file's. Tracks of different bit depths are
+written at the widest one, exactly. A shorter track is padded with silence. Tracks at different
+sample rates, or with different parameters and nothing linking them, are reported as unreadable.
 Picture and other elements in the same file are skipped. Sample rate, channel count and bit
 depth come from the MXF's sound descriptor (generic, AES3 or wave), else from the AAF's. For
 D-10 without either, the channel count comes from the element's valid flags.
@@ -166,6 +175,7 @@ following:
 - 25 fps edit units, the transition as a crossfade, and a bit-exact channel extract of
   embedded PCM;
 - moved linked media found by name or in a search folder;
+- channel 3 of a linked two-track OP1a MXF (mono, then stereo), bit-exact;
 - clip gain, the varying track gain against the AAF curve, pan, and the marker.
 
 It has not yet been tested with files from Media Composer, Pro Tools or Resolve.
@@ -251,6 +261,6 @@ It has not yet been tested with files from Media Composer, Pro Tools or Resolve.
 2. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
 3. **Distribution:** cloud-HSM Windows signing (`signCommand`), a beta update channel, and delta updates.
 4. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).
-5. **Interchange:** open the AAF export in a pinned Resolve/Fairlight version (and Pro Tools), import AAFs exported by Media Composer, Premiere, Resolve and Pro Tools (with real AES3/D-10 and multichannel MXF), record the feature matrix (volume and pan automation especially: hosts differ in whether they
+5. **Interchange:** open the AAF export in a pinned Resolve/Fairlight version (and Pro Tools), import AAFs exported by Media Composer, Premiere, Resolve and Pro Tools (with real AES3/D-10 and multitrack OP1a MXF), record the feature matrix (volume and pan automation especially: hosts differ in whether they
 read track-level gain/pan operations, and in their pan laws), then OTIO.
 6. **AI:** optical-flow or pose models for footfall detection behind the existing trait, plus an opt-in cloud provider with consent and retention controls.
