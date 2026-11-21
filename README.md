@@ -35,7 +35,7 @@ How the code maps onto them is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
   [AAF export](docs/ARCHITECTURE.md#aaf-export-tier-2). An editor's AAF can be imported
   (File menu, or `vcsd import-aaf`) as new tracks. It brings in clips, fades and crossfades,
   clip gain, volume and pan automation, stereo pairs and markers. Media can be linked,
-  embedded, or AIFF/MXF PCM; see [AAF import](docs/ARCHITECTURE.md#aaf-import). See the
+  embedded, AIFF, or MXF (PCM, AES3 or D-10); see [AAF import](docs/ARCHITECTURE.md#aaf-import). See the
 [roadmap](docs/ARCHITECTURE.md#roadmap).
 
 ## Desktop app

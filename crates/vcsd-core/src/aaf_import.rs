@@ -9,7 +9,7 @@
 //!   hard-panned left/right (or named "… L"/"… R"), becomes one stereo track;
 //! - every `SourceClip` becomes a clip, followed through master and file mobs
 //!   to its media. Linked WAV/BWF is used where it is (searched for by name
-//!   when it moved). Embedded essence is extracted. AIFF and Avid OP-Atom MXF
+//!   when it moved). Embedded essence is extracted. AIFF and MXF
 //!   (PCM) are converted, as is media at another sample rate (linear). A
 //!   channel of a multichannel file becomes a mono extract. Everything written
 //!   goes into the import's media folder;
@@ -907,7 +907,7 @@ impl Media<'_> {
                 }
                 Ok((out, true))
             }
-            e => Err(format!("{}: .{e} media can't be read (WAV, AIFF and PCM MXF can)", path.display())),
+            e => Err(format!("{}: .{e} media can't be read (WAV, AIFF and PCM/AES3 MXF can)", path.display())),
         }
     }
 
@@ -1035,12 +1035,17 @@ fn aiff_to_wav(b: &[u8], out: &Path) -> std::result::Result<(), String> {
     write_pcm(out, sr, ch, (bps * 8) as u16, &pcm)
 }
 
-/// Avid OP-Atom MXF with BWF (PCM) sound essence → WAV.
+/// MXF sound essence → WAV. Reads:
+/// - BWF elements (SMPTE 382, frame- or clip-wrapped): Avid OP-Atom and most files;
+/// - AES3 elements of SMPTE 382 (frame- or clip-wrapped): the samples are stored as
+///   in BWF (the AES3 channel status is descriptor metadata);
+/// - D-10 / IMX AES3 elements (SMPTE 331/386): a 4-byte header, then 8 channel
+///   slots per sample of 32-bit little-endian AES3 subframes, audio in bits 4–27.
 fn mxf_to_wav(b: &[u8], aaf_params: Option<(u32, u16, u16)>, out: &Path) -> std::result::Result<(), String> {
     const ESSENCE: [u8; 12] = [0x06, 0x0e, 0x2b, 0x34, 0x01, 0x02, 0x01, 0x01, 0x0d, 0x01, 0x03, 0x01];
-    const WAVE_DESC: [u8; 14] = [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x53, 0x01, 0x01, 0x0d, 0x01, 0x01, 0x01, 0x01, 0x01];
+    const SOUND_DESC: [u8; 14] = [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x53, 0x01, 0x01, 0x0d, 0x01, 0x01, 0x01, 0x01, 0x01];
     let same = |k: &[u8], p: &[u8]| k.len() >= p.len() && k.iter().zip(p).enumerate().all(|(i, (a, b))| i == 7 || a == b);
-    let (mut pcm, mut params, mut aes3) = (vec![], None, false);
+    let (mut pcm, mut d10, mut params, mut other) = (vec![], vec![], None, false);
     let mut i = 0;
     while i + 17 <= b.len() {
         let k = &b[i..i + 16];
@@ -1058,11 +1063,17 @@ fn mxf_to_wav(b: &[u8], aaf_params: Option<(u32, u16, u16)>, out: &Path) -> std:
         let v = &b[v0.min(b.len())..(v0 + len).min(b.len())];
         if same(k, &ESSENCE) && k[12] == 0x16 {
             match k[14] {
-                0x01 | 0x02 => pcm.extend_from_slice(v),
-                _ => aes3 = true,
+                // BWF and AES3, frame- or clip-wrapped
+                0x01..=0x04 => pcm.extend_from_slice(v),
+                _ => other = true,
             }
-        } else if same(k, &WAVE_DESC) && (k[14] == 0x48 || k[14] == 0x47) {
-            // local set: tag (2), length (2), value — big-endian
+        } else if same(k, &ESSENCE) && k[12] == 0x06 {
+            match k[14] {
+                0x10 => d10.push(v),
+                _ => other = true,
+            }
+        } else if same(k, &SOUND_DESC) && matches!(k[14], 0x42 | 0x47 | 0x48) {
+            // generic sound, AES3 or wave descriptor — a local set: tag (2), length (2), value, big-endian
             let (mut sr, mut ch, mut bits) = (0u32, 0u16, 0u16);
             let mut j = 0;
             while j + 4 <= v.len() {
@@ -1081,17 +1092,45 @@ fn mxf_to_wav(b: &[u8], aaf_params: Option<(u32, u16, u16)>, out: &Path) -> std:
                 }
                 j += 4 + l;
             }
-            if sr > 0 && ch > 0 && bits > 0 {
+            if sr > 0 && ch > 0 && bits > 0 && params.is_none() {
                 params = Some((sr, ch, bits));
             }
         }
         i = v0 + len;
     }
-    if pcm.is_empty() {
-        return Err(if aes3 { "AES3 MXF audio is not supported".into() } else { "no PCM audio in the MXF".into() });
+    if !pcm.is_empty() {
+        let (sr, ch, bits) = params.or(aaf_params).ok_or("MXF without audio parameters")?;
+        return write_pcm(out, sr, ch, bits, &pcm);
     }
-    let (sr, ch, bits) = params.or(aaf_params).ok_or("MXF without audio parameters")?;
-    write_pcm(out, sr, ch, bits, &pcm)
+    if !d10.is_empty() {
+        let (sr, ch, bits) = params.or(aaf_params).unwrap_or((48000, 0, 24));
+        // the channels in use: as described, else those the first element flags valid
+        let ch = if ch > 0 { ch.min(8) } else { (d10[0].get(3).copied().unwrap_or(0xff).count_ones() as u16).max(1) };
+        let bits = if bits <= 16 { 16 } else { 24 };
+        return write_pcm(out, sr, ch, bits, &d10_samples(&d10, ch as usize, bits));
+    }
+    Err(if other { "MXF sound essence of an unsupported kind (not PCM or AES3)".into() } else { "no audio in the MXF".into() })
+}
+
+/// D-10 AES3 elements (SMPTE 331) → interleaved little-endian PCM of `ch` channels.
+fn d10_samples(elements: &[&[u8]], ch: usize, bits: u16) -> Vec<u8> {
+    let mut out = vec![];
+    for e in elements {
+        let Some(data) = e.get(4..) else { continue };
+        // the header's sample count; the data holds at most what fits
+        let n = (u16::from_le_bytes([e[1], e[2]]) as usize).min(data.len() / 32);
+        for frame in data.chunks_exact(32).take(n) {
+            for w in frame.chunks_exact(4).take(ch) {
+                let w = u32::from_le_bytes(w.try_into().unwrap());
+                if bits == 16 {
+                    out.extend_from_slice(&(((w >> 12) & 0xffff) as u16).to_le_bytes());
+                } else {
+                    out.extend_from_slice(&((w >> 4) & 0xff_ffff).to_le_bytes()[0..3]);
+                }
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------- import
@@ -1570,6 +1609,80 @@ mod tests {
         let (info, raw) = wav::read_raw(&out).unwrap();
         assert_eq!((info.sample_rate, info.channels, info.frames), (48000, 1, 10));
         assert_eq!(raw, pcm);
+
+        // SMPTE 382 AES3, clip-wrapped (element type 04): samples stored as in BWF
+        let mut g = klv(&[0x06, 0x0e, 0x2b, 0x34, 0x02, 0x53, 0x01, 0x01, 0x0d, 0x01, 0x01, 0x01, 0x01, 0x01, 0x47, 0x00], &desc);
+        g.extend(klv(&[0x06, 0x0e, 0x2b, 0x34, 0x01, 0x02, 0x01, 0x01, 0x0d, 0x01, 0x03, 0x01, 0x16, 0x01, 0x04, 0x01], &pcm));
+        mxf_to_wav(&g, None, &out).unwrap();
+        assert_eq!(wav::read_raw(&out).unwrap().1, pcm);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One D-10 AES3 element: header, then per sample 8 subframes (audio in bits 4–27).
+    fn d10_element(samples: &[[i32; 8]]) -> Vec<u8> {
+        let mut e = vec![0x80];
+        e.extend((samples.len() as u16).to_le_bytes());
+        e.push(0x0f); // channels 1–4 valid
+        for s in samples {
+            for (c, v) in s.iter().enumerate() {
+                // V/U/C/P bits and the channel number around the sample, as a recorder writes them
+                let w = (((*v as u32) & 0xff_ffff) << 4) | (c as u32 & 0x7) | 0xf000_0000;
+                e.extend(w.to_le_bytes());
+            }
+        }
+        e
+    }
+
+    #[test]
+    fn mxf_d10_aes3_essence_becomes_wav() {
+        let dir = std::env::temp_dir().join(format!("vcsd_d10_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let klv = |k: &[u8], v: &[u8]| {
+            let mut o = k.to_vec();
+            o.extend([0x83, (v.len() >> 16) as u8, (v.len() >> 8) as u8, v.len() as u8]);
+            o.extend(v);
+            o
+        };
+        let key = [0x06, 0x0e, 0x2b, 0x34, 0x01, 0x02, 0x01, 0x01, 0x0d, 0x01, 0x03, 0x01, 0x06, 0x01, 0x10, 0x00];
+        let pic = [0x06, 0x0e, 0x2b, 0x34, 0x01, 0x02, 0x01, 0x01, 0x0d, 0x01, 0x03, 0x01, 0x05, 0x01, 0x01, 0x00];
+        let s = |k: i32| [k, -k, 0x7f_ffff - k, -0x80_0000 + k, 9, 9, 9, 9];
+        // two frames (content packages), each a picture element and a sound element
+        let mut f = vec![];
+        for frame in [vec![s(1), s(2)], vec![s(3)]] {
+            f.extend(klv(&pic, &[0; 64]));
+            f.extend(klv(&key, &d10_element(&frame)));
+        }
+        // a generic sound descriptor: 48 kHz, 4 channels, 24-bit
+        let mut desc = vec![];
+        for (tag, val) in [
+            (0x3d03u16, [&48000i32.to_be_bytes()[..], &1i32.to_be_bytes()[..]].concat()),
+            (0x3d07, 4u32.to_be_bytes().to_vec()),
+            (0x3d01, 24u32.to_be_bytes().to_vec()),
+        ] {
+            desc.extend(tag.to_be_bytes());
+            desc.extend((val.len() as u16).to_be_bytes());
+            desc.extend(val);
+        }
+        let mut file = klv(&[0x06, 0x0e, 0x2b, 0x34, 0x02, 0x53, 0x01, 0x01, 0x0d, 0x01, 0x01, 0x01, 0x01, 0x01, 0x42, 0x00], &desc);
+        file.extend(f);
+        let out = dir.join("d10.wav");
+        mxf_to_wav(&file, None, &out).unwrap();
+        let (info, buf) = wav::read(&out).unwrap();
+        assert_eq!((info.sample_rate, info.channels, info.frames), (48000, 4, 3));
+        let (_, raw) = wav::read_raw(&out).unwrap();
+        let got: Vec<i32> = raw.chunks_exact(3).map(|c| ((c[2] as i32) << 24 | (c[1] as i32) << 16 | (c[0] as i32) << 8) >> 8).collect();
+        let want: Vec<i32> = [s(1), s(2), s(3)].iter().flat_map(|x| x[0..4].to_vec()).collect();
+        assert_eq!(got, want, "24-bit samples exact, channel bits and V/U/C/P dropped");
+        assert!(buf.peak() > 0.99);
+
+        // 16-bit: the top 16 bits of each 24-bit slot; no descriptor → channels from the valid flags
+        let e = d10_element(&[[0x1234 << 8, -(0x10 << 8), 0, 0, 0, 0, 0, 0]]);
+        mxf_to_wav(&klv(&key, &e), Some((48000, 2, 16)), &out).unwrap();
+        let (info, raw) = wav::read_raw(&out).unwrap();
+        assert_eq!((info.channels, info.format.bits()), (2, 16));
+        assert_eq!(raw, [0x34, 0x12, 0xf0, 0xff]);
+        mxf_to_wav(&klv(&key, &e), None, &out).unwrap();
+        assert_eq!(wav::read_info(&out).unwrap().channels, 4, "four valid flags");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
