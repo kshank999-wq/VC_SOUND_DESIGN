@@ -6,3 +6,4 @@ ui/dist/
 crates/vcsd-app/gen/
 crates/vcsd-app/tauri.release.json
 *.key
+__pycache__/
