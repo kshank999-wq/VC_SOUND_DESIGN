@@ -319,3 +319,41 @@ fn levels_come_back_from_an_aaf_converted_by_the_opentimelineio_aaf_adapter() {
     // two 0.1 dB fits (AAF out, OTIO in) between the lanes
     same_levels(&s.state, &s2.state, t0, 0.25);
 }
+
+#[test]
+fn bus_levels_folded_into_an_otio_come_back_as_the_tracks_levels() {
+    let (mut s, root, t0) = levels_project("otiobusrt");
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let tid = st.clips.values().find(|c| c.timeline_start == t0).unwrap().track_id.clone();
+    let bus = st.tracks[&tid].bus_id.clone();
+    let master = st.buses.values().find(|b| b.parent_id.is_none()).unwrap().id.clone();
+    st.buses.get_mut(&bus).unwrap().gain_db = -2.0;
+    editing::set_automation(st, &bus, AutomationParam::VolumeDb, t0, 0.0).unwrap();
+    editing::set_automation(st, &bus, AutomationParam::VolumeDb, t0 + sr / 2, -8.0).unwrap();
+    editing::set_automation(st, &master, AutomationParam::Pan, t0, 0.3).unwrap();
+    editing::set_automation(st, &master, AutomationParam::Pan, t0 + sr, -0.3).unwrap();
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-21");
+    o.otio = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let file = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+
+    // a fresh project: its buses are flat, so the track carries what the buses did
+    let (mut s2, root2) = session("otiobusrt2", "24", "01:00:00:00");
+    s2.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root2, &file))).unwrap();
+    let st2 = &s2.state;
+    let c2 = st2.clips.values().find(|c| c.timeline_start == t0).unwrap();
+    assert!((c2.gain_db + 6.0).abs() < 1e-3, "clip gain as it was");
+    assert!(
+        st2.automation.values().any(|p| p.owner_id == c2.track_id && p.param == AutomationParam::Pan),
+        "the master's balance, as the track's pan"
+    );
+    let c1 = s.state.clips.values().find(|c| c.timeline_start == t0).unwrap();
+    let n = c1.length as usize;
+    let a = mixer::Mixer::new(&s.state, mixer::RenderOptions::default()).render_master(t0, n).unwrap();
+    let b = mixer::Mixer::new(st2, mixer::RenderOptions::default()).render_master(t0, n).unwrap();
+    assert!(a.peak() > 0.01);
+    let max = a.data.iter().zip(&b.data).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    assert!(max < 0.02 * a.peak(), "mix differs by {max} (peak {})", a.peak());
+}

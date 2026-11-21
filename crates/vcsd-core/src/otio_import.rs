@@ -566,7 +566,10 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             continue;
         }
         let tv = &lane.vcsd;
-        if !tv.is_object() {
+        // our raw track values, unless the buses were folded into the effects (then
+        // the effects are what the track sounded like; this project's buses are its own)
+        let raw = tv.is_object() && tv["bus_folded"].as_bool() != Some(true);
+        if !raw {
             for e in &lane.effects {
                 match level_effect(e, lane.start, lane.len) {
                     Some((gain, curve)) => levels.push((gain, lane.start, lane.start + lane.len, curve)),
@@ -593,8 +596,8 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 channels,
                 order,
                 folder: folder.clone(),
-                gain_db: tv["gain_db"].as_f64().unwrap_or(0.0) as f32,
-                pan: tv["pan"].as_f64().unwrap_or(0.0).clamp(-1.0, 1.0) as f32,
+                gain_db: if raw { tv["gain_db"].as_f64().unwrap_or(0.0) as f32 } else { 0.0 },
+                pan: if raw { tv["pan"].as_f64().unwrap_or(0.0).clamp(-1.0, 1.0) as f32 } else { 0.0 },
                 mute: lane.muted,
                 solo: false,
                 armed: false,
@@ -607,6 +610,9 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
         // automation from our own metadata: [offset in samples from the timeline start, value]
         let mut automated = false;
         for (key, param) in [("volume_db", AutomationParam::VolumeDb), ("pan_automation", AutomationParam::Pan)] {
+            if !raw {
+                continue;
+            }
             let pts: Vec<(i64, f64)> =
                 tv[key].as_array().into_iter().flatten().filter_map(|p| Some((from_meta(&p[0])?, p[1].as_f64()?))).collect();
             for (t, v) in simplify(&pts, 1e-6) {

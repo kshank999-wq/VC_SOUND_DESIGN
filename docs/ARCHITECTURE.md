@@ -88,7 +88,7 @@ content.
 | Stereo tracks | Two mono tracks hard-panned L/R; stereo media is linked per channel |
 | Pan on mono tracks, static or automated | Mono Audio Pan (Pan = (pan + 1) / 2) around the track; the breakpoints map exactly because both sides interpolate pan linearly. The receiving app's pan law applies (the app uses −3 dB constant power) |
 | Balance on stereo tracks, static or automated | Folded into each side's gain curve (with any volume automation), fitted within 0.1 dB, including the corner where the balance crosses centre |
-| Bus and master levels: static gain, volume automation, balance automation | AAF has no buses, so each bus's levels down to the master are multiplied into the gain of every track it carries. On mono tracks a bus balance moves the panned signal's left/right; with a −3 dB constant-power pan law that is exactly a new pan plus a gain, which is written (pan fitted within 0.002). Tracks on muted buses are left out |
+| Bus and master levels: static gain, volume automation, balance automation | AAF has no buses, so each bus's levels down to the master are multiplied into the gain of every track it carries. On mono tracks a bus balance moves the panned signal's left/right; with a −3 dB constant-power pan law that is exactly a new pan plus a gain, which is written (pan fitted within 0.002, and each side within 0.1 dB wherever it is above −30 dB). Tracks on muted buses are left out |
 | Clip gain (+ static track fader, folded in) | Mono Audio Gain `OperationGroup`, constant Amplitude |
 | Linear fades in/out | `SourceClip` FadeIn/FadeOut length and type |
 | Track volume automation | Mono Audio Gain around the track with a `VaryingValue` Amplitude: linear control points at exact rational times, split until amplitude-linear interpolation matches the app's dB ramps within 0.1 dB |
@@ -132,8 +132,8 @@ butt-spliced repeats, muted tracks and clips left out). It also shares its media
 | Fade next to silence | An `SMPTE_Dissolve` transition against the gap or track edge (in/out offset = the fade) |
 | Fade between butted clips | Clip metadata only (a transition there would be a crossfade over handles) |
 | Clip gain | A "Mono Audio Gain" `Effect` on the clip, with a constant `Amplitude` (linear, as the AAF Rational string `"n/d"`) |
-| Track fader × volume automation | A "Mono Audio Gain" `Effect` on the track: a constant, or keyframes `[fraction of the track's length, linear gain]`, linear in amplitude and fitted within 0.1 dB of the lane (which ramps in dB) |
-| Track pan, pan automation | A "Mono Audio Pan" `Effect` on the track (`Pan`: 0 left, 0.5 centre, 1 right), constant or keyframed. The lane is linear in its value, as AAF keyframes are, so its breakpoints are the keyframes, exactly. On a stereo track the value is the mixer's balance (`metadata.vcsd.law`) |
+| Track fader × volume automation × every bus level down to the master (static gain and volume automation) | A "Mono Audio Gain" `Effect` on the track: a constant, or keyframes `[fraction of the track's length, linear gain]`, linear in amplitude and fitted within 0.1 dB of the mixer (whose lanes ramp in dB) |
+| Track pan, pan automation, and the buses' balance automation | A "Mono Audio Pan" `Effect` on the track (`Pan`: 0 left, 0.5 centre, 1 right), constant or keyframed. Without bus balance, the lane's breakpoints are the keyframes, exactly (it is linear in its value, as AAF keyframes are). A bus balance on a mono track is a new pan plus a gain, exact with a −3 dB constant-power pan law, as in the AAF; it is fitted so each side stays within 0.1 dB above −30 dB. On a stereo track the value is the mixer's balance (`metadata.vcsd.law`): the louder side's level is the gain, the other side's ratio the balance, exactly under the balance law |
 | Clip fades, bus, and the raw fader, pan and lanes (offsets from the range start) | `metadata.vcsd` on the clip or track |
 | Cues | Timeline markers, coloured by category, with the description as comment |
 
@@ -141,8 +141,11 @@ OTIO has no audio mix model, so levels follow the one convention OTIO tools shar
 OpenTimelineIO AAF adapter carries AAF's Mono Audio Gain as an `Effect` whose
 `metadata.AAF.Parameters.Amplitude` is a constant or keyframes (with `simplify=True` it sits on the
 track or clip); Mono Audio Pan is the same, with `Pan`. The export writes levels and pan in that
-encoding. Bus routing and inserts are not carried. Pan sounds as the receiving app's pan law
-makes it. The export lists these in `OTIO/otio_report.json`, the README and QA.
+encoding. OTIO has no buses either, so, as in the AAF, each track's effects include what its buses
+do to it. `metadata.vcsd.bus_folded` says when they do, and the import then takes the track's
+levels from the effects rather than its raw fader and lanes. Bus routing and inserts are not
+carried. Pan sounds as the receiving app's pan law makes it. The export lists these in
+`OTIO/otio_report.json`, the README and QA.
 
 **Verification:** `crates/vcsd-core/tests/otio.rs` reads each file with the OpenTimelineIO
 library (`scripts/otio/otio_summary.py`) and checks the following:
@@ -154,6 +157,10 @@ library (`scripts/otio/otio_summary.py`) and checks the following:
   lane) within 0.12 dB at 401 points;
 - the pan keyframes against the pan lane, exact at 401 points, and a stereo track's balance as a
   constant pan;
+- with bus gain, bus volume automation and master balance automation crossing the centre, the
+  left and right levels a host plays from the effects (constant-power pan on the mono track,
+  balance on the stereo one) against the mixer's, within 0.15 dB at 401 points. A side more than
+  30 dB under the other is checked within 0.1 % of the louder side instead;
 - the markers;
 - sharing the media and prints with the AAF.
 
@@ -201,6 +208,9 @@ Levels and pan are checked two ways, each at 201 points of the automated clip (l
 - our export with its `metadata.vcsd` stripped, read from the gain effects alone;
 - our AAF converted to OTIO by the OpenTimelineIO AAF adapter, then imported. The fader folded
   into clip gain comes back as −9 dB.
+
+With bus levels and master balance folded in, importing into a project with flat buses gives the
+same master mix within 2 % of peak.
 
 ## AAF import
 

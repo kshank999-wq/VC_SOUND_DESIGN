@@ -576,7 +576,7 @@ fn effect(op: &str, param_def: &str, len: i64, input: Obj, param: Obj) -> Obj {
 
 /// A parameter's value over a track: one constant, or control points `(timeline sample, value)`.
 #[derive(Debug, Clone, PartialEq)]
-enum Curve {
+pub(crate) enum Curve {
     Const(f64),
     Points(Vec<(i64, f64)>),
 }
@@ -778,6 +778,20 @@ impl BusChain {
     }
 }
 
+/// Pan curve fit test (Mono Audio Pan, constant-power): within 0.002 of the
+/// parameter, and each side's level (cos/sin) within 0.1 dB wherever that side
+/// is above −30 dB — near a hard pan a small parameter error is a big change
+/// on the quiet side.
+fn pan_fit_bad(lin: f64, v: f64) -> bool {
+    if (lin - v).abs() > 0.002 {
+        return true;
+    }
+    let q = |p: f64| p.clamp(0.0, 1.0) * std::f64::consts::FRAC_PI_2;
+    [(q(lin).cos(), q(v).cos()), (q(lin).sin(), q(v).sin())]
+        .iter()
+        .any(|&(a, b)| b > 0.0316 && (20.0 * (a.max(1e-9) / b).log10()).abs() > 0.1)
+}
+
 /// Gain and pan for each channel of a project track over `[start, end)`,
 /// including what its buses do to it (AAF tracks are flat: no buses).
 ///
@@ -786,7 +800,7 @@ impl BusChain {
 /// panned signal's left/right levels; with a −3 dB constant-power pan law that
 /// is exactly a new pan plus a gain, which is what gets written.
 /// Stereo tracks: L/R hard panned; volume, balance and bus levels/balance
-/// become each side's gain. Curves are fitted within 0.1 dB (pan within 0.002).
+/// become each side's gain. Curves are fitted within 0.1 dB (pan within 0.002, and each side within 0.1 dB above −30 dB).
 /// `fader`: also apply the track's static fader (printed tracks, whose clips
 /// can't carry it as clip gain).
 fn track_mix(s: &ProjectState, t: &Track, start: i64, end: i64, fader: bool) -> Vec<Mix> {
@@ -841,7 +855,7 @@ fn track_mix(s: &ProjectState, t: &Track, start: i64, end: i64, fader: bool) -> 
                 r.atan2(l) / std::f64::consts::FRAC_PI_2
             }
         };
-        let pan_curve = Curve::from_points(fit(&keys, start, end, &pan_param, &|lin, v| (lin - v).abs() > 0.002));
+        let pan_curve = Curve::from_points(fit(&keys, start, end, &pan_param, &pan_fit_bad));
         return vec![Mix { gain, pan: Some(pan_curve).filter(|c| *c != Curve::Const(0.5)) }];
     }
     let side = |left: bool| {
@@ -860,6 +874,63 @@ fn track_mix(s: &ProjectState, t: &Track, start: i64, end: i64, fader: bool) -> 
         Mix { gain, pan: Some(Curve::Const(if left { 0.0 } else { 1.0 })) }
     };
     vec![side(true), side(false)]
+}
+
+/// One track's level and pan over `[start, end)` as a single gain and pan (for
+/// interchange that has no buses and one track per project track, like OTIO):
+/// fader × volume lane × every bus level down to the master, and pan with the
+/// buses' balance folded in. Gain is linear amplitude (None at unity); pan is
+/// 0 left … 0.5 centre … 1 right (None when centred).
+///
+/// Mono tracks as in [`track_mix`] (exact with a −3 dB constant-power pan law).
+/// Stereo tracks: the mixer's balance (track, then each bus) gives left/right
+/// levels; the louder side is the gain and the other side's ratio the balance —
+/// exact under the balance law. Curves fitted within 0.1 dB (balance within 0.001).
+/// Also returns whether the buses changed anything (levels were folded in).
+pub(crate) fn track_level(s: &ProjectState, t: &Track, start: i64, end: i64) -> (Option<Curve>, Option<Curve>, bool) {
+    let bus = BusChain::of(s, &t.bus_id);
+    let folded = !bus.is_flat();
+    if t.channels < 2 {
+        let m = track_mix(s, t, start, end, true).remove(0);
+        return (m.gain, m.pan, folded);
+    }
+    let (vol, pan) = (owner_lane(s, &t.id, AutomationParam::VolumeDb), owner_lane(s, &t.id, AutomationParam::Pan));
+    let fader = 10f64.powf(t.gain_db as f64 / 20.0);
+    let sides = |x: i64| {
+        let p = if pan.is_empty() { t.pan as f64 } else { lane_db(&pan, x) };
+        let (tl, tr) = balance(p);
+        let (bl, br) = bus.bal(x);
+        let g = fader * bus.amp(x) * if vol.is_empty() { 1.0 } else { db_amp(lane_db(&vol, x)) };
+        (g * tl * bl, g * tr * br)
+    };
+    let mut keys: Vec<i64> = vol.iter().chain(&pan).map(|p| p.0).collect();
+    keys.extend(bus.keys());
+    keys.extend(centre_crossings(&pan));
+    let gain = Curve::from_points(gain_points(&keys, start, end, &|x| {
+        let (l, r) = sides(x);
+        l.max(r)
+    }));
+    let pan_param = |x: i64| {
+        let (l, r) = sides(x);
+        let b = if l <= 1e-12 && r <= 1e-12 {
+            0.0
+        } else if l >= r {
+            r / l - 1.0
+        } else {
+            1.0 - l / r
+        };
+        (b + 1.0) / 2.0
+    };
+    let bal = Curve::from_points(fit(&keys, start, end, &pan_param, &|a, b| (a - b).abs() > 0.001));
+    let gain = match gain {
+        Curve::Const(v) if (v - 1.0).abs() < 1e-9 => None,
+        c => Some(c),
+    };
+    let bal = match bal {
+        Curve::Const(v) if (v - 0.5).abs() < 1e-9 => None,
+        c => Some(c),
+    };
+    (gain, bal, folded)
 }
 
 /// What to export and how to name it.

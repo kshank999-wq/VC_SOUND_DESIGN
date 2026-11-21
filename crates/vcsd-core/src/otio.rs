@@ -20,7 +20,7 @@
 //! clip (clip gain), constant or keyframed. The raw values also go into
 //! `metadata.vcsd`. Losses are listed in the [`OtioReport`].
 
-use crate::aaf::{bus_muted, clip_pieces, db_amp, gain_points, lane_db, trim, url_for, AafMedia, Losses, Piece};
+use crate::aaf::{bus_muted, clip_pieces, track_level, trim, url_for, AafMedia, Curve, Losses, Piece};
 use crate::error::Result;
 use crate::model::*;
 use crate::state::ProjectState;
@@ -124,73 +124,58 @@ fn gain_effect(amplitude: Value, vcsd: Value) -> Value {
     })
 }
 
-/// The track's pan as AAF's Mono Audio Pan, in the same encoding as the gain
-/// (`Pan`: 0 left, 0.5 centre, 1 right). The pan lane is linear in its value, as
-/// AAF keyframes are, so its breakpoints are the keyframes, exactly. On a stereo
-/// track the value is the mixer's balance (`metadata.vcsd.law`). None when centred.
-fn track_pan(s: &ProjectState, t: &Track, start: i64, end: i64) -> Option<Value> {
-    let pts = lane(s, &t.id, AutomationParam::Pan, 0);
-    let law = if t.channels >= 2 { "balance" } else { "constant_power_-3dB" };
-    let vcsd = json!({ "param": "pan", "pan": t.pan, "automated": !pts.is_empty(), "law": law });
-    let effect = |pan: Value| {
+/// A constant or keyframed AAF parameter value (keyframes: `[fraction of the
+/// range, value]`, as the AAF adapter writes them).
+fn aaf_value(c: &Curve, start: i64, end: i64) -> Value {
+    match c {
+        Curve::Const(v) => json!(rational_str(*v)),
+        Curve::Points(p) => {
+            let len = (end - start).max(1) as f64;
+            json!({
+                "_aaf_keyframed_property": true,
+                "keyframe_values": p.iter().map(|&(x, v)| json!([(x - start) as f64 / len, (v * 1e6).round() / 1e6])).collect::<Vec<_>>(),
+                "keyframe_interpolation": "Linear",
+                "keyframe_baked_values": null,
+            })
+        }
+    }
+}
+
+/// The track's level and pan as AAF-style effects, with its buses folded in
+/// (OTIO has no buses): Mono Audio Gain = fader × volume lane × every bus level
+/// down to the master, fitted (linear amplitude) within 0.1 dB of the mixer;
+/// Mono Audio Pan (`Pan`: 0 left, 0.5 centre, 1 right) = the track's pan, or on a
+/// stereo track its balance, with the buses' balance folded in. A pan lane with
+/// no bus balance is written as its breakpoints, exactly. Also returns whether
+/// bus levels were folded in.
+fn track_effects(s: &ProjectState, t: &Track, start: i64, end: i64) -> (Vec<Value>, bool) {
+    let (gain, pan, folded) = track_level(s, t, start, end);
+    let vcsd = |param: &str| {
         json!({
+            "param": param,
+            "bus_folded": folded,
+            "law": if t.channels >= 2 { "balance" } else { "constant_power_-3dB" },
+        })
+    };
+    let mut out = vec![];
+    if let Some(g) = gain {
+        out.push(gain_effect(aaf_value(&g, start, end), vcsd("volume")));
+    }
+    if let Some(p) = pan {
+        out.push(json!({
             "OTIO_SCHEMA": "Effect.1",
             "metadata": {
                 "AAF": {
                     "Operation": { "Name": "Mono Audio Pan", "Identification": "9d2ea893-0968-11d3-8a38-0050040ef7d2" },
-                    "Parameters": { "Pan": pan },
+                    "Parameters": { "Pan": aaf_value(&p, start, end) },
                 },
-                "vcsd": vcsd,
+                "vcsd": vcsd("pan"),
             },
             "name": "Mono Audio Pan",
             "effect_name": "Mono Audio Pan",
-        })
-    };
-    let to_param = |p: f64| (p.clamp(-1.0, 1.0) + 1.0) / 2.0;
-    if pts.is_empty() {
-        return (t.pan.abs() > 1e-4).then(|| effect(json!(rational_str(to_param(t.pan as f64)))));
+        }));
     }
-    let last = end - 1;
-    let mut keys = vec![start];
-    keys.extend(pts.iter().map(|p| p.0).filter(|&x| x > start && x < last));
-    keys.push(last);
-    keys.dedup();
-    let len = (end - start).max(1) as f64;
-    let kf: Vec<Value> =
-        keys.iter().map(|&x| json!([(x - start) as f64 / len, (to_param(lane_db(&pts, x)) * 1e6).round() / 1e6])).collect();
-    Some(effect(json!({
-        "_aaf_keyframed_property": true,
-        "keyframe_values": kf,
-        "keyframe_interpolation": "Linear",
-        "keyframe_baked_values": null,
-    })))
-}
-
-/// The track's level over `[start, end)`: its fader times its volume lane, as the
-/// mixer plays it. Keyframes are fitted (linear amplitude) within 0.1 dB of the
-/// lane, which ramps in dB. None at unity.
-fn track_volume(s: &ProjectState, t: &Track, start: i64, end: i64) -> Option<Value> {
-    let pts = lane(s, &t.id, AutomationParam::VolumeDb, 0);
-    let fader = db_amp(t.gain_db as f64);
-    let vcsd = json!({ "param": "volume_db", "fader_db": t.gain_db, "automated": !pts.is_empty() });
-    if pts.is_empty() {
-        return (t.gain_db.abs() > 1e-4).then(|| gain_effect(json!(rational_str(fader)), vcsd));
-    }
-    let keys: Vec<i64> = pts.iter().map(|p| p.0).collect();
-    let len = (end - start).max(1) as f64;
-    let kf: Vec<Value> = gain_points(&keys, start, end, &|x| fader * db_amp(lane_db(&pts, x)))
-        .into_iter()
-        .map(|(x, g)| json!([(x - start) as f64 / len, (g * 1e6).round() / 1e6]))
-        .collect();
-    Some(gain_effect(
-        json!({
-            "_aaf_keyframed_property": true,
-            "keyframe_values": kf,
-            "keyframe_interpolation": "Linear",
-            "keyframe_baked_values": null,
-        }),
-        vcsd,
-    ))
+    (out, folded)
 }
 
 /// Build the OTIO timeline and write it to `out`. `media` maps asset ids to the linked WAVs.
@@ -213,7 +198,10 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         "pan uses the receiving app's pan law (VC Sound Design: −3 dB constant power on mono tracks, balance on stereo tracks)",
         s.tracks.values().filter(|t| !t.mute && pans(t)).count(),
     );
-    losses.add("bus routing, levels and automation not carried", s.buses.values().filter(|b| b.parent_id.is_some()).count());
+    losses.add(
+        "bus routing not carried: tracks are flat, with bus levels and automation folded into each track's gain and pan effects",
+        s.buses.values().filter(|b| b.parent_id.is_some()).count(),
+    );
     let inserts: usize =
         s.tracks.values().filter(|t| !printed(&t.id)).map(|t| t.inserts.len()).chain(s.buses.values().map(|b| b.inserts.len())).sum();
     losses.add("insert effects and plugins not carried (rendered in stems and mix)", inserts);
@@ -279,8 +267,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         };
         let bus = s.buses.get(&t.bus_id).map(|b| b.name.clone()).unwrap_or_default();
         // the track's level (fader × volume automation) as a gain effect on each of its layers
-        let volume = track_volume(s, t, start, end);
-        let pan = track_pan(s, t, start, end);
+        let (effects, bus_folded) = track_effects(s, t, start, end);
         for (li, lane_pieces) in lanes.iter().enumerate() {
             let mut items = vec![];
             let mut pos = start;
@@ -355,12 +342,14 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                 "metadata": { "vcsd": {
                     "track_id": t.id, "layer": li + 1, "channels": t.channels, "category": t.category.display(),
                     "bus": bus, "gain_db": t.gain_db, "pan": t.pan, "printed": printed(&t.id),
+                    // true: the effects carry bus levels too (what the track sounds like), the raw values don't
+                    "bus_folded": bus_folded,
                     // automation: [offset in samples from the timeline start, value]
                     "volume_db": points(AutomationParam::VolumeDb),
                     "pan_automation": points(AutomationParam::Pan),
                 } },
                 "name": name,
-                "source_range": null, "effects": volume.iter().chain(&pan).collect::<Vec<_>>(), "markers": [], "enabled": true,
+                "source_range": null, "effects": effects.clone(), "markers": [], "enabled": true,
                 "children": items,
                 "kind": "Audio",
             }));
