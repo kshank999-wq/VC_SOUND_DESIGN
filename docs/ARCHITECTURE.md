@@ -134,6 +134,7 @@ butt-spliced repeats, muted tracks and clips left out). It also shares its media
 | Clip gain | A "Mono Audio Gain" `Effect` on the clip, with a constant `Amplitude` (linear, as the AAF Rational string `"n/d"`) |
 | Track fader × volume automation × every bus level down to the master (static gain and volume automation) | A "Mono Audio Gain" `Effect` on the track: a constant, or keyframes `[fraction of the track's length, linear gain]`, linear in amplitude and fitted within 0.1 dB of the mixer (whose lanes ramp in dB) |
 | Track pan, pan automation, and the buses' balance automation | A "Mono Audio Pan" `Effect` on the track (`Pan`: 0 left, 0.5 centre, 1 right), constant or keyframed. Without bus balance, the lane's breakpoints are the keyframes, exactly (it is linear in its value, as AAF keyframes are). A bus balance on a mono track is a new pan plus a gain, exact with a −3 dB constant-power pan law, as in the AAF; it is fitted so each side stays within 0.1 dB above −30 dB. On a stereo track the value is the mixer's balance (`metadata.vcsd.law`): the louder side's level is the gain, the other side's ratio the balance, exactly under the balance law |
+| Track inserts: plugins and built-in effects, with plugin parameter automation | `Effect`s on the track before the level and pan (inserts are pre-fader), named after the plugin (`effect_name` "VST3 plugin", "Audio Unit", or the built-in's). Each carries the insert in full in `metadata.vcsd.insert`: built-in settings, or the plugin's id, format, vendor, saved state and parameter values. A plugin's automation goes in `metadata.vcsd.automation`: per parameter id, keyframes `[fraction of the range, normalised value]` (exact, since plugin lanes ramp linearly between points) and the raw points. Other apps see the effects but won't run them. To hear them there, print the track (the shared "Print tracks with plugins" option), which then carries its render instead. Bus inserts have nowhere to go and are listed |
 | Clip fades, bus, and the raw fader, pan and lanes (offsets from the range start) | `metadata.vcsd` on the clip or track |
 | Cues | Timeline markers, coloured by category, with the description as comment |
 
@@ -157,6 +158,9 @@ library (`scripts/otio/otio_summary.py`) and checks the following:
   lane) within 0.12 dB at 401 points;
 - the pan keyframes against the pan lane, exact at 401 points, and a stereo track's balance as a
   constant pan;
+- a plugin and a built-in effect on a track: effects in signal order, the plugin in full (state,
+  values), its automation keyframes exact at 401 points, read by the OpenTimelineIO library,
+  and bus inserts reported;
 - with bus gain, bus volume automation and master balance automation crossing the centre, the
   left and right levels a host plays from the effects (constant-power pan on the mono track,
   balance on the stereo one) against the mixer's, within 0.15 dB at 401 points. A side more than
@@ -182,6 +186,7 @@ tracks as new tracks in a folder `OTIO/<timeline>`, placed at `global_start_time
 | Disabled track or clip | Muted |
 | Markers on the timeline, tracks and clips | Spotting markers in an "OTIO markers" lane (name — comment), for those inside a scene |
 | `metadata.vcsd` (our own export) | Clip gain and fades, track fader, pan, channels, volume and pan automation |
+| Insert effects from our own export (`metadata.vcsd.insert`) | The track's inserts, in order: built-ins as they were, plugins with their id, format, state and values under a new slot id, and their parameter automation |
 | Without it: AAF-style "Mono Audio Gain" / "Mono Audio Pan" effects on tracks and clips (the AAF adapter's encoding, and our export's) | Constant clip gain becomes clip gain. Track gain and pan, and keyframed clip gain, become the track's gain, pan and volume/pan lanes (gains multiply, fitted within 0.1 dB) |
 
 **Media:** `file://` URLs, absolute paths, or paths relative to the `.otio`. WAV/BWF is used
@@ -210,7 +215,9 @@ Levels and pan are checked two ways, each at 201 points of the automated clip (l
   into clip gain comes back as −9 dB.
 
 With bus levels and master balance folded in, importing into a project with flat buses gives the
-same master mix within 2 % of peak.
+same master mix within 2 % of peak. A track with a built-in effect and an automated plugin comes
+back with both: the plugin's state, values and automation are exact, and the mix through a test
+plugin matches to within 1e-5.
 
 ## AAF import
 

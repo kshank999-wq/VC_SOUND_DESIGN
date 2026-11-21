@@ -357,3 +357,89 @@ fn bus_levels_folded_into_an_otio_come_back_as_the_tracks_levels() {
     let max = a.data.iter().zip(&b.data).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
     assert!(max < 0.02 * a.peak(), "mix differs by {max} (peak {})", a.peak());
 }
+
+/// A test plugin: gain = 2 × parameter 0 (from its automation, else 0.5).
+struct GainPlugin;
+
+impl mixer::PluginHost for GainPlugin {
+    fn process(
+        &self,
+        _slot: &PluginInsert,
+        buf: &mut wav::AudioBuffer,
+        _pos: i64,
+        auto: &[mixer::ParamCurve],
+    ) -> std::result::Result<(), String> {
+        let ch = buf.channels as usize;
+        for f in 0..buf.frames() {
+            let v = auto.iter().find(|c| c.id == 0).map(|c| {
+                let i = c.points.partition_point(|p| p.0 as usize <= f).max(1) - 1;
+                let (a, b) = (c.points[i], c.points[(i + 1).min(c.points.len() - 1)]);
+                if b.0 > a.0 {
+                    a.1 + (b.1 - a.1) * (f as f64 - a.0 as f64) / (b.0 - a.0) as f64
+                } else {
+                    a.1
+                }
+            });
+            let g = 2.0 * v.unwrap_or(0.5) as f32;
+            for c in 0..ch {
+                buf.data[f * ch + c] *= g;
+            }
+        }
+        Ok(())
+    }
+    fn latency(&self, _slot: &PluginInsert) -> i64 {
+        0
+    }
+}
+
+#[test]
+fn plugins_and_their_automation_come_back_from_an_otio() {
+    let (mut s, root, t0) = levels_project("otioplugrt");
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let tid = st.clips.values().find(|c| c.timeline_start == t0).unwrap().track_id.clone();
+    let plugin = PluginInsert {
+        id: "ins_gain".into(),
+        plugin_id: "vst3:test".into(),
+        format: "vst3".into(),
+        name: "Gain".into(),
+        vendor: "Test".into(),
+        path: String::new(),
+        bypass: false,
+        state: Some("c3RhdGU=".into()),
+        params: [(0u32, 0.3f64)].into_iter().collect(),
+    };
+    st.tracks.get_mut(&tid).unwrap().inserts = vec![Insert::HighPass { hz: 120.0, q: 0.7 }, Insert::Plugin(plugin.clone())];
+    for (dx, v) in [(0, 0.1f32), (sr / 4, 0.9), (sr / 2, 0.4)] {
+        editing::set_automation(st, "ins_gain", AutomationParam::Plugin(0), t0 + dx, v).unwrap();
+    }
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-21");
+    o.otio = true;
+    o.force = true;
+    o.plugins = Some(mixer::PluginHostRef(std::sync::Arc::new(GainPlugin)));
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let file = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+
+    let (mut s2, root2) = session("otioplugrt2", "24", "01:00:00:00");
+    s2.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root2, &file))).unwrap();
+    let st2 = &s2.state;
+    let c2 = st2.clips.values().find(|c| c.timeline_start == t0).unwrap();
+    let t2 = &st2.tracks[&c2.track_id];
+    assert_eq!(t2.inserts.len(), 2);
+    assert!(matches!(t2.inserts[0], Insert::HighPass { hz, q } if hz == 120.0 && q == 0.7));
+    let Insert::Plugin(p2) = &t2.inserts[1] else { panic!("{:?}", t2.inserts[1]) };
+    assert_ne!(p2.id, plugin.id, "a new slot id in the new project");
+    assert_eq!(PluginInsert { id: plugin.id.clone(), ..p2.clone() }, plugin, "id, format, state and values as they were");
+    let mut pts: Vec<(i64, f32)> = st2.automation.values().filter(|a| a.owner_id == p2.id).map(|a| (a.sample, a.value)).collect();
+    pts.sort_by_key(|p| p.0);
+    assert_eq!(pts, vec![(t0, 0.1), (t0 + sr / 4, 0.9), (t0 + sr / 2, 0.4)], "the automation, exactly");
+
+    // through the plugin, the same sound
+    let n = s.state.clips.values().find(|c| c.timeline_start == t0).unwrap().length as usize;
+    let host: std::sync::Arc<dyn mixer::PluginHost> = std::sync::Arc::new(GainPlugin);
+    let a = mixer::Mixer::new(&s.state, mixer::RenderOptions::default()).with_plugins(Some(host.clone())).render_master(t0, n).unwrap();
+    let b = mixer::Mixer::new(st2, mixer::RenderOptions::default()).with_plugins(Some(host)).render_master(t0, n).unwrap();
+    assert!(a.peak() > 0.01);
+    let max = a.data.iter().zip(&b.data).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    assert!(max < 1e-5, "mix differs by {max}");
+}

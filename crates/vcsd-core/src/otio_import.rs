@@ -569,8 +569,33 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
         // our raw track values, unless the buses were folded into the effects (then
         // the effects are what the track sounded like; this project's buses are its own)
         let raw = tv.is_object() && tv["bus_folded"].as_bool() != Some(true);
+        // inserts described by our own export: rebuilt in order, plugins with new slot ids
+        let mut inserts = vec![];
+        let mut plugin_points: Vec<(String, u32, i64, f32)> = vec![];
+        for e in &lane.effects {
+            let d = &e["metadata"]["vcsd"];
+            if d["insert"].is_null() {
+                continue;
+            }
+            match serde_json::from_value::<Insert>(d["insert"].clone()) {
+                Ok(Insert::Plugin(mut p)) => {
+                    p.id = new_id("ins");
+                    for (id, lane_pts) in d["automation"].as_object().into_iter().flatten() {
+                        let Ok(id) = id.parse::<u32>() else { continue };
+                        for pt in lane_pts["points"].as_array().into_iter().flatten() {
+                            if let (Some(t), Some(v)) = (from_meta(&pt[0]), pt[1].as_f64()) {
+                                plugin_points.push((p.id.clone(), id, t, v as f32));
+                            }
+                        }
+                    }
+                    inserts.push(Insert::Plugin(p));
+                }
+                Ok(other) => inserts.push(other),
+                Err(_) => notes.add("insert effects that couldn't be read left out", 1),
+            }
+        }
         if !raw {
-            for e in &lane.effects {
+            for e in lane.effects.iter().filter(|e| e["metadata"]["vcsd"]["insert"].is_null()) {
                 match level_effect(e, lane.start, lane.len) {
                     Some((gain, curve)) => levels.push((gain, lane.start, lane.start + lane.len, curve)),
                     None => notes.add("track effects other than gain and pan left out", 1),
@@ -602,7 +627,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 solo: false,
                 armed: false,
                 frozen_asset_id: None,
-                inserts: vec![],
+                inserts,
                 automation_mode: AutoMode::Read,
             },
         );
@@ -664,6 +689,9 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                     }
                 }
             }
+        }
+        for (slot, id, t, v) in plugin_points {
+            add_point(s, &slot, AutomationParam::Plugin(id), base + t, crate::editing::clamp_automation(AutomationParam::Plugin(id), v));
         }
         report.automated_tracks += automated as usize;
         report.stereo_tracks += (channels == 2) as usize;

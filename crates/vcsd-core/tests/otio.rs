@@ -398,3 +398,74 @@ fn otio_folds_bus_levels_and_balance_into_each_tracks_gain_and_pan() {
         near("wind right", x, gg * sr2, r, l.max(r));
     }
 }
+
+#[test]
+fn otio_describes_plugins_and_their_automation_as_effects() {
+    let (mut s, root, _, gt) = project("otioplug");
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let plugin = PluginInsert {
+        id: "ins_gain".into(),
+        plugin_id: "vst3:test".into(),
+        format: "vst3".into(),
+        name: "Gain".into(),
+        vendor: "Test".into(),
+        path: String::new(),
+        bypass: false,
+        state: Some("c3RhdGU=".into()),
+        params: [(0u32, 0.3f64)].into_iter().collect(),
+    };
+    st.tracks.get_mut(&gt).unwrap().inserts = vec![Insert::Plugin(plugin.clone()), Insert::HighPass { hz: 120.0, q: 0.7 }];
+    editing::set_automation(st, "ins_gain", AutomationParam::Plugin(0), sr / 2, 0.0).unwrap();
+    editing::set_automation(st, "ins_gain", AutomationParam::Plugin(0), 2 * sr, 1.0).unwrap();
+    // a plugin on a bus has nowhere to go
+    let bus = st.tracks[&gt].bus_id.clone();
+    st.buses.get_mut(&bus).unwrap().inserts = vec![Insert::Gain { db: -1.0 }];
+
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-21");
+    o.otio = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let st = &s.state;
+    let rel = r.files.iter().find(|f| f.ends_with(".otio")).unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(r.dir.join(rel)).unwrap()).unwrap();
+    let rep: serde_json::Value = serde_json::from_slice(&std::fs::read(r.dir.join("OTIO/otio_report.json")).unwrap()).unwrap();
+    let losses: Vec<&str> = rep["losses"].as_array().unwrap().iter().filter_map(|l| l.as_str()).collect();
+    assert!(
+        losses.iter().any(|l| l.starts_with("track plugins and insert effects described as OTIO effects") && l.ends_with("(2)")),
+        "{losses:?}"
+    );
+    assert!(losses.iter().any(|l| l.starts_with("insert effects and plugins on buses not carried") && l.ends_with("(1)")), "{losses:?}");
+    let (start, end) = export::resolve_range(st, &export::ExportRange::All).unwrap();
+    let gname = st.tracks[&gt].name.clone();
+    let layer = raw["tracks"]["children"].as_array().unwrap().iter().find(|t| t["name"] == gname.as_str()).unwrap();
+    let fx = layer["effects"].as_array().unwrap();
+    let names: Vec<&str> = fx.iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Gain", "High Pass", "Mono Audio Gain", "Mono Audio Pan"], "inserts in signal order, then level and pan");
+    assert_eq!(fx[0]["effect_name"], "VST3 plugin");
+    // the plugin in full: id, format, saved state, parameter values
+    let ins: Insert = serde_json::from_value(fx[0]["metadata"]["vcsd"]["insert"].clone()).unwrap();
+    match ins {
+        Insert::Plugin(p) => assert_eq!(p, plugin),
+        other => panic!("{other:?}"),
+    }
+    let hp: Insert = serde_json::from_value(fx[1]["metadata"]["vcsd"]["insert"].clone()).unwrap();
+    assert!(matches!(hp, Insert::HighPass { hz, q } if hz == 120.0 && q == 0.7), "{hp:?}");
+    // its automation: raw points, and keyframes exact against the linear lane
+    let a = &fx[0]["metadata"]["vcsd"]["automation"]["0"];
+    assert_eq!(a["points"], serde_json::json!([[sr / 2 - start, 0.0], [2 * sr - start, 1.0]]));
+    let kf = &a;
+    let len = (end - start) as f64;
+    for k in 0..=400 {
+        let x = start + (k as f64 / 400.0 * (len - 1.0)) as i64;
+        let want = ((x - sr / 2) as f64 / (1.5 * sr as f64)).clamp(0.0, 1.0);
+        let got = effect_at(kf, (x - start) as f64 / len);
+        assert!((got - want).abs() < 1e-6, "plugin parameter at {x}: {got} vs {want}");
+    }
+    if let Some(py) = python() {
+        let v = inspect(&py, &r.dir.join(rel));
+        let t = v["tracks"].as_array().unwrap().iter().find(|t| t["name"] == gname.as_str()).unwrap();
+        let seen: Vec<&str> = t["effects"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert_eq!(seen, names, "OpenTimelineIO reads the effects");
+    }
+}

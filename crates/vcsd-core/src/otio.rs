@@ -148,6 +148,72 @@ fn aaf_value(c: &Curve, start: i64, end: i64) -> Value {
 /// stereo track its balance, with the buses' balance folded in. A pan lane with
 /// no bus balance is written as its breakpoints, exactly. Also returns whether
 /// bus levels were folded in.
+/// A plugin's automation lane over `[start, end)` as keyframes `[fraction of the
+/// range, normalised value]`: plugin lanes ramp linearly between their points,
+/// so the breakpoints (plus the range's ends) are exact.
+fn plugin_keyframes(pts: &[(i64, f32)], start: i64, end: i64) -> Vec<Value> {
+    let last = end - 1;
+    let mut keys = vec![start];
+    keys.extend(pts.iter().map(|p| p.0).filter(|&x| x > start && x < last));
+    keys.push(last);
+    keys.dedup();
+    let len = (end - start).max(1) as f64;
+    keys.iter().map(|&x| json!([(x - start) as f64 / len, (crate::aaf::lane_db(pts, x) * 1e6).round() / 1e6])).collect()
+}
+
+/// A track's inserts, in signal order, as OTIO effects. OTIO effects are
+/// generic, so each one is described in full in `metadata.vcsd.insert` (the
+/// project's own insert: built-in settings, or the plugin's id, format, saved
+/// state and parameter values), and a plugin's parameter automation in
+/// `metadata.vcsd.automation`: per parameter id, keyframes (as above) and the
+/// raw points `[offset in samples from the range start, value]`. Other apps see
+/// the effects by name; VC Sound Design rebuilds them.
+fn insert_effects(s: &ProjectState, t: &Track, start: i64, end: i64) -> Vec<Value> {
+    t.inserts
+        .iter()
+        .map(|ins| {
+            let (name, kind, automation) = match ins {
+                Insert::Plugin(p) => {
+                    let mut lanes: BTreeMap<u32, Vec<(i64, f32)>> = BTreeMap::new();
+                    for a in s.automation.values().filter(|a| a.owner_id == p.id) {
+                        if let AutomationParam::Plugin(id) = a.param {
+                            lanes.entry(id).or_default().push((a.sample, a.value));
+                        }
+                    }
+                    let auto: serde_json::Map<String, Value> = lanes
+                        .into_iter()
+                        .map(|(id, mut pts)| {
+                            pts.sort_by_key(|x| x.0);
+                            let v = json!({
+                                "keyframe_values": plugin_keyframes(&pts, start, end),
+                                "keyframe_interpolation": "Linear",
+                                "points": pts.iter().map(|&(x, v)| json!([x - start, v])).collect::<Vec<_>>(),
+                            });
+                            (id.to_string(), v)
+                        })
+                        .collect();
+                    let kind = match p.format.as_str() {
+                        "au" => "Audio Unit".to_string(),
+                        f => format!("{} plugin", f.to_ascii_uppercase()),
+                    };
+                    (p.name.clone(), kind, Value::Object(auto))
+                }
+                Insert::Gain { .. } => ("Gain".into(), "VC Sound Design Gain".into(), json!({})),
+                Insert::HighPass { .. } => ("High Pass".into(), "VC Sound Design High Pass".into(), json!({})),
+                Insert::LowPass { .. } => ("Low Pass".into(), "VC Sound Design Low Pass".into(), json!({})),
+                Insert::Peak { .. } => ("Peak EQ".into(), "VC Sound Design Peak EQ".into(), json!({})),
+                Insert::Compressor { .. } => ("Compressor".into(), "VC Sound Design Compressor".into(), json!({})),
+            };
+            json!({
+                "OTIO_SCHEMA": "Effect.1",
+                "metadata": { "vcsd": { "insert": ins, "automation": automation } },
+                "name": name,
+                "effect_name": kind,
+            })
+        })
+        .collect()
+}
+
 fn track_effects(s: &ProjectState, t: &Track, start: i64, end: i64) -> (Vec<Value>, bool) {
     let (gain, pan, folded) = track_level(s, t, start, end);
     let vcsd = |param: &str| {
@@ -202,9 +268,15 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         "bus routing not carried: tracks are flat, with bus levels and automation folded into each track's gain and pan effects",
         s.buses.values().filter(|b| b.parent_id.is_some()).count(),
     );
-    let inserts: usize =
-        s.tracks.values().filter(|t| !printed(&t.id)).map(|t| t.inserts.len()).chain(s.buses.values().map(|b| b.inserts.len())).sum();
-    losses.add("insert effects and plugins not carried (rendered in stems and mix)", inserts);
+    let inserts: usize = s.tracks.values().filter(|t| !t.mute && !printed(&t.id)).map(|t| t.inserts.len()).sum();
+    losses.add(
+        "track plugins and insert effects described as OTIO effects (with their state and automation) that other apps won't apply: print tracks with plugins to hear them there",
+        inserts,
+    );
+    losses.add(
+        "insert effects and plugins on buses not carried (rendered in stems and mix)",
+        s.buses.values().map(|b| b.inserts.len()).sum(),
+    );
     losses.add("tracks printed with their plugins and insert effects: one rendered clip each, not editable clip by clip", o.prints.len());
 
     let mut tracks: Vec<&Track> = s.tracks.values().collect();
@@ -267,7 +339,10 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         };
         let bus = s.buses.get(&t.bus_id).map(|b| b.name.clone()).unwrap_or_default();
         // the track's level (fader × volume automation) as a gain effect on each of its layers
-        let (effects, bus_folded) = track_effects(s, t, start, end);
+        let (levels, bus_folded) = track_effects(s, t, start, end);
+        // inserts first (they're pre-fader), unless the track is printed with them
+        let mut effects = if printed(&t.id) { vec![] } else { insert_effects(s, t, start, end) };
+        effects.extend(levels);
         for (li, lane_pieces) in lanes.iter().enumerate() {
             let mut items = vec![];
             let mut pos = start;
