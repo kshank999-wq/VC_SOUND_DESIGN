@@ -118,6 +118,7 @@ struct Item {
     fade_out: f64,
     muted: bool,
     vcsd: Value,
+    effects: Vec<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +127,70 @@ struct OLane {
     items: Vec<Item>,
     vcsd: Value,
     muted: bool,
+    effects: Vec<Value>,
+    /// The track's own range on the timeline (seconds), for its effects' keyframes.
+    start: f64,
+    len: f64,
+}
+
+/// A level parameter over time (seconds from the timeline start).
+#[derive(Debug, Clone)]
+enum Level {
+    Const(f64),
+    Points(Vec<(f64, f64)>),
+}
+
+impl Level {
+    fn at(&self, t: f64) -> f64 {
+        match self {
+            Level::Const(v) => *v,
+            Level::Points(p) => {
+                let i = p.partition_point(|x| x.0 <= t);
+                match (i.checked_sub(1).map(|k| p[k]), p.get(i)) {
+                    (Some(a), Some(b)) if b.0 > a.0 => a.1 + (b.1 - a.1) * (t - a.0) / (b.0 - a.0),
+                    (Some(a), _) => a.1,
+                    (None, Some(b)) => b.1,
+                    (None, None) => 1.0,
+                }
+            }
+        }
+    }
+}
+
+/// A number as OTIO tools write AAF values: a number, or a rational string "n/d".
+fn number(v: &Value) -> Option<f64> {
+    if let Some(x) = v.as_f64() {
+        return Some(x);
+    }
+    let s = v.as_str()?.trim();
+    match s.split_once('/') {
+        Some((n, d)) => Some(n.trim().parse::<f64>().ok()? / d.trim().parse::<f64>().ok().filter(|d| *d != 0.0)?),
+        None => s.parse().ok(),
+    }
+}
+
+/// An AAF-style level effect (the OpenTimelineIO AAF adapter's encoding): Mono
+/// Audio Gain (`Amplitude`, linear) or Mono Audio Pan (`Pan`, 0 left … 1 right),
+/// constant or keyframed over `[t0, t0 + len)` (keyframe times are fractions of it).
+/// Returns (is gain, its curve).
+fn level_effect(e: &Value, t0: f64, len: f64) -> Option<(bool, Level)> {
+    let aaf = &e["metadata"]["AAF"];
+    let names = [e["effect_name"].as_str(), e["name"].as_str(), aaf["Operation"]["Name"].as_str()];
+    let is = |n: &str| names.iter().flatten().any(|x| x.eq_ignore_ascii_case(n));
+    let (gain, param) = if is("Mono Audio Gain") {
+        (true, "Amplitude")
+    } else if is("Mono Audio Pan") {
+        (false, "Pan")
+    } else {
+        return None;
+    };
+    let p = &aaf["Parameters"][param];
+    if let Some(kf) = p["keyframe_values"].as_array() {
+        let mut pts: Vec<(f64, f64)> = kf.iter().filter_map(|k| Some((t0 + number(&k[0])? * len, number(&k[1])?))).collect();
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        return (!pts.is_empty()).then_some((gain, Level::Points(pts)));
+    }
+    number(p).map(|v| (gain, Level::Const(v)))
 }
 
 struct Reader<'a> {
@@ -200,6 +265,7 @@ impl Reader<'_> {
                         fade_out: 0.0,
                         muted: c["enabled"].as_bool() == Some(false),
                         vcsd: c["metadata"]["vcsd"].clone(),
+                        effects: c["effects"].as_array().cloned().unwrap_or_default(),
                     };
                     self.markers_of(c, pos - src);
                     items.push(Some(item));
@@ -272,7 +338,18 @@ impl Reader<'_> {
         }
         if !out.is_empty() {
             let muted = t["enabled"].as_bool() == Some(false);
-            lanes.insert(0, OLane { name, items: out, vcsd: t["metadata"]["vcsd"].clone(), muted });
+            lanes.insert(
+                0,
+                OLane {
+                    name,
+                    items: out,
+                    vcsd: t["metadata"]["vcsd"].clone(),
+                    muted,
+                    effects: t["effects"].as_array().cloned().unwrap_or_default(),
+                    start: offset,
+                    len: pos - offset,
+                },
+            );
         }
     }
 }
@@ -413,10 +490,13 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
     let license =
         License { name: "Editorial media (OTIO)".into(), redistributable: true, source: "editorial".into(), ..Default::default() };
+    let mut levels_found = false;
     for lane in lanes {
         let tid = new_id("trk");
         let mut clips = vec![];
         let mut chans = 1u16;
+        // levels from AAF-style effects (when our own metadata isn't there): (gain?, start, end, curve)
+        let mut levels: Vec<(bool, f64, f64, Level)> = vec![];
         for it in &lane.items {
             let got = match (&it.url, &it.missing) {
                 (Some(u), _) => media.get(u),
@@ -446,6 +526,22 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             chans = chans.max(ach.min(2));
             let v = &it.vcsd;
             let len = smp(it.len);
+            // clip gain: ours, else constant gain effects (keyframed ones go to the track's lane)
+            let mut clip_gain = v["gain_db"].as_f64();
+            if clip_gain.is_none() {
+                let mut amp = 1.0;
+                for e in &it.effects {
+                    match level_effect(e, it.at, it.len) {
+                        Some((true, Level::Const(g))) => amp *= g,
+                        Some((gain, curve)) => levels.push((gain, it.at, it.at + it.len, curve)),
+                        None => notes.add("clip effects other than gain left out", 1),
+                    }
+                }
+                if (amp - 1.0f64).abs() > 1e-9 {
+                    levels_found = true;
+                    clip_gain = Some(crate::aaf_import::amp_db(amp));
+                }
+            }
             clips.push(ClipInstance {
                 id: new_id("clp"),
                 track_id: tid.clone(),
@@ -454,7 +550,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 timeline_start: base + smp(it.at),
                 source_offset: smp(it.source),
                 length: len,
-                gain_db: v["gain_db"].as_f64().unwrap_or(0.0) as f32,
+                gain_db: clip_gain.unwrap_or(0.0) as f32,
                 fade_in: from_meta(&v["fade_in"]).unwrap_or_else(|| smp(it.fade_in)).clamp(0, len),
                 fade_out: from_meta(&v["fade_out"]).unwrap_or_else(|| smp(it.fade_out)).clamp(0, len),
                 fill: FillMode::OneShot,
@@ -470,6 +566,15 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             continue;
         }
         let tv = &lane.vcsd;
+        if !tv.is_object() {
+            for e in &lane.effects {
+                match level_effect(e, lane.start, lane.len) {
+                    Some((gain, curve)) => levels.push((gain, lane.start, lane.start + lane.len, curve)),
+                    None => notes.add("track effects other than gain and pan left out", 1),
+                }
+            }
+        }
+        levels_found |= tv.is_object() || !levels.is_empty();
         let channels = tv["channels"].as_u64().map(|c| c.clamp(1, 2) as u16).unwrap_or(chans);
         let category = guess_category(&lane.name);
         let bus_id = match &category {
@@ -509,6 +614,51 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 automated |= param == AutomationParam::VolumeDb;
             }
         }
+        // AAF-style levels: gains multiply, the last pan wins; fitted to dB / pan lanes
+        if !levels.is_empty() {
+            let at = |t: i64| t as f64 / psr as f64;
+            let covers = |l: &(bool, f64, f64, Level), t: f64| l.1 <= t && t < l.2;
+            let gain = |t: i64| levels.iter().filter(|l| l.0 && covers(l, at(t))).map(|l| l.3.at(at(t))).product::<f64>();
+            let has_pan = levels.iter().any(|l| !l.0);
+            let pan = |t: i64| levels.iter().rev().find(|l| !l.0 && covers(l, at(t))).map(|l| l.3.at(at(t)) * 2.0 - 1.0).unwrap_or(0.0);
+            let mut keys = vec![];
+            for l in &levels {
+                keys.extend([smp(l.1) - 1, smp(l.1), smp(l.2) - 1, smp(l.2)]);
+                if let Level::Points(p) = &l.3 {
+                    keys.extend(p.iter().map(|x| smp(x.0)));
+                }
+            }
+            // the lanes only matter where the clips play
+            let lo = lane.items.iter().map(|i| smp(i.at)).min().unwrap_or(0);
+            let hi = lane.items.iter().map(|i| smp(i.at + i.len)).max().unwrap_or(lo + 1).max(lo + 1);
+            let vol = simplify(&crate::aaf::fit(&keys, lo, hi, &|t| crate::aaf_import::amp_db(gain(t)), &|a, b| (a - b).abs() > 0.1), 0.02);
+            let flat = |p: &[(i64, f64)], tol: f64| p.iter().all(|x| (x.1 - p[0].1).abs() < tol);
+            let tr = s.tracks.get_mut(&tid).unwrap();
+            if flat(&vol, 0.01) {
+                tr.gain_db = vol[0].1 as f32;
+            } else {
+                for (t, v) in &vol {
+                    add_point(
+                        s,
+                        &tid,
+                        AutomationParam::VolumeDb,
+                        base + t,
+                        crate::editing::clamp_automation(AutomationParam::VolumeDb, *v as f32),
+                    );
+                }
+                automated = true;
+            }
+            if has_pan {
+                let pans = simplify(&crate::aaf::fit(&keys, lo, hi, &|t| pan(t).clamp(-1.0, 1.0), &|a, b| (a - b).abs() > 0.002), 0.0005);
+                if flat(&pans, 0.002) {
+                    s.tracks.get_mut(&tid).unwrap().pan = pans[0].1 as f32;
+                } else {
+                    for (t, v) in &pans {
+                        add_point(s, &tid, AutomationParam::Pan, base + t, *v as f32);
+                    }
+                }
+            }
+        }
         report.automated_tracks += automated as usize;
         report.stereo_tracks += (channels == 2) as usize;
         report.clips += clips.len();
@@ -517,8 +667,11 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
         }
         report.tracks.push(tid);
     }
-    if !tl["metadata"]["vcsd"].is_object() {
-        notes.add("levels, pan and automation aren't in OTIO (it has no audio mix model): tracks at unity, centred", report.tracks.len());
+    if !levels_found && !tl["metadata"]["vcsd"].is_object() {
+        notes.add(
+            "no levels or pan in the OTIO (no gain effects or VC Sound Design metadata): tracks at unity, centred",
+            report.tracks.len(),
+        );
     }
     report.media_linked = media.cache.values().filter(|r| matches!(r, Ok((_, false)))).count();
     report.media_written = media.cache.values().filter(|r| matches!(r, Ok((_, true)))).count();

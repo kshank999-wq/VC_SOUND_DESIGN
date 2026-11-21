@@ -13,6 +13,16 @@ from urllib.parse import unquote, urlparse
 import opentimelineio as otio
 
 
+def effects(item):
+    """Effects as names and their AAF-style level parameters."""
+    out = []
+    for e in item.effects:
+        meta = json.loads(otio.core.serialize_json_to_string(e.metadata))
+        out.append({"name": e.name, "effect_name": e.effect_name,
+                    "parameters": meta.get("AAF", {}).get("Parameters", {})})
+    return out
+
+
 def main(path, sr):
     tl = otio.adapters.read_from_file(path)
     s = lambda t: int(round(t.rescaled_to(sr).value))
@@ -27,7 +37,7 @@ def main(path, sr):
     }
     for track in tl.tracks:
         t = {"name": track.name, "kind": track.kind, "metadata": json.loads(otio.core.serialize_json_to_string(track.metadata)),
-             "duration": s(track.duration()), "items": []}
+             "duration": s(track.duration()), "effects": effects(track), "items": []}
         for item in track:
             if isinstance(item, otio.schema.Transition):
                 t["items"].append({"kind": "Transition", "type": item.transition_type, "in": s(item.in_offset), "out": s(item.out_offset),
@@ -43,6 +53,7 @@ def main(path, sr):
                 d["file"] = unquote(urlparse(ref.target_url).path)
                 d["available"] = s(ref.available_range.duration)
                 d["metadata"] = json.loads(otio.core.serialize_json_to_string(item.metadata))
+                d["effects"] = effects(item)
             t["items"].append(d)
         out["tracks"].append(t)
     print(json.dumps(out, indent=1))

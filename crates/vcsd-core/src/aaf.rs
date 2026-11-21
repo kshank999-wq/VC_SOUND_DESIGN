@@ -615,7 +615,7 @@ impl Curve {
 }
 
 /// Lane value in dB at `s` (linear between breakpoints, held at the ends), as the mixer plays it.
-fn lane_db(pts: &[(i64, f32)], s: i64) -> f64 {
+pub(crate) fn lane_db(pts: &[(i64, f32)], s: i64) -> f64 {
     let i = pts.partition_point(|p| p.0 <= s);
     let v = match (i.checked_sub(1).map(|k| pts[k]), pts.get(i)) {
         (Some(a), Some(b)) => a.1 + (b.1 - a.1) * ((s - a.0) as f32 / (b.0 - a.0).max(1) as f32),
@@ -627,7 +627,7 @@ fn lane_db(pts: &[(i64, f32)], s: i64) -> f64 {
 }
 
 /// The mixer's gain for a lane value: −96 dB and below is silence.
-fn db_amp(db: f64) -> f64 {
+pub(crate) fn db_amp(db: f64) -> f64 {
     if db <= -96.0 {
         0.0
     } else {
@@ -647,7 +647,7 @@ fn volume_points(pts: &[(i64, f32)], start: i64, end: i64) -> Vec<(i64, f64)> {
 
 /// Control points for any gain curve `amp(t)` with corners at `keys`: split until
 /// amplitude-linear interpolation stays within 0.1 dB of it (0.001 absolute near silence).
-fn gain_points(keys: &[i64], start: i64, end: i64, amp: &dyn Fn(i64) -> f64) -> Vec<(i64, f64)> {
+pub(crate) fn gain_points(keys: &[i64], start: i64, end: i64, amp: &dyn Fn(i64) -> f64) -> Vec<(i64, f64)> {
     fit(keys, start, end, amp, &|lin, v| {
         if v > 0.001 && lin > 0.001 {
             (20.0 * (lin / v).log10()).abs() > 0.1

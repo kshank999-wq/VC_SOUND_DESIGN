@@ -19,7 +19,7 @@
 //! that know them can read them and others ignore them. Losses are listed in the
 //! [`OtioReport`].
 
-use crate::aaf::{bus_muted, clip_pieces, trim, url_for, AafMedia, Losses, Piece};
+use crate::aaf::{bus_muted, clip_pieces, db_amp, gain_points, lane_db, trim, url_for, AafMedia, Losses, Piece};
 use crate::error::Result;
 use crate::model::*;
 use crate::state::ProjectState;
@@ -99,6 +99,57 @@ fn lane(s: &ProjectState, owner: &str, param: AutomationParam, start: i64) -> Ve
     v
 }
 
+/// A linear gain as the AAF adapter writes a constant AAF Rational ("n/d").
+fn rational_str(g: f64) -> String {
+    format!("{}/1000000", (g * 1e6).round().clamp(0.0, i32::MAX as f64) as i64)
+}
+
+/// A level as OTIO tools carry AAF's Mono Audio Gain (the encoding of the
+/// OpenTimelineIO AAF adapter, `simplify=True`): an `Effect` whose
+/// `metadata.AAF.Parameters.Amplitude` is a constant ("n/d" linear gain) or
+/// keyframes `[fraction of the item's length, linear gain]`, linear in amplitude.
+fn gain_effect(amplitude: Value, vcsd: Value) -> Value {
+    json!({
+        "OTIO_SCHEMA": "Effect.1",
+        "metadata": {
+            "AAF": {
+                "Operation": { "Name": "Mono Audio Gain", "Identification": "9d2ea894-0968-11d3-8a38-0050040ef7d2" },
+                "Parameters": { "Amplitude": amplitude },
+            },
+            "vcsd": vcsd,
+        },
+        "name": "Mono Audio Gain",
+        "effect_name": "Mono Audio Gain",
+    })
+}
+
+/// The track's level over `[start, end)`: its fader times its volume lane, as the
+/// mixer plays it. Keyframes are fitted (linear amplitude) within 0.1 dB of the
+/// lane, which ramps in dB. None at unity.
+fn track_volume(s: &ProjectState, t: &Track, start: i64, end: i64) -> Option<Value> {
+    let pts = lane(s, &t.id, AutomationParam::VolumeDb, 0);
+    let fader = db_amp(t.gain_db as f64);
+    let vcsd = json!({ "param": "volume_db", "fader_db": t.gain_db, "automated": !pts.is_empty() });
+    if pts.is_empty() {
+        return (t.gain_db.abs() > 1e-4).then(|| gain_effect(json!(rational_str(fader)), vcsd));
+    }
+    let keys: Vec<i64> = pts.iter().map(|p| p.0).collect();
+    let len = (end - start).max(1) as f64;
+    let kf: Vec<Value> = gain_points(&keys, start, end, &|x| fader * db_amp(lane_db(&pts, x)))
+        .into_iter()
+        .map(|(x, g)| json!([(x - start) as f64 / len, (g * 1e6).round() / 1e6]))
+        .collect();
+    Some(gain_effect(
+        json!({
+            "_aaf_keyframed_property": true,
+            "keyframe_values": kf,
+            "keyframe_interpolation": "Linear",
+            "keyframe_baked_values": null,
+        }),
+        vcsd,
+    ))
+}
+
 /// Build the OTIO timeline and write it to `out`. `media` maps asset ids to the linked WAVs.
 pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o: &OtioOptions) -> Result<OtioReport> {
     let sr = s.project.sample_rate as f64;
@@ -115,7 +166,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
 
     // ---- what OTIO can't hold
     losses.add(
-        "clip gain, track fader and pan, volume and pan automation carried as metadata only (OTIO has no audio mix model)",
+        "pan and pan automation carried as metadata only (OTIO has no audio mix model; levels go as AAF-style gain effects)",
         s.tracks.values().filter(|t| !t.mute).count(),
     );
     losses.add("bus routing, levels and automation not carried", s.buses.values().filter(|b| b.parent_id.is_some()).count());
@@ -183,6 +234,8 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
             v
         };
         let bus = s.buses.get(&t.bus_id).map(|b| b.name.clone()).unwrap_or_default();
+        // the track's level (fader × volume automation) as a gain effect on each of its layers
+        let volume = track_volume(s, t, start, end);
         for (li, lane_pieces) in lanes.iter().enumerate() {
             let mut items = vec![];
             let mut pos = start;
@@ -217,7 +270,12 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                     } },
                     "name": name,
                     "source_range": range(p.source, p.len, sr),
-                    "effects": [], "markers": [], "enabled": true,
+                    "effects": if (p.gain - 1.0).abs() > 1e-6 {
+                        json!([gain_effect(json!(rational_str(p.gain as f64)), json!({ "param": "clip_gain_db", "gain_db": (gain_db * 1000.0).round() / 1000.0 }))])
+                    } else {
+                        json!([])
+                    },
+                    "markers": [], "enabled": true,
                     "media_references": { "DEFAULT_MEDIA": {
                         "OTIO_SCHEMA": "ExternalReference.1",
                         "metadata": { "vcsd": { "channels": m.channels } },
@@ -257,7 +315,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                     "pan_automation": points(AutomationParam::Pan),
                 } },
                 "name": name,
-                "source_range": null, "effects": [], "markers": [], "enabled": true,
+                "source_range": null, "effects": volume.iter().collect::<Vec<_>>(), "markers": [], "enabled": true,
                 "children": items,
                 "kind": "Audio",
             }));

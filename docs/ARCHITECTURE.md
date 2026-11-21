@@ -131,20 +131,25 @@ butt-spliced repeats, muted tracks and clips left out). It also shares its media
 | Start timecode | `global_start_time` at the project frame rate |
 | Fade next to silence | An `SMPTE_Dissolve` transition against the gap or track edge (in/out offset = the fade) |
 | Fade between butted clips | Clip metadata only (a transition there would be a crossfade over handles) |
-| Clip gain, fades | `metadata.vcsd` on the clip |
-| Track fader, pan, bus, volume and pan automation (offsets from the range start) | `metadata.vcsd` on the track |
+| Clip gain | A "Mono Audio Gain" `Effect` on the clip, with a constant `Amplitude` (linear, as the AAF Rational string `"n/d"`) |
+| Track fader × volume automation | A "Mono Audio Gain" `Effect` on the track: a constant, or keyframes `[fraction of the track's length, linear gain]`, linear in amplitude and fitted within 0.1 dB of the lane (which ramps in dB) |
+| Clip fades, pan, bus, and the raw fader and lanes (offsets from the range start) | `metadata.vcsd` on the clip or track |
 | Cues | Timeline markers, coloured by category, with the description as comment |
 
-OTIO has no audio mix model, so gain, pan and automation are metadata only. The export lists
-this, together with bus routing and inserts, in `OTIO/otio_report.json`, the README and QA.
+OTIO has no audio mix model, so levels follow the one convention OTIO tools share. The
+OpenTimelineIO AAF adapter carries AAF's Mono Audio Gain as an `Effect` whose
+`metadata.AAF.Parameters.Amplitude` is a constant or keyframes (with `simplify=True` it sits on the
+track or clip), and the export writes levels in that encoding. Pan, bus routing and inserts are not
+carried; the export lists them in `OTIO/otio_report.json`, the README and QA.
 
 **Verification:** `crates/vcsd-core/tests/otio.rs` reads each file with the OpenTimelineIO
 library (`scripts/otio/otio_summary.py`) and checks the following:
 - the start timecode, and that every track spans the range;
 - every audible clip's position, length and source offset, and that its media exists;
 - the overlapping layer and the left-out muted track;
-- the fade dissolves around the glass clip, and its gain and the track's automation in
-  metadata;
+- the fade dissolves around the glass clip;
+- the clip's gain effect, and the track's gain keyframes against the mixer's level (fader plus
+  lane) within 0.12 dB at 401 points;
 - the markers;
 - sharing the media and prints with the AAF.
 
@@ -166,6 +171,7 @@ tracks as new tracks in a folder `OTIO/<timeline>`, placed at `global_start_time
 | Disabled track or clip | Muted |
 | Markers on the timeline, tracks and clips | Spotting markers in an "OTIO markers" lane (name — comment), for those inside a scene |
 | `metadata.vcsd` (our own export) | Clip gain and fades, track fader, pan, channels, volume and pan automation |
+| Without it: AAF-style "Mono Audio Gain" / "Mono Audio Pan" effects on tracks and clips (the AAF adapter's encoding, and our export's) | Constant clip gain becomes clip gain. Track gain and pan, and keyframed clip gain, become the track's gain, pan and volume/pan lanes (gains multiply, fitted within 0.1 dB) |
 
 **Media:** `file://` URLs, absolute paths, or paths relative to the `.otio`. WAV/BWF is used
 where it is; moved media is searched for by name next to the file and in the given folders.
@@ -173,8 +179,8 @@ AIFF and MXF are converted like the AAF import's, as is media at another sample 
 written to `Audio/Imported/OTIO/<file>/`. Missing references and unreadable media are reported
 per file.
 
-OTIO has no audio mix model. Other tools' files therefore come in at unity gain, centred, and the
-report says so.
+Files with neither our metadata nor gain effects come in at unity gain, centred, and the report says
+so.
 
 **Verification:** `crates/vcsd-core/tests/otio_import.rs` round-trips an OTIO export, with no
 library needed. The imported mix matches the original to within 1e-5 per sample, and the
@@ -185,6 +191,11 @@ library in an editor's layout (`scripts/otio/make_fixture.py`) and checks the fo
 - a moved AIFF found by name and byte-swapped correctly;
 - a nested stack trimmed to its range;
 - a missing reference reported, and the timeline and clip markers.
+
+Levels are checked two ways, each within 0.25 dB at 201 points of the automated clip:
+- our export with its `metadata.vcsd` stripped, read from the gain effects alone;
+- our AAF converted to OTIO by the OpenTimelineIO AAF adapter, then imported. The fader folded
+  into clip gain comes back as −9 dB.
 
 ## AAF import
 

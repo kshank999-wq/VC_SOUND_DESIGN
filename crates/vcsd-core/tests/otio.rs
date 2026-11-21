@@ -82,7 +82,7 @@ fn otio_rebuilds_the_timeline_in_opentimelineio() {
     let losses: Vec<&str> = rep["losses"].as_array().unwrap().iter().filter_map(|l| l.as_str()).collect();
     assert!(losses.iter().any(|l| l.starts_with("muted tracks left out (1)")), "{losses:?}");
     assert!(losses.iter().any(|l| l.starts_with("overlapping clips split onto extra tracks (1)")), "{losses:?}");
-    assert!(losses.iter().any(|l| l.contains("metadata only (OTIO has no audio mix model)")), "{losses:?}");
+    assert!(losses.iter().any(|l| l.starts_with("pan and pan automation carried as metadata only")), "{losses:?}");
     assert!(r.qa.iter().any(|q| q.code == "otio_loss"));
     let readme = std::fs::read_to_string(r.dir.join("README.md")).unwrap();
     assert!(readme.contains("same timeline as OpenTimelineIO") && readme.contains("`OTIO/Media/`"), "{readme}");
@@ -146,6 +146,46 @@ fn otio_rebuilds_the_timeline_in_opentimelineio() {
     assert_eq!(meta["volume_db"], serde_json::json!([[2 * sr - start, 0.0], [3 * sr - start, -20.0]]));
     let wind = tracks.iter().find(|t| t["name"].as_str().unwrap().contains("wind")).unwrap();
     assert_eq!(wind["metadata"]["vcsd"]["channels"], 2, "a stereo track is one OTIO track");
+    assert_eq!(wind["effects"], serde_json::json!([]), "no level effect at unity");
+
+    // levels as AAF-style gain effects (the OpenTimelineIO AAF adapter's encoding)
+    let ce = &items[k]["effects"][0];
+    assert_eq!(
+        (ce["name"].as_str(), ce["parameters"]["Amplitude"].as_str()),
+        (Some("Mono Audio Gain"), Some("501187/1000000")),
+        "clip −6 dB"
+    );
+    let te = &layer["effects"];
+    assert_eq!(te.as_array().unwrap().len(), 1);
+    assert_eq!(te[0]["name"], "Mono Audio Gain");
+    let amp = &te[0]["parameters"]["Amplitude"];
+    assert_eq!((amp["_aaf_keyframed_property"].as_bool(), amp["keyframe_interpolation"].as_str()), (Some(true), Some("Linear")));
+    let kf: Vec<(f64, f64)> =
+        amp["keyframe_values"].as_array().unwrap().iter().map(|k| (k[0].as_f64().unwrap(), k[1].as_f64().unwrap())).collect();
+    let at = |u: f64| {
+        let i = kf.partition_point(|p| p.0 <= u);
+        let (a, b) = (kf[i.saturating_sub(1)], kf[i.min(kf.len() - 1)]);
+        if b.0 > a.0 {
+            a.1 + (b.1 - a.1) * (u - a.0) / (b.0 - a.0)
+        } else {
+            a.1
+        }
+    };
+    // against the mixer: the −3 dB fader on top of the lane (0 → −20 dB from 2 s to 3 s, in dB)
+    let len = (end - start) as f64;
+    for k in 0..=400 {
+        let x = start + (k as f64 / 400.0 * (len - 1.0)) as i64;
+        let lane = if x <= 2 * sr {
+            0.0
+        } else if x >= 3 * sr {
+            -20.0
+        } else {
+            -20.0 * (x - 2 * sr) as f64 / sr as f64
+        };
+        let want = -3.0 + lane;
+        let got = 20.0 * at((x - start) as f64 / len).log10();
+        assert!((got - want).abs() < 0.12, "volume at {x}: {got:.3} dB vs {want:.3} dB");
+    }
 
     // cues → timeline markers
     let markers = v["markers"].as_array().unwrap();

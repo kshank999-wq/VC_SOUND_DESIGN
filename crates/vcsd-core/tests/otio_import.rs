@@ -116,7 +116,7 @@ fn an_editors_otio_imports_clips_transitions_nesting_media_and_markers() {
     assert_eq!(rep.start_tc, "10:00:00:00");
     assert_eq!(rep.missing_media.len(), 1, "{:?}", rep.missing_media);
     assert!(rep.missing_media[0].contains("missing reference"), "{:?}", rep.missing_media);
-    assert!(rep.notes.iter().any(|n| n.starts_with("levels, pan and automation aren't in OTIO")), "{:?}", rep.notes);
+    assert!(rep.notes.iter().any(|n| n.starts_with("no levels or pan in the OTIO")), "{:?}", rep.notes);
     assert_eq!(rep.markers, 2, "the timeline marker and the clip marker");
     let st = &s.state;
     let f = 1920; // samples per frame at 25 fps
@@ -167,4 +167,132 @@ fn an_editors_otio_imports_clips_transitions_nesting_media_and_markers() {
     let rep = s2.edit("i", |st| import(st, &file, &o)).unwrap();
     assert!(rep.notes.iter().any(|n| n.starts_with("markers outside every scene")), "{:?}", rep.notes);
     assert!(s2.state.clips.values().any(|c| c.timeline_start == 1025 * f));
+}
+
+/// A project with one automated glass clip: clip −6 dB, fader −3 dB, a dip to −18 dB.
+fn levels_project(name: &str) -> (state::Session, std::path::PathBuf, i64) {
+    let (mut s, root) = session(name, "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let id = st.clips.values().find(|c| !c.muted).unwrap().id.clone();
+    let c = st.clips.get_mut(&id).unwrap();
+    c.fill = FillMode::OneShot;
+    c.gain_db = -6.0;
+    let (t0, tid) = (c.timeline_start, c.track_id.clone());
+    st.tracks.get_mut(&tid).unwrap().gain_db = -3.0;
+    for (dx, db) in [(0, 0.0), (sr / 4, -18.0), (sr / 2, 0.0)] {
+        editing::set_automation(st, &tid, AutomationParam::VolumeDb, t0 + dx, db).unwrap();
+    }
+    (s, root, t0)
+}
+
+/// What a track plays at `x`, in dB: clip gain + fader + volume lane (held at its ends).
+fn level_at(st: &ProjectState, clip: &ClipInstance, x: i64) -> f64 {
+    let t = &st.tracks[&clip.track_id];
+    let mut lane: Vec<(i64, f32)> = st
+        .automation
+        .values()
+        .filter(|p| p.owner_id == t.id && p.param == AutomationParam::VolumeDb)
+        .map(|p| (p.sample, p.value))
+        .collect();
+    lane.sort_by_key(|p| p.0);
+    let v = if lane.is_empty() {
+        0.0
+    } else {
+        let i = lane.partition_point(|p| p.0 <= x);
+        let (a, b) = (lane[i.saturating_sub(1)], lane[i.min(lane.len() - 1)]);
+        if b.0 > a.0 {
+            a.1 as f64 + (b.1 - a.1) as f64 * (x - a.0) as f64 / (b.0 - a.0) as f64
+        } else {
+            a.1 as f64
+        }
+    };
+    clip.gain_db as f64 + t.gain_db as f64 + v
+}
+
+fn same_levels(a: &ProjectState, b: &ProjectState, t0: i64, tol: f64) {
+    let ca = a.clips.values().find(|c| c.timeline_start == t0 && !c.muted).unwrap();
+    let cb = b.clips.values().find(|c| c.timeline_start == t0 && c.length == ca.length).expect("the clip, in place");
+    for k in 0..=200 {
+        let x = t0 + ca.length * k / 200;
+        let (wa, wb) = (level_at(a, ca, x), level_at(b, cb, x));
+        assert!((wa - wb).abs() < tol, "level at {x}: {wb:.3} dB imported vs {wa:.3} dB");
+    }
+}
+
+/// Remove every `vcsd` key (our own metadata), as a tool that drops unknown metadata would.
+fn strip_vcsd(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(m) => {
+            m.remove("vcsd");
+            m.values_mut().for_each(strip_vcsd);
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(strip_vcsd),
+        _ => {}
+    }
+}
+
+#[test]
+fn levels_come_back_from_gain_effects_alone() {
+    let (mut s, root, t0) = levels_project("otiolevels");
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-21");
+    o.otio = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let file = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    strip_vcsd(&mut v);
+    let bare = file.with_file_name("bare.otio");
+    std::fs::write(&bare, serde_json::to_string(&v).unwrap()).unwrap();
+
+    let (mut s2, root2) = session("otiolevels2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &bare, &OtioImportOptions::for_project(&root2, &bare))).unwrap();
+    assert!(!rep.notes.iter().any(|n| n.starts_with("no levels")), "{:?}", rep.notes);
+    assert_eq!(rep.automated_tracks, 1);
+    let c = s2.state.clips.values().find(|c| c.timeline_start == t0).unwrap();
+    assert!((c.gain_db + 6.0).abs() < 0.001, "clip gain from its effect: {}", c.gain_db);
+    // fader × lane, through linear-amplitude keyframes and back to a dB lane
+    same_levels(&s.state, &s2.state, t0, 0.25);
+}
+
+#[test]
+fn levels_come_back_from_an_aaf_converted_by_the_opentimelineio_aaf_adapter() {
+    let Some(py) = python() else {
+        eprintln!("SKIPPED: OpenTimelineIO not installed");
+        return;
+    };
+    let has_adapter =
+        std::process::Command::new(&py).args(["-c", "import otio_aaf_adapter"]).output().map(|o| o.status.success()).unwrap_or(false);
+    if !has_adapter {
+        eprintln!("SKIPPED: the OpenTimelineIO AAF adapter isn't installed (python3 -m pip install otio-aaf-adapter==2.0.0)");
+        return;
+    }
+    let (mut s, root, t0) = levels_project("otioadapter");
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-21");
+    o.aaf = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+    let otio = r.dir.join("from_aaf.otio");
+    let conv = "import sys, opentimelineio as otio\n\
+                tl = otio.adapters.read_from_file(sys.argv[1], adapter_name='AAF', simplify=True)\n\
+                otio.adapters.write_to_file(tl, sys.argv[2])";
+    let out = std::process::Command::new(&py).args(["-c", conv]).arg(&aaf).arg(&otio).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let (mut s2, root2) = session("otioadapter2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &otio, &OtioImportOptions::for_project(&root2, &otio))).unwrap();
+    assert!(rep.missing_media.is_empty(), "{:?}", rep.missing_media);
+    assert!(!rep.notes.iter().any(|n| n.starts_with("no levels")), "{:?}", rep.notes);
+    assert_eq!(rep.start_tc, "01:00:00:00");
+    // the AAF folds the fader into clip gain (−9 dB); the lane is the track's gain effect
+    let c = s2.state.clips.values().find(|c| c.timeline_start == t0).expect("the clip, in place");
+    assert!((c.gain_db + 9.0).abs() < 0.01, "{}", c.gain_db);
+    // two 0.1 dB fits (AAF out, OTIO in) between the lanes
+    same_levels(&s.state, &s2.state, t0, 0.25);
 }
