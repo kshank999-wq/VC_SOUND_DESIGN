@@ -57,6 +57,8 @@ def build(path):
         gain["Bypass"].value = 1
         gain["ParametersDefined"].append(amp)
         f.dictionary.register_def(gain)
+        # volume automation: Amplitude as a VaryingValue, linear between control points
+        f.dictionary.register_def(f.create.InterpolationDef("5b6c85a4-0ede-11d3-80a9-006008143e6f", "LinearInterp", ""))
 
         master = create_media_link(f, src, meta)[0]  # (master, source, tape)
         comp = f.create.CompositionMob("template")
@@ -84,7 +86,21 @@ def build(path):
             og["Parameters"].append(p)
             seq.components.append(og)
             seq.length = 1100
-            slot.segment = seq
+            if ch == 1:
+                slot.segment = seq
+            else:
+                # track-level volume automation: the track's sequence inside a gain
+                # operation whose Amplitude varies over time
+                auto = f.create.OperationGroup(gain, 1100, "sound")
+                auto["InputSegments"].append(seq)
+                vv = f.create.VaryingValue(amp, "LinearInterp")
+                for t, v in ((0, 1), (0.5, 0.25), (1, 1)):
+                    cp = f.create.ControlPoint()
+                    cp["Time"].value = aaf2.rational.AAFRational(t)
+                    cp["Value"].value = aaf2.rational.AAFRational(v)
+                    vv["PointList"].append(cp)
+                auto["Parameters"].append(vv)
+                slot.segment = auto
 
         ev = f.create.EventMobSlot()
         ev["SlotID"].value = 100

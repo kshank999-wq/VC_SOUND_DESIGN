@@ -88,20 +88,22 @@ content.
 | Stereo tracks | Two mono tracks (L/R); stereo media is linked per channel |
 | Clip gain (+ static track fader, folded in) | Mono Audio Gain `OperationGroup`, constant Amplitude |
 | Linear fades in/out | `SourceClip` FadeIn/FadeOut length and type |
+| Track volume automation | Mono Audio Gain around the track with a `VaryingValue` Amplitude: linear control points at exact rational times, split until amplitude-linear interpolation matches the app's dB ramps within 0.1 dB |
 | Overlapping clips | Extra tracks ("Name (2)") |
 | Looped clips | Butt-spliced repeats of the loop span |
 | Cue markers | `CommentMarker`s ("code description") on an event track |
 | Start timecode, frame rate, drop frame | Timecode track |
 
 **Not carried** (listed in `AAF/aaf_report.json`, the README and delivery QA; all of it is in the
-rendered audio): volume/pan/plugin automation, pan, inserts and plugins, bus routing and bus
-gain, loop crossfades, muted tracks and clips (left out), and the right channel of stereo
+rendered audio): track pan automation, bus and master automation, plugin parameter
+automation, pan, inserts and plugins, bus routing and bus gain, loop crossfades, muted tracks and clips (left out), and the right channel of stereo
 sources on mono tracks. Media is copied into `AAF/Media/` (converted to the project rate when it
 differs) and linked by absolute `file://` URL.
 
 **Verification:** `crates/vcsd-core/tests/aaf.rs` reads every exported file back with pyaaf2
 (`scripts/aaf/inspect.py`). It walks every object and checks clips, sources, fades, gain, media
-links, layers, trimming, timecode and markers against the project. It has not been opened in
+links, layers, trimming, timecode and markers against the project. It also checks that the
+volume curve matches the project's lane within 0.12 dB at 400 points. It has not been opened in
 DaVinci Resolve, Pro Tools or Media Composer yet. Pinning a Resolve version and recording its
 feature matrix is the next step.
 
@@ -186,5 +188,6 @@ feature matrix is the next step.
 2. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
 3. **Distribution:** cloud-HSM Windows signing (`signCommand`), a beta update channel, and delta updates.
 4. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).
-5. **Interchange:** open the AAF export in a pinned Resolve/Fairlight version (and Pro Tools), record the feature matrix, then consider volume automation as AAF `VaryingValue` gain and OTIO.
+5. **Interchange:** open the AAF export in a pinned Resolve/Fairlight version (and Pro Tools), record the feature matrix (volume automation especially: hosts differ in whether they read
+track-level gain operations), then OTIO.
 6. **AI:** optical-flow or pose models for footfall detection behind the existing trait, plus an opt-in cloud provider with consent and retention controls.

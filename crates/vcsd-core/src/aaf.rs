@@ -9,6 +9,8 @@
 //!   linked external WAV media (Avid AMA-style master → file → import mobs),
 //!   with linear fades and clip gain (track fader folded in) as the standard
 //!   Mono Audio Gain effect;
+//! - track volume automation as a time-varying Mono Audio Gain around the
+//!   track (Amplitude `VaryingValue`, linear control points);
 //! - cue markers (`CommentMarker`s with code and description).
 //!
 //! The fixed parts of the file — the meta-dictionary (class and type
@@ -16,7 +18,7 @@
 //! definitions) — come from `assets/aaf_template.aaf`, generated with pyaaf2
 //! by `scripts/aaf/make_template.py`. Everything else is written here.
 //!
-//! What AAF can't carry (automation, pan, bus routing, plugins, loop
+//! What AAF can't carry (pan/bus/plugin automation, pan, bus routing, plugins, loop
 //! crossfades, mutes…) is listed in the [`AafReport`]: the rendered stems in
 //! the same package include all of it.
 
@@ -46,6 +48,8 @@ mod class {
     pub const TIMECODE: &str = "0d010101-0101-1400-060e-2b3402060101";
     pub const OPERATION_GROUP: &str = "0d010101-0101-0a00-060e-2b3402060101";
     pub const CONSTANT_VALUE: &str = "0d010101-0101-3d00-060e-2b3402060101";
+    pub const VARYING_VALUE: &str = "0d010101-0101-3e00-060e-2b3402060101";
+    pub const CONTROL_POINT: &str = "0d010101-0101-1900-060e-2b3402060101";
     pub const COMMENT_MARKER: &str = "0d010101-0101-0800-060e-2b3402060101";
     pub const WAVE_DESCRIPTOR: &str = "0d010101-0101-2c00-060e-2b3402060101";
     pub const IMPORT_DESCRIPTOR: &str = "0d010101-0101-4a00-060e-2b3402060101";
@@ -61,6 +65,7 @@ mod key {
     pub const OP_MONO_AUDIO_GAIN: &str = "94a82e9d6809d3118a380050040ef7d2";
     pub const PARAM_AMPLITUDE: &str = "212396e46722d3118a4c0050040ef7d2";
     pub const TYPE_RATIONAL: &str = "0001010300000000060e2b3401040101";
+    pub const INTERP_LINEAR: &str = "a4856c5bde0ed31180a9006008143e6f";
 }
 
 /// Dictionary sets that weak references point into (property id under Dictionary-3b04).
@@ -69,6 +74,7 @@ enum Defs {
     Data = 0x2605,
     Operation = 0x2603,
     Container = 0x2608,
+    Interpolation = 0x2609,
 }
 
 fn hex(s: &str) -> Vec<u8> {
@@ -370,6 +376,8 @@ pub struct AafReport {
     pub media_files: usize,
     /// Each kind of loss once, with how often it applies.
     pub losses: Vec<String>,
+    /// Tracks whose volume automation is in the AAF (as time-varying track gain).
+    pub automated_tracks: usize,
 }
 
 /// RIFF header + `fmt ` chunk of a WAV (the WAVEDescriptor `Summary`).
@@ -517,26 +525,108 @@ fn piece_obj(p: &Piece, master: &[u8], channel: u32) -> Obj {
     if (p.gain - 1.0).abs() < 1e-6 {
         return clip;
     }
-    // clip gain: Mono Audio Gain with a constant Amplitude (indirect Rational value)
-    let den = 1_000_000i32;
-    let mut value = vec![0x4c];
-    value.extend(hex(key::TYPE_RATIONAL));
-    value.extend(rational((p.gain as f64 * den as f64).round().clamp(0.0, i32::MAX as f64) as i32, den));
-    Obj::new(class::OPERATION_GROUP)
-        .weak(0x0201, "DataDefinition", Defs::Data, key::SOUND)
-        .data(0x0202, "Length", i64v(p.len))
-        .weak(0x0b01, "Operation", Defs::Operation, key::OP_MONO_AUDIO_GAIN)
-        .vector(0x0b02, "InputSegments", vec![clip])
-        .with_param(value)
+    // clip gain: Mono Audio Gain with a constant Amplitude
+    let cv = Obj::new(class::CONSTANT_VALUE).data(0x4c01, "Definition", hex(key::PARAM_AMPLITUDE)).data(
+        0x4d01,
+        "Value",
+        amplitude(p.gain as f64),
+    );
+    gain_group(p.len, clip, cv)
 }
 
-impl Obj {
-    /// The operation's Amplitude parameter (a set keyed by parameter definition).
-    fn with_param(mut self, value: Vec<u8>) -> Obj {
-        let cv = Obj::new(class::CONSTANT_VALUE).data(0x4c01, "Definition", hex(key::PARAM_AMPLITUDE)).data(0x4d01, "Value", value);
-        self.props.push((0x0b03, "Parameters", Val::Set { key_pid: 0x4c01, items: vec![(hex(key::PARAM_AMPLITUDE), cv)] }));
-        self
+/// An indirect Rational amplitude value (linear gain).
+fn amplitude(g: f64) -> Vec<u8> {
+    let den = 1_000_000i32;
+    let mut v = vec![0x4c];
+    v.extend(hex(key::TYPE_RATIONAL));
+    v.extend(rational((g * den as f64).round().clamp(0.0, i32::MAX as f64) as i32, den));
+    v
+}
+
+/// `input` inside a Mono Audio Gain operation with Amplitude `param`
+/// (a ConstantValue or a VaryingValue).
+fn gain_group(len: i64, input: Obj, param: Obj) -> Obj {
+    let mut g = Obj::new(class::OPERATION_GROUP)
+        .weak(0x0201, "DataDefinition", Defs::Data, key::SOUND)
+        .data(0x0202, "Length", i64v(len))
+        .weak(0x0b01, "Operation", Defs::Operation, key::OP_MONO_AUDIO_GAIN)
+        .vector(0x0b02, "InputSegments", vec![input]);
+    g.props.push((0x0b03, "Parameters", Val::Set { key_pid: 0x4c01, items: vec![(hex(key::PARAM_AMPLITUDE), param)] }));
+    g
+}
+
+/// Lane value in dB at `s` (linear between breakpoints, held at the ends), as the mixer plays it.
+fn lane_db(pts: &[(i64, f32)], s: i64) -> f64 {
+    let i = pts.partition_point(|p| p.0 <= s);
+    let v = match (i.checked_sub(1).map(|k| pts[k]), pts.get(i)) {
+        (Some(a), Some(b)) => a.1 + (b.1 - a.1) * ((s - a.0) as f32 / (b.0 - a.0).max(1) as f32),
+        (Some(a), None) => a.1,
+        (None, Some(b)) => b.1,
+        (None, None) => 0.0,
+    };
+    v as f64
+}
+
+/// The mixer's gain for a lane value: −96 dB and below is silence.
+fn db_amp(db: f64) -> f64 {
+    if db <= -96.0 {
+        0.0
+    } else {
+        10f64.powf(db / 20.0)
     }
+}
+
+/// Control points `(offset, amplitude)` over `[start, end)` for a dB volume lane.
+/// AAF interpolates linearly in amplitude while the mixer ramps in dB, so
+/// segments are split until the two agree within 0.1 dB (or 0.001 absolute
+/// near silence).
+pub(crate) fn volume_points(pts: &[(i64, f32)], start: i64, end: i64) -> Vec<(i64, f64)> {
+    let last = end - 1;
+    let mut keys = vec![start];
+    keys.extend(pts.iter().map(|p| p.0).filter(|&t| t > start && t < last));
+    keys.push(last);
+    keys.dedup();
+    let amp = |t: i64| db_amp(lane_db(pts, t));
+    fn split(a: i64, b: i64, amp: &dyn Fn(i64) -> f64, out: &mut Vec<(i64, f64)>, depth: u32) {
+        if b - a > 1 && depth < 12 {
+            let m = a + (b - a) / 2;
+            let (va, vb, vm) = (amp(a), amp(b), amp(m));
+            let lin = va + (vb - va) * (m - a) as f64 / (b - a) as f64;
+            let off = if vm > 0.001 && lin > 0.001 { (20.0 * (lin / vm).log10()).abs() > 0.1 } else { (lin - vm).abs() > 0.001 };
+            if off {
+                split(a, m, amp, out, depth + 1);
+                split(m, b, amp, out, depth + 1);
+                return;
+            }
+        }
+        out.push((b, amp(b)));
+    }
+    let mut out = vec![(start, amp(start))];
+    for w in keys.windows(2) {
+        split(w[0], w[1], &amp, &mut out, 0);
+    }
+    out
+}
+
+/// A track's sequence inside a gain operation that follows its volume lane.
+fn automated(len: i64, start: i64, seq: Obj, points: &[(i64, f64)]) -> Obj {
+    let cps = points
+        .iter()
+        .map(|&(t, g)| {
+            let rel = t - start;
+            let time = if len <= i32::MAX as i64 {
+                rational(rel as i32, len as i32)
+            } else {
+                rational((rel as f64 / len as f64 * 1e9) as i32, 1_000_000_000)
+            };
+            Obj::new(class::CONTROL_POINT).data(0x1a03, "Time", time).data(0x1a02, "Value", amplitude(g))
+        })
+        .collect();
+    let vv = Obj::new(class::VARYING_VALUE)
+        .data(0x4c01, "Definition", hex(key::PARAM_AMPLITUDE))
+        .weak(0x4e01, "Interpolation", Defs::Interpolation, key::INTERP_LINEAR)
+        .vector(0x4e02, "PointList", cps);
+    gain_group(len, seq, vv)
 }
 
 /// What to export and how to name it.
@@ -632,8 +722,10 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     let mut masters: BTreeMap<String, MobId> = BTreeMap::new();
 
     // ---- what the timeline can't hold
-    let auto_pts = s.automation.len();
-    losses.add("volume/pan/plugin automation points not carried (rendered in stems and mix)", auto_pts);
+    let n_auto = |f: &dyn Fn(&AutomationPoint) -> bool| s.automation.values().filter(|p| f(p)).count();
+    losses.add("track pan automation not carried", n_auto(&|p| p.param == AutomationParam::Pan && s.tracks.contains_key(&p.owner_id)));
+    losses.add("bus and master volume/balance automation not carried", n_auto(&|p| s.buses.contains_key(&p.owner_id)));
+    losses.add("plugin parameter automation not carried", n_auto(&|p| matches!(p.param, AutomationParam::Plugin(_))));
     let panned = s.tracks.values().filter(|t| t.pan.abs() > 0.001).count();
     losses.add("track pan not carried", panned);
     let inserts = s.tracks.values().map(|t| t.inserts.len()).chain(s.buses.values().map(|b| b.inserts.len())).sum();
@@ -645,7 +737,8 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     // ---- tracks → slots of pieces
     let mut tracks: Vec<&Track> = s.tracks.values().collect();
     tracks.sort_by(|a, b| (&a.folder, a.order, &a.name).cmp(&(&b.folder, b.order, &b.name)));
-    let mut audio_slots: Vec<(String, u32, Vec<Piece>)> = vec![]; // (name, source channel, pieces)
+    // (name, source channel, pieces, owning track)
+    let mut audio_slots: Vec<(String, u32, Vec<Piece>, String)> = vec![];
     let mut clip_count = 0;
     for t in tracks {
         if t.mute {
@@ -702,13 +795,13 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                 if li > 0 {
                     name.push_str(&format!(" ({})", li + 1));
                 }
-                audio_slots.push((name, ch, lane.clone()));
+                audio_slots.push((name, ch, lane.clone(), t.id.clone()));
             }
         }
     }
 
     // ---- media mobs for the assets in use
-    for (_, _, pieces) in &audio_slots {
+    for (_, _, pieces, _) in &audio_slots {
         for p in pieces {
             if !masters.contains_key(&p.asset) {
                 let (id, ms) = link_media(&media[&p.asset], now)?;
@@ -729,7 +822,24 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         .data(0x1502, "FPS", u16v(fr.nominal() as u16))
         .data(0x1503, "Drop", u8v(fr.drop_frame as u8));
     let mut slots = vec![slot(1, "TC1", (fr.num as i32, fr.den as i32), tc)];
-    for (i, (name, ch, pieces)) in audio_slots.iter().enumerate() {
+    // track volume lanes → control points over the range
+    let mut volume: BTreeMap<String, Vec<(i64, f64)>> = BTreeMap::new();
+    for (_, _, _, tid) in &audio_slots {
+        if volume.contains_key(tid) {
+            continue;
+        }
+        let mut pts: Vec<(i64, f32)> = s
+            .automation
+            .values()
+            .filter(|p| &p.owner_id == tid && p.param == AutomationParam::VolumeDb)
+            .map(|p| (p.sample, p.value))
+            .collect();
+        if !pts.is_empty() {
+            pts.sort_by_key(|p| p.0);
+            volume.insert(tid.clone(), volume_points(&pts, start, end));
+        }
+    }
+    for (i, (name, ch, pieces, tid)) in audio_slots.iter().enumerate() {
         let mut items = vec![];
         let mut at = start;
         for p in pieces {
@@ -743,7 +853,11 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         if end > at {
             items.push(filler(end - at));
         }
-        let mut sl = slot(i as u32 + 2, name, (sr, 1), sequence(key::SOUND, len, items));
+        let mut seq = sequence(key::SOUND, len, items);
+        if let Some(points) = volume.get(tid) {
+            seq = automated(len, start, seq, points);
+        }
+        let mut sl = slot(i as u32 + 2, name, (sr, 1), seq);
         sl.props.push((0x4804, "PhysicalTrackNumber", Val::Data(u32v(i as u32 + 1))));
         slots.push(sl);
     }
@@ -781,6 +895,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         clips: clip_count,
         markers,
         media_files: masters.len(),
+        automated_tracks: volume.len(),
         losses: losses.list(),
     };
     let content = Obj { class: class::CONTENT_STORAGE, props: vec![(0x1901, "Mobs", Val::Set { key_pid: 0x4401, items: mobs })] };
@@ -842,6 +957,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn db_ramps_become_amplitude_points_within_a_tenth_of_a_db() {
+        // 0 dB → −40 dB over one second, then held; −96 is silence
+        let lane = [(48_000i64, 0.0f32), (96_000, -40.0), (150_000, -96.0)];
+        let pts = volume_points(&lane, 0, 200_000);
+        assert_eq!(pts.first().unwrap(), &(0, 1.0), "held before the first breakpoint");
+        assert_eq!(pts.last().unwrap().1, 0.0, "silence at the end");
+        assert!(pts.iter().any(|p| p.0 == 48_000) && pts.iter().any(|p| p.0 == 96_000), "breakpoints kept");
+        assert!(pts.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(pts.len() > 8 && pts.len() < 200, "ramp densified, not oversampled: {}", pts.len());
+        // amplitude-linear interpolation between the points matches the dB-linear lane
+        for t in (0..150_000).step_by(997) {
+            let i = pts.partition_point(|p| p.0 <= t) - 1;
+            let (a, b) = (pts[i], pts[(i + 1).min(pts.len() - 1)]);
+            let lin = if b.0 > a.0 { a.1 + (b.1 - a.1) * (t - a.0) as f64 / (b.0 - a.0) as f64 } else { a.1 };
+            let want = db_amp(lane_db(&lane, t));
+            if want > 0.01 {
+                assert!((20.0 * (lin / want).log10()).abs() < 0.11, "t={t}: {lin} vs {want}");
+            } else {
+                assert!((lin - want).abs() < 0.0011, "t={t}");
+            }
+        }
+        // a lane with one point: a flat level
+        assert!(volume_points(&[(10, -6.0)], 0, 100).iter().all(|p| p.1 == db_amp(-6.0)));
+    }
+
+    #[test]
     fn names_and_encodings_match_pyaaf2() {
         assert_eq!(mangle("Segment", 0x4803, 32), "Segment-4803");
         assert_eq!(mangle("EssenceDescription", 0x4701, 32), "EssenceDescription-4701");
@@ -860,7 +1001,7 @@ mod tests {
     fn template_has_every_definition_we_reference() {
         let mut cf = cfb::CompoundFile::open(Cursor::new(TEMPLATE)).unwrap();
         let t = weak_table(&mut cf).unwrap();
-        for d in [Defs::Data, Defs::Operation, Defs::Container] {
+        for d in [Defs::Data, Defs::Operation, Defs::Container, Defs::Interpolation] {
             assert!(t.iter().any(|p| p.as_slice() == [2, 0x3b04, d as u16]));
         }
         // class ids read back as pyaaf2 prints them

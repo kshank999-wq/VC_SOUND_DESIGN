@@ -599,8 +599,9 @@ not as editable Fairlight timeline objects."
             .to_string(),
         Some(r) => format!(
             "`{file}` holds the editable timeline: {tracks} mono tracks (stereo tracks as L/R pairs), {clips} clips\n\
-with source offsets, linear fades and clip gain (track fader folded in), {markers} cue markers and a\n\
-timecode track starting at the range start. Clips link to the WAVs in `AAF/Media/` by absolute path;\n\
+with source offsets, linear fades and clip gain (track fader folded in), track volume automation\n\
+as time-varying track gain ({automated} tracks), {markers} cue markers and a timecode track starting\n\
+at the range start. Clips link to the WAVs in `AAF/Media/` by absolute path;\n\
 if the package has moved, relink to that folder (file names are unique).\n\n\
 Checked with an independent AAF reader (pyaaf2); not yet verified in a specific Resolve/Fairlight\n\
 version, so treat it as a convenience and the rendered stems/mix as the reference.\n\n\
@@ -610,6 +611,7 @@ Full details: `AAF/aaf_report.json`.",
             tracks = r.tracks,
             clips = r.clips,
             markers = r.markers,
+            automated = r.automated_tracks,
             losses = r.losses.iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n"),
         ),
     };

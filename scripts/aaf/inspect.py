@@ -93,6 +93,19 @@ def main(path):
             for m in seg.components:
                 out["markers"].append({"position": m["Position"].value, "comment": m["Comment"].value, "kind": m.classdef.class_name})
         else:
+            volume = None
+            if seg.classdef.class_name == "OperationGroup":
+                # track-level gain automation around the track's sequence
+                params = [p for _, p in seg["Parameters"].items()]
+                vv = params[0]
+                assert vv.classdef.class_name == "VaryingValue", vv.classdef.class_name
+                volume = {
+                    "operation": seg.operation.name,
+                    "interpolation": vv["Interpolation"].value.name,
+                    "points": [[float(cp["Time"].value), float(cp["Value"].value)] for cp in vv["PointList"]],
+                }
+                assert seg.length == seg.segments[0].length
+                seg = seg.segments[0]
             comps_ = [component(c) for c in seg.components]
             assert sum(c["length"] for c in comps_) == seg.length, "sequence length is the sum of its parts"
             out["tracks"].append({
@@ -101,6 +114,7 @@ def main(path):
                 "edit_rate": rational(slot.edit_rate),
                 "track": slot["PhysicalTrackNumber"].value if "PhysicalTrackNumber" in slot else None,
                 "length": seg.length,
+                "volume": volume,
                 "components": comps_,
             })
     print(json.dumps(out, indent=1))

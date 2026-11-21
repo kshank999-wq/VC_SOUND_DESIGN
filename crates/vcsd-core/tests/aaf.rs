@@ -56,6 +56,13 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
     let door_track = st.clips.values().find(|c| c.cue_id.as_deref() == Some(door_cue.as_str())).unwrap().track_id.clone();
     st.tracks.get_mut(&door_track).unwrap().mute = true;
     st.tracks.get_mut(&glass_track).unwrap().gain_db = -6.0; // folded into clip gain
+                                                             // volume automation on the glass track: a dip from 0 to −20 dB and back
+    let sr0 = st.project.sample_rate as i64;
+    for (t, v) in [(2 * sr0, 0.0f32), (3 * sr0, -20.0), (4 * sr0, 0.0)] {
+        editing::set_automation(st, &glass_track, AutomationParam::VolumeDb, t, v).unwrap();
+    }
+    // pan automation elsewhere is reported, not carried
+    editing::set_automation(st, &door_track, AutomationParam::Pan, sr0, 0.5).unwrap();
 
     let sr = st.project.sample_rate as i64;
     let start = sr; // from 01:00:01:00: clips before it are trimmed
@@ -68,6 +75,13 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
     assert!(rep.losses.iter().any(|l| l.starts_with("muted tracks left out (1)")), "{:?}", rep.losses);
     assert!(rep.losses.iter().any(|l| l.starts_with("overlapping clips split")), "{:?}", rep.losses);
     assert!(rep.losses.iter().any(|l| l.starts_with("track fader gain folded")), "{:?}", rep.losses);
+    assert!(rep.losses.iter().any(|l| l.starts_with("track pan automation not carried (1)")), "{:?}", rep.losses);
+    assert!(
+        !rep.losses.iter().any(|l| l.contains("volume") && l.contains("track ")),
+        "track volume automation is carried: {:?}",
+        rep.losses
+    );
+    assert_eq!(rep.automated_tracks, 1);
 
     let v = inspect(&py, &file);
     assert_eq!(v["product"], "VC Sound Design");
@@ -111,6 +125,51 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
         path = path.trim_start_matches('/').to_string(); // file:///C:/…
     }
     assert!(Path::new(&path).exists(), "linked media exists: {url}");
+    // the volume lane: on every layer/channel of that track, linear control points over the
+    // range that reproduce the mixer's dB ramp within 0.1 dB; other tracks have none
+    let lane: Vec<(i64, f32)> = {
+        let mut v: Vec<(i64, f32)> = s
+            .state
+            .automation
+            .values()
+            .filter(|p| p.owner_id == glass_track && p.param == AutomationParam::VolumeDb)
+            .map(|p| (p.sample, p.value))
+            .collect();
+        v.sort_by_key(|p| p.0);
+        v
+    };
+    let db_at = |t: i64| {
+        let i = lane.partition_point(|p| p.0 <= t);
+        let v = match (i.checked_sub(1).map(|k| lane[k]), lane.get(i)) {
+            (Some(a), Some(b)) => a.1 + (b.1 - a.1) * ((t - a.0) as f32 / (b.0 - a.0) as f32),
+            (Some(a), None) => a.1,
+            (None, Some(b)) => b.1,
+            _ => 0.0,
+        };
+        v as f64
+    };
+    for t in tracks {
+        let mine = t["name"].as_str().unwrap().starts_with(&gtrack.name);
+        assert_eq!(!t["volume"].is_null(), mine, "{}", t["name"]);
+        if !mine {
+            continue;
+        }
+        assert_eq!(t["volume"]["operation"], "Mono Audio Gain");
+        assert_eq!(t["volume"]["interpolation"], "LinearInterp");
+        let pts: Vec<(f64, f64)> =
+            t["volume"]["points"].as_array().unwrap().iter().map(|p| (p[0].as_f64().unwrap(), p[1].as_f64().unwrap())).collect();
+        assert_eq!(pts.first().unwrap().0, 0.0);
+        let span = (end - start) as f64;
+        for k in 0..400 {
+            let rel = k as f64 / 400.0 * (span - 2.0) / span;
+            let i = pts.partition_point(|p| p.0 <= rel) - 1;
+            let (a, b) = (pts[i], pts[(i + 1).min(pts.len() - 1)]);
+            let g = if b.0 > a.0 { a.1 + (b.1 - a.1) * (rel - a.0) / (b.0 - a.0) } else { a.1 };
+            let want = db_at(start + (rel * span).round() as i64);
+            assert!((20.0 * g.log10() - want).abs() < 0.12, "at {rel:.3}: {:.2} dB vs {want:.2} dB", 20.0 * g.log10());
+        }
+    }
+
     // the overlap went to a second layer of the same track
     assert!(tracks.iter().any(|t| t["name"].as_str().unwrap().starts_with(&gtrack.name) && t["name"].as_str().unwrap().ends_with("(2)")));
     // the muted door track isn't there
