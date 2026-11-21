@@ -30,3 +30,14 @@ test("formatting", () => {
   assert.equal(formatValue("pan", -0.3), "L 30");
   assert.equal(formatValue("pan", 1), "R 100");
 });
+
+test("plugin parameter lanes: 0–1 values, shown as percent", async () => {
+  const { isPluginParam, pluginParamId, neutral } = await import("../src/automation.ts");
+  assert.ok(isPluginParam("plugin:12") && !isPluginParam("pan"));
+  assert.equal(pluginParamId("plugin:12"), 12);
+  assert.equal(valueToPos("plugin:3", 0.25), 0.25);
+  assert.equal(valueToPos("plugin:3", 7), 1, "clamped");
+  assert.equal(posToValue("plugin:3", 0.12345), 0.123);
+  assert.equal(formatValue("plugin:3", 0.256), "26%");
+  assert.equal(neutral("plugin:3", 0.7), 0.7, "an empty lane shows the parameter's current value");
+});

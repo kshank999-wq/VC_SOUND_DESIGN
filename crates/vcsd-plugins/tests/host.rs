@@ -34,7 +34,7 @@ fn processes_with_parameters_and_restores_state() {
     assert_eq!(g.latency(), 0);
     let input = tone(3000, 2); // > max_block: split into several process calls
     let mut buf = input.clone();
-    g.process(&mut buf, 2, 0);
+    g.process(&mut buf, 2, 0, &[]);
     assert_eq!(buf, input, "unity at the default value");
 
     let p = g.params();
@@ -43,7 +43,7 @@ fn processes_with_parameters_and_restores_state() {
     g.set_param(0, 0.25).unwrap(); // ×0.5
     assert_eq!(g.params()[0].display, "-6.0");
     let mut buf = input.clone();
-    g.process(&mut buf, 2, 3000);
+    g.process(&mut buf, 2, 3000, &[]);
     assert!(buf.iter().zip(&input).all(|(o, i)| (o - i * 0.5).abs() < 1e-6), "parameter reached the processor");
 
     // a change made while nothing plays still lands in the saved state (flushed)
@@ -56,7 +56,7 @@ fn processes_with_parameters_and_restores_state() {
     h.set_state(&st).unwrap();
     assert!((h.params()[0].value - 0.25).abs() < 1e-9);
     let mut buf = input.clone();
-    h.process(&mut buf, 2, 0);
+    h.process(&mut buf, 2, 0, &[]);
     assert!(buf.iter().zip(&input).all(|(o, i)| (o - i * 0.5).abs() < 1e-6));
     assert!(h.set_state(b"nonsense").is_err());
 }
@@ -69,17 +69,17 @@ fn reports_latency_and_resets_on_a_jump() {
     let mut buf = vec![0.0f32; n * 2];
     buf[100 * 2] = 1.0;
     buf[100 * 2 + 1] = 1.0;
-    d.process(&mut buf, 2, 0);
+    d.process(&mut buf, 2, 0, &[]);
     let at = buf.iter().position(|v| *v != 0.0).unwrap() / 2;
     assert_eq!(at, 100 + vcsd_testplug::DELAY_SAMPLES, "delayed by exactly the reported latency");
 
     // an impulse right at the end is still in the delay line…
     let mut buf = vec![0.0f32; n * 2];
     buf[(n - 10) * 2] = 1.0;
-    d.process(&mut buf, 2, n as i64);
+    d.process(&mut buf, 2, n as i64, &[]);
     // …continuing normally it would come out; after a locate it must not
     let mut jumped = vec![0.0f32; n * 2];
-    d.process(&mut jumped, 2, 999_999);
+    d.process(&mut jumped, 2, 999_999, &[]);
     assert!(jumped.iter().all(|v| *v == 0.0), "a jump in position resets the plugin");
 }
 
@@ -89,7 +89,7 @@ fn mono_slots_use_a_mono_layout() {
     g.set_param(0, 1.0).unwrap(); // ×2
     let input = tone(500, 1);
     let mut buf = input.clone();
-    g.process(&mut buf, 1, 0);
+    g.process(&mut buf, 1, 0, &[]);
     assert!(buf.iter().zip(&input).all(|(o, i)| (o - i * 2.0).abs() < 1e-6));
 }
 
@@ -114,4 +114,30 @@ fn loads_a_real_bundle_and_reports_broken_ones() {
     let inst = vcsd_plugins::instantiate(delay, Setup::default()).unwrap();
     assert_eq!(inst.latency(), 480);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn parameter_automation_is_sample_accurate_across_blocks() {
+    use vcsd_plugins::ParamCurve;
+    let g = make("VCSD Test Gain", Setup { max_block: 1024, ..Default::default() });
+    // gain ramps 0 → 1 (×0 → ×2) over 3000 frames: three process calls inside
+    let c = ParamCurve { id: 0, points: vec![(0, 0.0), (2999, 1.0)] };
+    assert_eq!(c.slice(1024, 1024), vec![(0, 1024.0 / 2999.0), (1023, 2047.0 / 2999.0)]);
+    let mut buf = vec![0.5f32; 3000 * 2];
+    g.process(&mut buf, 2, 0, std::slice::from_ref(&c));
+    for f in [0usize, 1, 1023, 1024, 1500, 2047, 2048, 2999] {
+        let want = 0.5 * 2.0 * f as f32 / 2999.0;
+        assert!((buf[f * 2] - want).abs() < 1e-4, "frame {f}: {} vs {want}", buf[f * 2]);
+    }
+    // the automated value is what the host shows, and it holds after the lane
+    let p = &g.params()[0];
+    assert!((p.value - 1.0).abs() < 1e-9 && p.display == "6.0", "{p:?}");
+    let mut buf = vec![0.5f32; 64];
+    g.process(&mut buf, 2, 3000, &[]);
+    assert!((buf[0] - 1.0).abs() < 1e-6);
+    // a waiting manual edit doesn't fight an automated parameter
+    g.set_param(0, 0.0).unwrap();
+    let mut buf = vec![0.5f32; 64];
+    g.process(&mut buf, 2, 3032, &[ParamCurve { id: 0, points: vec![(0, 0.25)] }]);
+    assert!((buf[0] - 0.25).abs() < 1e-6, "automation wins: {}", buf[0]);
 }

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "reac
 import { call, closeNativeEditor, isTauri, openNativeEditor, openNativeEditors } from "../api";
 import type { EngineHook } from "../store";
 import type { Insert, PluginInfo, PluginParam, PluginSlot } from "../types";
+import { showPluginLane, type AutoPoint, type Param } from "../automation";
+import { storeParams } from "../pluginParams";
 
 interface Catalog {
   plugins: PluginInfo[];
@@ -245,7 +247,16 @@ export function PluginBrowser({ onPick, onClose }: { onPick?: (p: PluginInfo) =>
 
 interface ParamsReply { id: string; name: string; vendor: string; format: string; bypass: boolean; loaded: boolean; error: string | null; latency: number; params: PluginParam[] }
 
-function ParamRow({ p, onLive, onCommit }: { p: PluginParam; onLive: (v: number) => void; onCommit: (v: number) => void }) {
+function ParamRow({ p, onBegin, onLive, onCommit, lane, writing, onShowLane }: {
+  p: PluginParam;
+  onBegin: (v: number) => void;
+  onLive: (v: number) => void;
+  onCommit: (v: number) => void;
+  /** Automation points on this parameter. */
+  lane: number;
+  writing: boolean;
+  onShowLane: () => void;
+}) {
   const [live, setLive] = useState<number | null>(null);
   const v = live ?? p.value;
   const step = p.step_count > 0 ? 1 / p.step_count : 0.001;
@@ -254,13 +265,17 @@ function ParamRow({ p, onLive, onCommit }: { p: PluginParam; onLive: (v: number)
     setLive(null);
   };
   return (
-    <div className="param-row" title={p.read_only ? "read-only" : "double-click: default"}>
+    <div className={"param-row" + (writing ? " writing" : "")} title={p.read_only ? "read-only" : "double-click: default"}>
       <span className="param-name ellipsis">{p.title}</span>
       <input type="range" min={0} max={1} step={step} value={v} disabled={p.read_only}
+        onPointerDown={(e) => onBegin(Number((e.target as HTMLInputElement).value))}
         onChange={(e) => { const nv = Number(e.target.value); setLive(nv); onLive(nv); }}
         onPointerUp={commit} onKeyUp={commit} onBlur={commit}
         onDoubleClick={() => onCommit(p.default)} />
       <span className="param-val mono ellipsis">{p.display}{p.units && !p.display.endsWith(p.units) ? " " + p.units : ""}</span>
+      {p.automatable && !p.read_only ? (
+        <button className={"tiny" + (lane ? " has-auto" : "")} title={lane ? `${lane} automation points — show the lane` : "Show an automation lane for this parameter"} onClick={onShowLane}>A</button>
+      ) : <span />}
     </div>
   );
 }
@@ -276,10 +291,42 @@ function PluginEditor({ eng, slotId, index, onClose }: { eng: EngineHook; slotId
   const version = eng.view?.version;
   const z = 60 + Math.max(0, useSyncExternalStore((cb) => (stackSubs.add(cb), () => stackSubs.delete(cb)), () => stack.indexOf(slotId)));
 
-  const load = () => call<ParamsReply>("plugin.params", { id: slotId }).then(setD).catch(() => setD(null));
+  const load = () =>
+    call<ParamsReply>("plugin.params", { id: slotId })
+      .then((r) => {
+        setD(r);
+        storeParams(slotId, r.params);
+      })
+      .catch(() => setD(null));
   useEffect(() => {
     load();
   }, [slotId, version]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // automation on this plugin: while playing, the controls follow it
+  const lanePts = ((eng.view?.automation ?? []) as AutoPoint[]).filter((p) => p.owner_id === slotId);
+  const playing = !!eng.tx?.playing;
+
+  // Touch/Latch/Write on the plugin's track or bus while playing: moves write automation
+  const ownerMode = (() => {
+    const v = eng.view;
+    if (!v?.open || !found) return "read";
+    return (v.tracks.find((t) => t.id === found.owner)?.automation_mode ?? v.buses.find((b) => b.id === found.owner)?.automation_mode ?? "read") as string;
+  })();
+  const capturing = ownerMode !== "read" && playing;
+  // while playing with automation (or writing it), the controls follow what the plugin plays
+  const follow = playing && (lanePts.length > 0 || capturing);
+  useEffect(() => {
+    if (!follow) return;
+    const id = setInterval(load, 150);
+    return () => clearInterval(id);
+  }, [follow]); // eslint-disable-line react-hooks/exhaustive-deps
+  const lastTouch = useRef(0);
+  const touch = (id: number, phase: "begin" | "move" | "end", v: number) => {
+    const now = performance.now();
+    if (phase === "move" && now - lastTouch.current < 25) return;
+    lastTouch.current = now;
+    call("automation.touch", { owner_id: slotId, param: `plugin:${id}`, value: v, phase }).catch((e) => eng.toast(String(e), "error"));
+  };
 
   // the slot was removed (or undone away): close — once we've seen it (the
   // project view can lag a moment behind the insert that opened this window)
@@ -353,7 +400,15 @@ function PluginEditor({ eng, slotId, index, onClose }: { eng: EngineHook; slotId
           <>
             {d.params.length > 10 && <input placeholder={`Filter ${d.params.length} parameters`} value={filter} onChange={(e) => setFilter(e.target.value)} />}
             <div className="param-list">
-              {params.map((p) => <ParamRow key={p.id} p={p} onLive={(v) => sendLive(p.id, v)} onCommit={(v) => commit(p.id, v)} />)}
+              {params.map((p) => (
+                <ParamRow key={p.id} p={p}
+                  onBegin={(v) => capturing && touch(p.id, "begin", v)}
+                  onLive={(v) => (capturing ? touch(p.id, "move", v) : sendLive(p.id, v))}
+                  onCommit={(v) => (capturing ? touch(p.id, "end", v) : commit(p.id, v))}
+                  lane={lanePts.filter((x) => x.param === `plugin:${p.id}`).length}
+                  writing={!!eng.tx?.writing?.some((w) => w.owner_id === slotId && w.param === `plugin:${p.id}`)}
+                  onShowLane={() => found && showPluginLane(found.owner, slotId, `plugin:${p.id}` as Param)} />
+              ))}
               {d.params.length === 0 && <div className="muted small">This plugin has no parameters the host can show.</div>}
             </div>
           </>

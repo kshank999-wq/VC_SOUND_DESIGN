@@ -131,6 +131,13 @@ impl Rack {
         self.slots.lock().unwrap().get(slot_id).and_then(|s| s.inst.clone())
     }
 
+    /// Touches made in plugins' own windows since the last call, by slot id.
+    pub fn take_gestures(&self) -> Vec<(String, vcsd_plugins::Gesture)> {
+        let insts: Vec<(String, Arc<dyn Instance>)> =
+            self.slots.lock().unwrap().iter().filter_map(|(k, s)| s.inst.clone().map(|i| (k.clone(), i))).collect();
+        insts.into_iter().flat_map(|(k, i)| i.take_gestures().into_iter().map(move |g| (k.clone(), g))).collect()
+    }
+
     /// True if any plugin was edited in its own window since the last call.
     pub fn poll_dirty(&self) -> bool {
         let insts: Vec<Arc<dyn Instance>> = self.slots.lock().unwrap().values().filter_map(|s| s.inst.clone()).collect();
@@ -245,7 +252,13 @@ impl Rack {
 }
 
 impl PluginHost for Rack {
-    fn process(&self, slot: &PluginInsert, buf: &mut AudioBuffer, pos: i64) -> Result<(), String> {
+    fn process(
+        &self,
+        slot: &PluginInsert,
+        buf: &mut AudioBuffer,
+        pos: i64,
+        automation: &[vcsd_core::mixer::ParamCurve],
+    ) -> Result<(), String> {
         let inst = {
             let slots = self.slots.lock().unwrap();
             match slots.get(&slot.id) {
@@ -253,7 +266,9 @@ impl PluginHost for Rack {
                 None => return Err("not loaded yet".into()),
             }
         };
-        inst.process(&mut buf.data, buf.channels as usize, pos);
+        let curves: Vec<vcsd_plugins::ParamCurve> =
+            automation.iter().map(|c| vcsd_plugins::ParamCurve { id: c.id, points: c.points.clone() }).collect();
+        inst.process(&mut buf.data, buf.channels as usize, pos, &curves);
         Ok(())
     }
 

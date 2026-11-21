@@ -544,7 +544,13 @@ struct DelayHost {
 const LAT: i64 = 1000;
 
 impl mixer::PluginHost for DelayHost {
-    fn process(&self, slot: &PluginInsert, buf: &mut wav::AudioBuffer, pos: i64) -> std::result::Result<(), String> {
+    fn process(
+        &self,
+        slot: &PluginInsert,
+        buf: &mut wav::AudioBuffer,
+        pos: i64,
+        _auto: &[mixer::ParamCurve],
+    ) -> std::result::Result<(), String> {
         let ch = buf.channels as usize;
         let mut lines = self.lines.lock().unwrap();
         let (line, w, next) = lines.entry(slot.id.clone()).or_insert_with(|| (vec![0.0; LAT as usize * ch], 0, pos));
@@ -665,4 +671,49 @@ fn plugin_slots_round_trip_through_the_project_file() {
     )
     .unwrap();
     assert!(min.as_plugin().unwrap().state.is_none());
+}
+
+#[test]
+fn plugin_parameter_lanes_become_per_block_curves() {
+    let (mut s, _r) = session("pauto", "24", "01:00:00:00");
+    with_pack(&mut s);
+    let track = s.state.tracks.values().next().map(|t| t.id.clone());
+    let track = match track {
+        Some(t) => t,
+        None => {
+            scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+            marker_tc(&mut s, "fx", EventType::Point, "01:00:01:00", "01:00:01:00", "glass smash", None);
+            s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+            s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+            s.state.tracks.values().next().unwrap().id.clone()
+        }
+    };
+    s.state.tracks.get_mut(&track).unwrap().inserts = vec![plugin_slot("slot1")];
+    let p = AutomationParam::Plugin(7);
+    assert_eq!(serde_json::to_value(p).unwrap(), "plugin:7");
+    assert_eq!(serde_json::from_value::<AutomationParam>(serde_json::json!("plugin:7")).unwrap(), p);
+    s.edit("a", |st| editing::set_automation(st, "slot1", p, 1000, 0.0)).unwrap();
+    s.edit("a", |st| editing::set_automation(st, "slot1", p, 2000, 1.0)).unwrap();
+    s.edit("a", |st| editing::set_automation(st, "slot1", p, 2500, 1.7)).unwrap(); // clamped to 1
+    assert!(editing::set_automation(&mut s.state, "nope", p, 0, 0.5).is_err(), "owner must be a track, bus or plugin slot");
+
+    let m = Mixer::new(&s.state, RenderOptions::default());
+    // a block across the first ramp: start value, the breakpoint, end value
+    let c = m.plugin_curves("slot1", 1500, 1000);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].id, 7);
+    let pts = &c[0].points;
+    assert_eq!(pts[0], (0, 0.5));
+    assert_eq!(pts[1], (500, 1.0));
+    assert_eq!(*pts.last().unwrap(), (999, 1.0));
+    // before the lane: held at the first value; other slots: nothing
+    assert_eq!(m.plugin_curves("slot1", 0, 100)[0].points, vec![(0, 0.0), (99, 0.0)]);
+    assert!(m.plugin_curves("other", 0, 100).is_empty());
+    // a value being written live overrides the lane
+    m.overrides.borrow_mut().insert(("slot1".into(), p), 0.25);
+    assert_eq!(m.plugin_curves("slot1", 1500, 1000)[0].points, vec![(0, 0.25)]);
+
+    // removing the slot removes its lanes
+    s.state.tracks.get_mut(&track).unwrap().inserts.clear();
+    assert_eq!(editing::drop_orphan_plugin_automation(&mut s.state), 3);
 }

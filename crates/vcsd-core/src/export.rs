@@ -511,14 +511,31 @@ fn routing_map(s: &ProjectState) -> serde_json::Value {
     // Automation is already baked into the rendered audio; it is listed here
     // so the receiving engineer can see (and rebuild) the moves.
     let automation = |owner: &str| {
-        let mut pts: Vec<&AutomationPoint> = s.automation.values().filter(|p| p.owner_id == owner).collect();
+        // the owner's own lanes, plus those of the plugins in its inserts
+        let slots: Vec<(String, String)> = s
+            .tracks
+            .get(owner)
+            .map(|t| &t.inserts)
+            .or_else(|| s.buses.get(owner).map(|b| &b.inserts))
+            .map(|ins| ins.iter().filter_map(Insert::as_plugin).map(|p| (p.id.clone(), p.name.clone())).collect())
+            .unwrap_or_default();
+        let mut pts: Vec<&AutomationPoint> =
+            s.automation.values().filter(|p| p.owner_id == owner || slots.iter().any(|(id, _)| *id == p.owner_id)).collect();
         pts.sort_by_key(|p| (p.sample, p.id.clone()));
         pts.iter()
-            .map(|p| serde_json::json!({"param": p.param, "tc": tb.tc_at(p.sample), "sample": p.sample, "value": p.value, "unit": if p.param == AutomationParam::Pan { "pan -1..1" } else { "dB relative to fader" }}))
+            .map(|p| {
+                let unit = match p.param {
+                    AutomationParam::Pan => "pan -1..1",
+                    AutomationParam::VolumeDb => "dB relative to fader",
+                    AutomationParam::Plugin(_) => "normalised 0..1",
+                };
+                let plugin = slots.iter().find(|(id, _)| *id == p.owner_id).map(|(_, n)| n.clone());
+                serde_json::json!({"param": p.param, "plugin": plugin, "tc": tb.tc_at(p.sample), "sample": p.sample, "value": p.value, "unit": unit})
+            })
             .collect::<Vec<_>>()
     };
     serde_json::json!({
-        "note": "Volume/pan automation is rendered into stems, tracks and mix; breakpoints are listed per track and bus for reference.",
+        "note": "Volume/pan and plugin parameter automation is rendered into stems, tracks and mix; breakpoints are listed per track and bus for reference.",
         "buses": buses.iter().map(|b| serde_json::json!({"bus_id": b.id, "name": b.name, "parent": b.parent_id.as_ref().and_then(|p| s.buses.get(p)).map(|p| p.name.clone()), "gain_db": b.gain_db, "inserts": b.inserts, "stem": b.stem, "automation": automation(&b.id)})).collect::<Vec<_>>(),
         "tracks": s.tracks.values().map(|t| serde_json::json!({"track_id": t.id, "name": t.name, "bus": s.buses.get(&t.bus_id).map(|b| b.name.clone()), "folder": t.folder, "channels": t.channels, "gain_db": t.gain_db, "pan": t.pan, "mute": t.mute, "inserts": t.inserts, "automation": automation(&t.id)})).collect::<Vec<_>>(),
     })

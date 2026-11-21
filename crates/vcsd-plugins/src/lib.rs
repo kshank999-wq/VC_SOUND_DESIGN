@@ -50,6 +50,59 @@ impl PluginInfo {
     }
 }
 
+/// One parameter's automation over a processed block: `(frame offset,
+/// normalised value)` points, the first at offset 0, linear in between.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamCurve {
+    pub id: u32,
+    pub points: Vec<(u32, f64)>,
+}
+
+impl ParamCurve {
+    /// Value at frame `off` of the block.
+    pub fn value_at(&self, off: u32) -> f64 {
+        let p = &self.points;
+        let i = p.partition_point(|x| x.0 <= off);
+        match (i.checked_sub(1).map(|k| p[k]), p.get(i)) {
+            (Some(a), Some(b)) => a.1 + (b.1 - a.1) * (off - a.0) as f64 / (b.0 - a.0).max(1) as f64,
+            (Some(a), None) => a.1,
+            (None, Some(b)) => b.1,
+            (None, None) => 0.0,
+        }
+    }
+    /// The points inside `[off, off + n)`, relative to `off`, with the value at
+    /// `off` first (for splitting a block into smaller process calls).
+    pub fn slice(&self, off: u32, n: u32) -> Vec<(i32, f64)> {
+        let mut v = vec![(0, self.value_at(off))];
+        v.extend(self.points.iter().filter(|x| x.0 > off && x.0 < off + n).map(|x| ((x.0 - off) as i32, x.1)));
+        if n > 1 && v.last().is_some_and(|l| l.0 < n as i32 - 1) && self.points.last().is_some_and(|l| l.0 >= off + n) {
+            v.push((n as i32 - 1, self.value_at(off + n - 1)));
+        }
+        v
+    }
+    pub fn last(&self) -> f64 {
+        self.points.last().map(|x| x.1).unwrap_or(0.0)
+    }
+}
+
+/// A touch on one of the plugin's own controls.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GesturePhase {
+    Begin,
+    Move,
+    End,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Gesture {
+    pub param: u32,
+    pub phase: GesturePhase,
+    /// Normalised value (for `Begin`, the last known value, or NaN).
+    pub value: f64,
+    pub at: std::time::Instant,
+}
+
 /// A plugin parameter, values normalised 0–1.
 #[derive(Debug, Clone, Serialize)]
 pub struct ParamInfo {
@@ -97,8 +150,9 @@ pub trait Instance: Send + Sync {
     fn set_state(&self, data: &[u8]) -> Result<(), String>;
     /// Process interleaved audio in place. `pos` is the timeline position of the
     /// first frame; when it doesn't follow on from the previous call the plugin
-    /// is reset first (locate, loop, a second export pass).
-    fn process(&self, buf: &mut [f32], channels: usize, pos: i64);
+    /// is reset first (locate, loop, a second export pass). `automation` drives
+    /// parameters over this block (offsets relative to its first frame).
+    fn process(&self, buf: &mut [f32], channels: usize, pos: i64, automation: &[ParamCurve]);
     /// Clear internal state (tails, delay lines).
     fn reset(&self);
     /// Position the next `process` call continues from (None after a reset).
@@ -107,6 +161,13 @@ pub trait Instance: Send + Sync {
     fn take_dirty(&self) -> bool {
         false
     }
+    /// Control gestures made in the plugin's own editor since the last call
+    /// (for writing automation).
+    fn take_gestures(&self) -> Vec<Gesture> {
+        vec![]
+    }
+    /// Show automated values in the plugin's own controls. GUI thread only.
+    fn sync_display(&self) {}
     /// Show the plugin's own editor inside `parent`. Main (GUI) thread only.
     /// Dropping the returned editor detaches it; keep the instance alive meanwhile.
     fn open_editor(&self, _parent: ParentWindow, _host: Rc<dyn EditorHost>) -> Result<Box<dyn Editor>, String> {

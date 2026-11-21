@@ -143,13 +143,36 @@ struct InsertState {
 pub trait PluginHost: Send + Sync {
     /// Process `buf` (interleaved, `buf.channels`) in place. `pos` is the
     /// timeline sample of the first frame; a jump in `pos` resets the plugin.
-    fn process(&self, slot: &PluginInsert, buf: &mut AudioBuffer, pos: i64) -> std::result::Result<(), String>;
+    /// `automation` holds the slot's automated parameters over this block.
+    fn process(&self, slot: &PluginInsert, buf: &mut AudioBuffer, pos: i64, automation: &[ParamCurve]) -> std::result::Result<(), String>;
     /// Latency the plugin reports, in samples (compensated by reading ahead).
     fn latency(&self, slot: &PluginInsert) -> i64;
     /// Where the slot's stream continues from (None: fresh or unknown). Used to
     /// pre-roll a latent chain after a jump so its first output isn't silence.
     fn continues_at(&self, _slot: &PluginInsert) -> Option<i64> {
         None
+    }
+}
+
+/// One plugin parameter's automation over a processed block: `(frame offset,
+/// normalised value)` points, the first at offset 0, linear in between.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamCurve {
+    pub id: u32,
+    pub points: Vec<(u32, f64)>,
+}
+
+/// One automated plugin parameter: its id and sorted breakpoints.
+type PluginLane<'a> = (u32, Vec<&'a AutomationPoint>);
+
+/// Value of a sorted breakpoint list at `s` (linear, held at the ends).
+fn lane_value(pts: &[&AutomationPoint], s: i64) -> f32 {
+    let i = pts.partition_point(|p| p.sample <= s);
+    match (i.checked_sub(1).map(|k| pts[k]), pts.get(i)) {
+        (None, Some(b)) => b.value,
+        (Some(a), None) => a.value,
+        (Some(a), Some(b)) => a.value + (b.value - a.value) * ((s - a.sample) as f32 / (b.sample - a.sample).max(1) as f32),
+        (None, None) => 0.0,
     }
 }
 
@@ -169,6 +192,7 @@ fn process_inserts(
     buf: &mut AudioBuffer,
     pos: i64,
     host: Option<&dyn PluginHost>,
+    curves: &dyn Fn(&str) -> Vec<ParamCurve>,
     warn: &dyn Fn(String),
 ) {
     let sr = buf.sample_rate as f32;
@@ -184,7 +208,7 @@ fn process_inserts(
                 }
                 match host {
                     Some(h) => {
-                        if let Err(e) = h.process(p, buf, pos) {
+                        if let Err(e) = h.process(p, buf, pos, &curves(&p.id)) {
                             warn(format!("plugin '{}' passed through: {e}", p.name));
                         }
                     }
@@ -288,6 +312,8 @@ pub struct Mixer<'a> {
     pub media_override: Option<&'a Path>,
     /// Hosted plugins (None: plugin slots pass audio through).
     pub plugins: Option<Arc<dyn PluginHost>>,
+    /// Plugin parameter lanes by slot id: (parameter, sorted breakpoints).
+    plugin_lanes: std::cell::OnceCell<HashMap<String, Vec<PluginLane<'a>>>>,
 }
 
 /// Breakpoint lookup for monotonically increasing sample positions: linear
@@ -347,7 +373,70 @@ impl<'a> Mixer<'a> {
             warnings: RefCell::new(vec![]),
             media_override: None,
             plugins: None,
+            plugin_lanes: std::cell::OnceCell::new(),
         }
+    }
+
+    /// Automation curves for a plugin slot over `[pos, pos + frames)`.
+    pub fn plugin_curves(&self, slot_id: &str, pos: i64, frames: usize) -> Vec<ParamCurve> {
+        let lanes = self.plugin_lanes.get_or_init(|| {
+            let mut m: HashMap<String, HashMap<u32, Vec<&'a AutomationPoint>>> = HashMap::new();
+            for p in self.s.automation.values() {
+                if let AutomationParam::Plugin(id) = p.param {
+                    m.entry(p.owner_id.clone()).or_default().entry(id).or_default().push(p);
+                }
+            }
+            m.into_iter()
+                .map(|(slot, by)| {
+                    let mut v: Vec<(u32, Vec<&AutomationPoint>)> = by
+                        .into_iter()
+                        .map(|(id, mut pts)| {
+                            pts.sort_by_key(|p| (p.sample, p.id.clone()));
+                            (id, pts)
+                        })
+                        .collect();
+                    v.sort_by_key(|x| x.0);
+                    (slot, v)
+                })
+                .collect()
+        });
+        let ov = self.overrides.borrow();
+        let live = |id: u32| ov.get(&(slot_id.to_string(), AutomationParam::Plugin(id))).copied();
+        let mut out: Vec<ParamCurve> = vec![];
+        let end = pos + frames.max(1) as i64 - 1;
+        for (id, pts) in lanes.get(slot_id).map(|v| v.as_slice()).unwrap_or(&[]) {
+            if let Some(v) = live(*id) {
+                out.push(ParamCurve { id: *id, points: vec![(0, v as f64)] });
+                continue;
+            }
+            let mut c = vec![(0u32, lane_value(pts, pos) as f64)];
+            let from = pts.partition_point(|p| p.sample <= pos);
+            for p in &pts[from..] {
+                if p.sample >= end {
+                    break;
+                }
+                c.push(((p.sample - pos) as u32, p.value as f64));
+            }
+            if end > pos {
+                c.push(((end - pos) as u32, lane_value(pts, end) as f64));
+            }
+            c.dedup_by(|b, a| {
+                a.0 == b.0 && {
+                    a.1 = b.1;
+                    true
+                }
+            });
+            out.push(ParamCurve { id: *id, points: c });
+        }
+        // a parameter being written for the first time has no lane yet
+        for ((o, p), v) in ov.iter() {
+            if let (true, AutomationParam::Plugin(id)) = (o == slot_id, p) {
+                if !out.iter().any(|c| c.id == *id) {
+                    out.push(ParamCurve { id: *id, points: vec![(0, *v as f64)] });
+                }
+            }
+        }
+        out
     }
 
     /// Process plugin inserts with `host`.
@@ -369,9 +458,10 @@ impl<'a> Mixer<'a> {
     }
 
     fn run_inserts(&self, key: String, inserts: &[Insert], buf: &mut AudioBuffer, pos: i64) {
+        let frames = buf.frames();
         let mut dsp = self.dsp.borrow_mut();
         let st = dsp.entry(key).or_default();
-        process_inserts(inserts, st, buf, pos, self.plugins.as_deref(), &|w| self.warn(w));
+        process_inserts(inserts, st, buf, pos, self.plugins.as_deref(), &|slot| self.plugin_curves(slot, pos, frames), &|w| self.warn(w));
     }
 
     /// Clear DSP state (call on locate / transport jump).

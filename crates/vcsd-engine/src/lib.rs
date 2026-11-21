@@ -134,9 +134,10 @@ fn mode(m: &str) -> VariationMode {
 fn auto_owner(a: &Value) -> std::result::Result<&str, String> {
     os(a, "owner_id").or_else(|| os(a, "bus_id")).or_else(|| os(a, "track_id")).ok_or_else(|| "missing owner_id (track or bus)".to_string())
 }
+/// `param`: "volume_db" (default), "pan" or "plugin:<id>" (owner = plugin slot).
 fn auto_param(a: &Value) -> AutomationParam {
-    if os(a, "param") == Some("pan") {
-        AutomationParam::Pan
+    if let Some(p) = os(a, "param").and_then(AutomationParam::parse) {
+        p
     } else {
         AutomationParam::VolumeDb
     }
@@ -411,8 +412,11 @@ impl Engine {
         g.session.as_ref().map(|s| &s.state).ok_or_else(|| "no project open".to_string())
     }
 
+    /// Automation mode of a lane owner, and its fader gain. A plugin slot
+    /// follows the track or bus it sits on.
     fn owner_mode_gain(st: &ProjectState, owner: &str) -> Option<(AutoMode, f32)> {
-        st.tracks.get(owner).map(|t| (t.automation_mode, t.gain_db)).or_else(|| st.buses.get(owner).map(|b| (b.automation_mode, b.gain_db)))
+        let host = editing::plugin_slot(st, owner).map(|(_, o)| o).unwrap_or(owner);
+        st.tracks.get(host).map(|t| (t.automation_mode, t.gain_db)).or_else(|| st.buses.get(host).map(|b| (b.automation_mode, b.gain_db)))
     }
 
     /// Start Write-mode passes for every lane of every owner in Write mode.
@@ -426,15 +430,98 @@ impl Engine {
             .map(|t| t.id.clone())
             .chain(st.buses.values().filter(|b| b.automation_mode == AutoMode::Write).map(|b| b.id.clone()))
             .collect();
-        for o in owners {
-            for param in [AutomationParam::VolumeDb, AutomationParam::Pan] {
-                let v = editing::automation_value_at(st, &o, param, pos);
-                g.passes.insert(
-                    (o.clone(), param),
-                    Pass { mode: AutoMode::Write, touching: false, done: vec![], cur: Segment { start: pos, samples: vec![(pos, v)] } },
-                );
-                self.player.set_override(&o, param, Some(v));
+        // plugin parameters that already have a lane, on plugins of those owners
+        let mut lanes: Vec<(String, AutomationParam)> =
+            owners.iter().flat_map(|o| [(o.clone(), AutomationParam::VolumeDb), (o.clone(), AutomationParam::Pan)]).collect();
+        for p in st.automation.values() {
+            if let AutomationParam::Plugin(_) = p.param {
+                let on_write_owner = editing::plugin_slot(st, &p.owner_id).is_some_and(|(_, o)| owners.iter().any(|x| x == o));
+                if on_write_owner && !lanes.iter().any(|(o, q)| *o == p.owner_id && *q == p.param) {
+                    lanes.push((p.owner_id.clone(), p.param));
+                }
             }
+        }
+        for (o, param) in lanes {
+            let v = editing::automation_value_at(st, &o, param, pos);
+            g.passes.insert(
+                (o.clone(), param),
+                Pass { mode: AutoMode::Write, touching: false, done: vec![], cur: Segment { start: pos, samples: vec![(pos, v)] } },
+            );
+            self.player.set_override(&o, param, Some(v));
+        }
+    }
+
+    /// One control move on a lane while playing in Touch/Latch/Write, at timeline
+    /// position `pos` (see `automation.touch`). Not captured in Read or when stopped.
+    fn touch_lane(&self, g: &mut Inner, owner: &str, param: AutomationParam, raw: f32, phase: &str, pos: i64) -> ApiResult {
+        let st = Self::st(g)?;
+        let (mode, gain) = Self::owner_mode_gain(st, owner).ok_or("unknown track, bus or plugin")?;
+        let st_rate = st.project.sample_rate;
+        let v = editing::clamp_automation(param, if param == AutomationParam::VolumeDb { raw - gain } else { raw });
+        if mode == AutoMode::Read || !self.player.is_playing() {
+            return Ok(json!({"capturing": false}));
+        }
+        let key = (owner.to_string(), param);
+        let pass = g.passes.entry(key.clone()).or_insert_with(|| Pass {
+            mode,
+            touching: false,
+            done: vec![],
+            cur: Segment { start: pos, samples: vec![] },
+        });
+        // loop wrap: close the segment and start a new one at the new position
+        if pass.cur.samples.last().is_some_and(|&(t, _)| pos + 4800 < t) {
+            let seg = std::mem::replace(&mut pass.cur, Segment { start: pos, samples: vec![] });
+            pass.done.push(seg);
+        }
+        // An idle control is held: after a gap, step (not ramp) to the new value.
+        let gap = (st_rate as i64) * 60 / 1000;
+        if let Some(&(lt, lv)) = pass.cur.samples.last() {
+            if pos - lt > gap && (lv - v).abs() > f32::EPSILON {
+                pass.cur.samples.push((pos - 1, lv));
+            }
+        }
+        pass.cur.samples.push((pos, v));
+        match phase {
+            "begin" => pass.touching = true,
+            "end" => pass.touching = false,
+            _ => {}
+        }
+        let release = phase == "end" && pass.mode == AutoMode::Touch;
+        self.player.set_override(owner, param, Some(v));
+        if release {
+            // Touch: commit this lane now and return to the existing automation
+            let one = g.passes.remove(&key).unwrap();
+            let mut rest = std::mem::take(&mut g.passes);
+            g.passes.insert(key, one);
+            let r = self.commit_passes(g, pos);
+            g.passes = std::mem::take(&mut rest);
+            r?;
+        }
+        Ok(json!({"capturing": true, "value": v}))
+    }
+
+    /// Touches on plugins' own controls become automation moves (Touch/Latch/Write
+    /// while playing), placed at the timeline position they happened at.
+    fn plugin_gestures(&self, g: &mut Inner) {
+        let gestures = self.rack.take_gestures();
+        if gestures.is_empty() || !self.player.is_playing() || g.session.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        let heard = self.heard();
+        let sr = Self::st(g).map(|s| s.project.sample_rate).unwrap_or(48_000) as f64;
+        for (slot, ge) in gestures {
+            if ge.value.is_nan() {
+                continue; // a touch before any value is known: its first move carries it
+            }
+            let ago = now.saturating_duration_since(ge.at).as_secs_f64();
+            let pos = heard - (ago * sr) as i64;
+            let phase = match ge.phase {
+                vcsd_plugins::GesturePhase::Begin => "begin",
+                vcsd_plugins::GesturePhase::Move => "move",
+                vcsd_plugins::GesturePhase::End => "end",
+            };
+            let _ = self.touch_lane(g, &slot, AutomationParam::Plugin(ge.param), ge.value as f32, phase, pos);
         }
     }
 
@@ -448,6 +535,15 @@ impl Engine {
             self.player.set_override(o, *p, None);
         }
         let Some(sess) = g.session.as_mut() else { return Ok(0) };
+        // a lane whose track, bus or plugin was removed mid-pass has nowhere to go
+        let st = &sess.state;
+        let passes: Vec<((String, AutomationParam), Pass)> = passes
+            .into_iter()
+            .filter(|((o, _), _)| st.tracks.contains_key(o) || st.buses.contains_key(o) || editing::plugin_slot(st, o).is_some())
+            .collect();
+        if passes.is_empty() {
+            return Ok(0);
+        }
         let ramp = (sess.state.project.sample_rate / 20) as i64; // 50 ms
         let n = sess
             .edit("write automation", |st| {
@@ -965,6 +1061,7 @@ impl Engine {
                     }
                     if let Some(ins) = a.get("inserts") {
                         t.inserts = serde_json::from_value(ins.clone())?;
+                        editing::drop_orphan_plugin_automation(st);
                     }
                     Ok(())
                 })?;
@@ -1004,6 +1101,7 @@ impl Engine {
                     }
                     if let Some(ins) = a.get("inserts") {
                         b.inserts = serde_json::from_value(ins.clone())?;
+                        editing::drop_orphan_plugin_automation(st);
                     }
                     Ok(())
                 })?;
@@ -1028,57 +1126,12 @@ impl Engine {
                 Ok(json!({}))
             }
             "automation.touch" => {
-                // Control moves from faders/pans. `value` is the CONTROL value:
-                // absolute fader dB for volume (stored relative to the fader), pan -1..1.
+                // Control moves from faders/pans/plugin controls. `value` is the CONTROL value:
+                // absolute fader dB for volume (stored relative to the fader), pan -1..1, plugin 0..1.
                 let owner = auto_owner(a)?.to_string();
-                let param = auto_param(a);
-                let phase = os(a, "phase").unwrap_or("move");
-                let st = Self::st(g)?;
-                let (mode, gain) = Self::owner_mode_gain(st, &owner).ok_or("unknown track or bus")?;
-                let st_rate = st.project.sample_rate;
                 let raw = of(a, "value").ok_or("missing value")?;
-                let v = editing::clamp_automation(param, if param == AutomationParam::VolumeDb { raw - gain } else { raw });
-                if mode == AutoMode::Read || !self.player.is_playing() {
-                    return Ok(json!({"capturing": false}));
-                }
                 let pos = self.heard();
-                let key = (owner.clone(), param);
-                let pass = g.passes.entry(key.clone()).or_insert_with(|| Pass {
-                    mode,
-                    touching: false,
-                    done: vec![],
-                    cur: Segment { start: pos, samples: vec![] },
-                });
-                // loop wrap: close the segment and start a new one at the new position
-                if pass.cur.samples.last().is_some_and(|&(t, _)| pos + 4800 < t) {
-                    let seg = std::mem::replace(&mut pass.cur, Segment { start: pos, samples: vec![] });
-                    pass.done.push(seg);
-                }
-                // An idle control is held: after a gap, step (not ramp) to the new value.
-                let gap = (st_rate as i64) * 60 / 1000;
-                if let Some(&(lt, lv)) = pass.cur.samples.last() {
-                    if pos - lt > gap && (lv - v).abs() > f32::EPSILON {
-                        pass.cur.samples.push((pos - 1, lv));
-                    }
-                }
-                pass.cur.samples.push((pos, v));
-                match phase {
-                    "begin" => pass.touching = true,
-                    "end" => pass.touching = false,
-                    _ => {}
-                }
-                let release = phase == "end" && pass.mode == AutoMode::Touch;
-                self.player.set_override(&owner, param, Some(v));
-                if release {
-                    // Touch: commit this lane now and return to the existing automation
-                    let one = g.passes.remove(&key).unwrap();
-                    let mut rest = std::mem::take(&mut g.passes);
-                    g.passes.insert(key, one);
-                    let r = self.commit_passes(g, pos);
-                    g.passes = std::mem::take(&mut rest);
-                    r?;
-                }
-                Ok(json!({"capturing": true, "value": v}))
+                self.touch_lane(g, &owner, auto_param(a), raw, os(a, "phase").unwrap_or("move"), pos)
             }
             "automation.update" => {
                 self.edit(g, "move automation point", |st| {
@@ -1216,6 +1269,7 @@ impl Engine {
                 Ok(json!({}))
             }
             "transport.state" => {
+                self.plugin_gestures(g);
                 // edits made in plugins' own windows: into the project (≤ 2×/s while editing)
                 if g.last_plugin_capture.elapsed().as_millis() >= 500 && self.rack.poll_dirty() {
                     g.last_plugin_capture = Instant::now();
@@ -1680,7 +1734,10 @@ impl Engine {
                         let i = insert_index(v, a)?;
                         v.remove(i);
                         Ok(())
-                    })
+                    })?;
+                    // its automation goes with it (undo brings both back)
+                    editing::drop_orphan_plugin_automation(st);
+                    Ok(())
                 })?;
                 Ok(json!({}))
             }

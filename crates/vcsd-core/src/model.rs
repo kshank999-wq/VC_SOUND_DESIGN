@@ -630,7 +630,8 @@ impl ClipInstance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutomationPoint {
     pub id: String,
-    /// Track or bus (incl. the master bus) this breakpoint automates.
+    /// Track or bus (incl. the master bus) this breakpoint automates, or a
+    /// plugin slot for plugin parameters.
     /// Projects saved before bus automation used `track_id`.
     #[serde(alias = "track_id")]
     pub owner_id: String,
@@ -654,11 +655,43 @@ pub enum AutoMode {
     Write,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// What an automation lane controls. Serialised as `"volume_db"`, `"pan"`, or
+/// `"plugin:<parameter id>"` (owner = the plugin slot; values normalised 0–1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AutomationParam {
     VolumeDb,
     Pan,
+    Plugin(u32),
+}
+
+impl AutomationParam {
+    pub fn key(&self) -> String {
+        match self {
+            AutomationParam::VolumeDb => "volume_db".into(),
+            AutomationParam::Pan => "pan".into(),
+            AutomationParam::Plugin(id) => format!("plugin:{id}"),
+        }
+    }
+    pub fn parse(s: &str) -> Option<AutomationParam> {
+        match s {
+            "volume_db" => Some(AutomationParam::VolumeDb),
+            "pan" => Some(AutomationParam::Pan),
+            _ => s.strip_prefix("plugin:").and_then(|n| n.parse().ok()).map(AutomationParam::Plugin),
+        }
+    }
+}
+
+impl Serialize for AutomationParam {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.key())
+    }
+}
+
+impl<'de> Deserialize<'de> for AutomationParam {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        AutomationParam::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("unknown automation parameter '{s}'")))
+    }
 }
 
 /// Insert processors: built-in EQ, dynamics and filters (spec §12), or a

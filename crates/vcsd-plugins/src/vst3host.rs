@@ -10,7 +10,7 @@
 // a no-op on one platform is needed on another.
 #![allow(non_snake_case, clippy::missing_safety_doc, clippy::unnecessary_cast)]
 
-use crate::{join_out, split_in, Instance, ParamInfo, PluginInfo, Setup};
+use crate::{join_out, split_in, Gesture, GesturePhase, Instance, ParamCurve, ParamInfo, PluginInfo, Setup};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
@@ -440,7 +440,7 @@ impl IBStreamTrait for MemStream {
 
 struct Queue {
     id: ParamID,
-    value: f64,
+    points: Vec<(i32, f64)>,
 }
 
 impl Class for Queue {
@@ -452,14 +452,12 @@ impl IParamValueQueueTrait for Queue {
         self.id
     }
     unsafe fn getPointCount(&self) -> int32 {
-        1
+        self.points.len() as int32
     }
     unsafe fn getPoint(&self, index: int32, offset: *mut int32, value: *mut ParamValue) -> tresult {
-        if index != 0 {
-            return kInvalidArgument;
-        }
-        *offset = 0;
-        *value = self.value;
+        let Some(&(o, v)) = self.points.get(index.max(0) as usize) else { return kInvalidArgument };
+        *offset = o;
+        *value = v;
         kResultOk
     }
     unsafe fn addPoint(&self, _o: int32, _v: ParamValue, _i: *mut int32) -> tresult {
@@ -503,10 +501,16 @@ impl IEventListTrait for NoEvents {
     }
 }
 
+/// Keep at most this many unread gestures (nobody may be reading them).
+const MAX_GESTURES: usize = 4096;
+
 #[derive(Default)]
 struct Edits {
     /// Parameter changes waiting to reach the processor.
     pending: Mutex<Vec<(ParamID, f64)>>,
+    /// Touches on the plugin's own controls, for automation writing.
+    gestures: Mutex<Vec<Gesture>>,
+    last: Mutex<HashMap<ParamID, f64>>,
     /// The plugin's own editor changed something since the last save.
     dirty: AtomicBool,
     latency_changed: AtomicBool,
@@ -518,16 +522,31 @@ impl Class for Handler {
     type Interfaces = (IComponentHandler,);
 }
 
+impl Handler {
+    fn gesture(&self, param: ParamID, phase: GesturePhase, value: f64) {
+        let mut g = self.0.gestures.lock().unwrap();
+        if g.len() < MAX_GESTURES {
+            g.push(Gesture { param, phase, value, at: std::time::Instant::now() });
+        }
+    }
+}
+
 impl IComponentHandlerTrait for Handler {
-    unsafe fn beginEdit(&self, _id: ParamID) -> tresult {
+    unsafe fn beginEdit(&self, id: ParamID) -> tresult {
+        let v = self.0.last.lock().unwrap().get(&id).copied().unwrap_or(f64::NAN);
+        self.gesture(id, GesturePhase::Begin, v);
         kResultOk
     }
     unsafe fn performEdit(&self, id: ParamID, v: ParamValue) -> tresult {
         self.0.pending.lock().unwrap().push((id, v));
+        self.0.last.lock().unwrap().insert(id, v);
         self.0.dirty.store(true, Relaxed);
+        self.gesture(id, GesturePhase::Move, v);
         kResultOk
     }
-    unsafe fn endEdit(&self, _id: ParamID) -> tresult {
+    unsafe fn endEdit(&self, id: ParamID) -> tresult {
+        let v = self.0.last.lock().unwrap().get(&id).copied().unwrap_or(f64::NAN);
+        self.gesture(id, GesturePhase::End, v);
         kResultOk
     }
     unsafe fn restartComponent(&self, flags: int32) -> tresult {
@@ -568,6 +587,10 @@ pub struct Vst3Instance {
     ctrl: Mutex<()>,
     proc: Mutex<Proc>,
     latency: AtomicU32,
+    /// Latest automated value per parameter (render thread), and what the
+    /// controller was last told (GUI thread), for showing automation.
+    automated: Mutex<HashMap<ParamID, f64>>,
+    shown: Mutex<HashMap<ParamID, f64>>,
 }
 
 // The plugin objects are used from the control and render threads, as every
@@ -724,16 +747,15 @@ impl Vst3Instance {
                 ctrl: Mutex::new(()),
                 proc: Mutex::new(Proc { next_pos: None, continuous: 0, ins: bufs(&ic), outs: bufs(&oc) }),
                 latency: AtomicU32::new(latency),
+                automated: Mutex::new(HashMap::new()),
+                shown: Mutex::new(HashMap::new()),
             })
         }
     }
 
     /// Parameter changes waiting for the processor (last value per parameter wins).
-    fn take_changes(&self) -> Option<ComWrapper<Changes>> {
+    fn take_pending(&self) -> Vec<(ParamID, f64)> {
         let pending = std::mem::take(&mut *self.edits.pending.lock().unwrap());
-        if pending.is_empty() {
-            return None;
-        }
         let mut last: Vec<(ParamID, f64)> = vec![];
         for (id, v) in pending {
             match last.iter_mut().find(|x| x.0 == id) {
@@ -741,9 +763,19 @@ impl Vst3Instance {
                 None => last.push((id, v)),
             }
         }
-        Some(ComWrapper::new(Changes(
-            last.into_iter().map(|(id, value)| ComWrapper::new(Queue { id, value }).to_com_ptr().unwrap()).collect(),
-        )))
+        last
+    }
+
+    fn changes(queues: Vec<(ParamID, Vec<(i32, f64)>)>) -> Option<ComWrapper<Changes>> {
+        (!queues.is_empty()).then(|| {
+            ComWrapper::new(Changes(
+                queues.into_iter().map(|(id, points)| ComWrapper::new(Queue { id, points }).to_com_ptr().unwrap()).collect(),
+            ))
+        })
+    }
+
+    fn take_changes(&self) -> Option<ComWrapper<Changes>> {
+        Self::changes(self.take_pending().into_iter().map(|(id, v)| (id, vec![(0, v)])).collect())
     }
 
     /// Deliver waiting parameter changes with a zero-sample process call (the
@@ -843,7 +875,8 @@ impl Instance for Vst3Instance {
                     if f(PF::kIsHidden as i64) {
                         return None;
                     }
-                    let value = c.getParamNormalized(pi.id);
+                    // an automated parameter shows its automation, not the controller's last value
+                    let value = self.automated.lock().unwrap().get(&pi.id).copied().unwrap_or_else(|| c.getParamNormalized(pi.id));
                     let mut s: String128 = [0; 128];
                     let display = if ok(c.getParamStringByValue(pi.id, value, &mut s)) { utf16(&s) } else { format!("{value:.3}") };
                     Some(ParamInfo {
@@ -928,7 +961,7 @@ impl Instance for Vst3Instance {
         Ok(())
     }
 
-    fn process(&self, buf: &mut [f32], channels: usize, pos: i64) {
+    fn process(&self, buf: &mut [f32], channels: usize, pos: i64, automation: &[ParamCurve]) {
         let channels = channels.max(1);
         let frames = buf.len() / channels;
         let mut p = self.proc.lock().unwrap();
@@ -938,13 +971,25 @@ impl Instance for Vst3Instance {
         if self.edits.latency_changed.swap(false, Relaxed) {
             self.latency.store(unsafe { self.processor.getLatencySamples() }, Relaxed);
         }
-        let changes = self.take_changes();
+        // waiting edits for parameters that aren't automated, then the automation
+        let manual: Vec<(ParamID, f64)> =
+            self.take_pending().into_iter().filter(|(id, _)| !automation.iter().any(|c| c.id == *id)).collect();
         let mut off = 0;
         while off < frames {
             let n = (frames - off).min(self.setup.max_block);
-            let ch = if off == 0 { changes.as_ref() } else { None };
-            self.block(&mut p, &mut buf[off * channels..(off + n) * channels], channels, n, pos + off as i64, ch);
+            let mut queues: Vec<(ParamID, Vec<(i32, f64)>)> = automation.iter().map(|c| (c.id, c.slice(off as u32, n as u32))).collect();
+            if off == 0 {
+                queues.extend(manual.iter().map(|&(id, v)| (id, vec![(0, v)])));
+            }
+            let ch = Self::changes(queues);
+            self.block(&mut p, &mut buf[off * channels..(off + n) * channels], channels, n, pos + off as i64, ch.as_ref());
             off += n;
+        }
+        if !automation.is_empty() {
+            let mut a = self.automated.lock().unwrap();
+            for c in automation {
+                a.insert(c.id, c.last());
+            }
         }
         p.next_pos = Some(pos + frames as i64);
     }
@@ -961,6 +1006,23 @@ impl Instance for Vst3Instance {
 
     fn take_dirty(&self) -> bool {
         self.edits.dirty.swap(false, Relaxed)
+    }
+
+    fn take_gestures(&self) -> Vec<Gesture> {
+        std::mem::take(&mut *self.edits.gestures.lock().unwrap())
+    }
+
+    fn sync_display(&self) {
+        let Some(c) = &self.controller else { return };
+        let now: Vec<(ParamID, f64)> = self.automated.lock().unwrap().iter().map(|(k, v)| (*k, *v)).collect();
+        let mut shown = self.shown.lock().unwrap();
+        let _g = self.ctrl.lock().unwrap();
+        for (id, v) in now {
+            if shown.get(&id).is_none_or(|s| (s - v).abs() > 1e-6) {
+                unsafe { c.setParamNormalized(id, v) };
+                shown.insert(id, v);
+            }
+        }
     }
 
     fn open_editor(&self, parent: crate::ParentWindow, host: std::rc::Rc<dyn crate::EditorHost>) -> Result<Box<dyn crate::Editor>, String> {

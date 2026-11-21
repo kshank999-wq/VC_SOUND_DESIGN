@@ -174,16 +174,36 @@ impl IAudioProcessorTrait for Processor {
     }
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let d = &*data;
+        // gain points for this block (sample-accurate, linear in between, as the SDK describes)
+        let start = f64::from_bits(self.gain.load(Relaxed));
+        let mut pts: Vec<(i32, f64)> = vec![];
         if let Some(changes) = ComRef::from_raw(d.inputParameterChanges) {
             for i in 0..changes.getParameterCount() {
                 if let Some(q) = ComRef::from_raw(changes.getParameterData(i)) {
-                    let (mut off, mut v) = (0, 0.0);
-                    if q.getParameterId() == 0 && q.getPoint(q.getPointCount() - 1, &mut off, &mut v) == kResultOk {
-                        self.gain.store(v.to_bits(), Relaxed);
+                    if q.getParameterId() != 0 {
+                        continue;
+                    }
+                    for k in 0..q.getPointCount() {
+                        let (mut off, mut v) = (0, 0.0);
+                        if q.getPoint(k, &mut off, &mut v) == kResultOk {
+                            pts.push((off, v));
+                        }
                     }
                 }
             }
         }
+        if let Some(&(_, v)) = pts.last() {
+            self.gain.store(v.to_bits(), Relaxed);
+        }
+        let gain_at = |f: i32| -> f64 {
+            let i = pts.partition_point(|p| p.0 <= f);
+            match (i.checked_sub(1).map(|k| pts[k]), pts.get(i)) {
+                (Some(a), Some(b)) => a.1 + (b.1 - a.1) * (f - a.0) as f64 / (b.0 - a.0).max(1) as f64,
+                (Some(a), None) => a.1,
+                (None, Some(b)) => start + (b.1 - start) * f as f64 / b.0.max(1) as f64,
+                (None, None) => start,
+            }
+        };
         if d.numInputs < 1 || d.numOutputs < 1 || d.numSamples <= 0 {
             return kResultOk;
         }
@@ -192,7 +212,6 @@ impl IAudioProcessorTrait for Processor {
         let ch = ib.numChannels.min(ob.numChannels) as usize;
         let ins = slice::from_raw_parts(ib.__field0.channelBuffers32, ch);
         let outs = slice::from_raw_parts(ob.__field0.channelBuffers32, ch);
-        let g = gain_of(f64::from_bits(self.gain.load(Relaxed)));
         let mut line = self.line.lock().unwrap();
         let (buf, w) = &mut *line;
         if buf.len() != self.delay * ch {
@@ -200,6 +219,7 @@ impl IAudioProcessorTrait for Processor {
             *w = 0;
         }
         for f in 0..n {
+            let g = gain_of(gain_at(f as i32));
             for c in 0..ch {
                 let x = *ins[c].add(f);
                 let y = if self.delay == 0 {
@@ -643,8 +663,8 @@ pub extern "system" fn GetPluginFactory() -> *mut IPluginFactory {
 }
 
 /// For tests: put this plugin, as built by cargo, into a `.vst3` bundle under
-/// `dir` (`dir/VCSD Test.vst3`) and return the bundle path. Builds the library
-/// first if it isn't there yet.
+/// `dir` (`dir/VCSD Test.vst3`) and return the bundle path. Runs `cargo build`
+/// for it first (instant when it is up to date).
 pub fn make_bundle(dir: &std::path::Path) -> std::path::PathBuf {
     use std::path::Path;
     let target = std::env::var_os("CARGO_TARGET_DIR")
@@ -659,7 +679,8 @@ pub fn make_bundle(dir: &std::path::Path) -> std::path::PathBuf {
     };
     let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
     let lib = target.join(profile).join(file);
-    if !lib.exists() {
+    // always ask cargo: a stale library from an older build must not be tested
+    {
         let mut cmd = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
         cmd.args(["build", "-p", "vcsd-testplug"]);
         if profile == "release" {

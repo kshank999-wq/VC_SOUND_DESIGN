@@ -52,6 +52,16 @@
   at most twice a second, so they're saved and autosaved. Before saving state, waiting
   parameter changes are flushed with a zero-sample `process` call. On Linux the app runs on
   X11 (XWayland under Wayland), because VST3 editors embed X11 windows.
+- **Plugin parameter automation.** A plugin parameter's lane is owned by the plugin slot, with
+  parameter `plugin:<id>` and normalised 0–1 values. It is drawn under the slot's track or bus
+  and follows that owner's Read/Touch/Latch/Write mode. For each block the mixer gives the
+  plugin host each automated parameter's curve: the value at the block start, every breakpoint
+  inside it, and the value at its end. VST3 plugins get it as sample-accurate parameter queues,
+  split along with the block. Audio Units have the parameter set every 64 samples. Writing
+  uses the same passes as faders: the parameter panel's sliders send touches, and gestures in
+  a plugin's own window (begin/perform/end edit, with timestamps) are placed at the timeline
+  position they happened at. While a lane plays, the plugin's window and the parameter panel
+  show its values. Removing a plugin removes its lanes, and undo brings both back.
 - **Plugin delay compensation by reading ahead.** The timeline can be read at any position, so a
   chain reporting `L` samples of latency is fed its input `L` samples early instead of delaying
   everything else. When a chain doesn't continue from where it left off (locate, loop, a second
@@ -129,15 +139,18 @@
 - Plugin editor windows are tested end to end on Linux (X11) only. On macOS and Windows the
   code is type-checked, and the Audio Unit editor has not run yet. Browser mode (`vcsd serve`)
   has the parameter panel only.
-- Changes made in a plugin's own window are not undoable (the plugin's state is saved, not
-  each move).
+- Changes made in a plugin's own window outside an automation pass are not undoable (the
+  plugin's state is saved, not each move).
+- Audio Unit parameter automation is applied every 64 samples; VST3 is sample-accurate.
+- Plugin lanes show values as 0–100 %, not in the plugin's own units.
 - Plugin parameters can't be automated yet (track/bus volume and pan can).
 - Inserts are effects only: instruments, sidechain inputs and MIDI to plugins are not routed.
 
 ## Roadmap
 
-1. **Plugins, next steps:** parameter automation lanes, and a test pass with common commercial
-   plugins (and their editors) on each OS.
+1. **Plugins, next steps:** a test pass with common commercial plugins (editors and
+   automation) on each OS, and sample-accurate Audio Unit automation
+   (`AudioUnitScheduleParameters`).
 2. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
 3. **Distribution:** cloud-HSM Windows signing (`signCommand`), a beta update channel, and delta updates.
 4. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).

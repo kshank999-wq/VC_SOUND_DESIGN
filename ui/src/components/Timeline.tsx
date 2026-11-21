@@ -4,7 +4,9 @@ import type { EngineHook } from "../store";
 import { catColor, catKey, type Bus, type Clip, type Marker, type Selection, type Track } from "../types";
 import { frameAtSample, sampleAtFrame, snap, tcAt, type Rate } from "../tc";
 import { applyClipDrag, clipZone, type ClipEdit, type ClipZone } from "../clipEdit";
-import { formatValue, neutral, posToValue, valueAt, valueToPos, type AutoPoint, type Param } from "../automation";
+import { AUTO_OPEN_KEY, formatValue, hidePluginLane, isPluginParam, LANES_EVENT, neutral, pluginParamId, posToValue, showPluginLane, shownPluginLanes, valueAt, valueToPos, type AutoPoint, type Param } from "../automation";
+import { paramsOf, paramTitle, useParamsVersion } from "../pluginParams";
+import type { PluginSlot } from "../types";
 import { ModeButton, type AutoMode } from "./AutoControl";
 import { folderTree, parentOf } from "../folders";
 
@@ -23,7 +25,8 @@ type Hit = { x: number; y: number; w: number; h: number; kind: "clip" | "marker"
 
 const AUTO = 56; // automation lane height
 const PARAMS: Param[] = ["volume_db", "pan"];
-const PARAM_LABEL: Record<Param, string> = { volume_db: "Volume", pan: "Pan" };
+const PARAM_LABEL: Record<string, string> = { volume_db: "Volume", pan: "Pan" };
+const ADD_H = 24; // "+ plugin lane" row
 
 const BUS_H = 30; // bus header row height
 /** Anything automation can be attached to: a track or a bus (incl. master). */
@@ -34,17 +37,47 @@ type Row =
   | { kind: "folder"; path: string; name: string; depth: number; collapsed: boolean; trackIds: string[]; y: number; h: number }
   | { kind: "track"; t: Track; depth: number; y: number; h: number }
   | { kind: "bus"; b: Bus; first: boolean; y: number; h: number }
-  | { kind: "auto"; owner: Owner; param: Param; y: number; h: number };
+  /** `lane`: whose points these are (the owner, or a plugin slot for plugin parameters). */
+  | { kind: "auto"; owner: Owner; lane: string; param: Param; label: string; plugin?: string; y: number; h: number }
+  | { kind: "autoAdd"; owner: Owner; slots: PluginSlot[]; y: number; h: number };
+
+/** What decides which plugin lanes appear. */
+interface PluginLanes {
+  automation: AutoPoint[];
+  shown: Set<string>;
+  title: (slot: string, id: number) => string;
+  current: (slot: string, id: number) => number;
+}
 
 /** Track rows, each followed by its automation lanes when open (y relative to the first track). */
-function buildRows(tracks: Track[], buses: Bus[], open: Set<string>, collapsed: Set<string>): Row[] {
+function buildRows(tracks: Track[], buses: Bus[], open: Set<string>, collapsed: Set<string>, pl: PluginLanes): Row[] {
   const rows: Row[] = [];
   let y = 0;
-  const lanes = (owner: Owner) => {
+  const lanes = (owner: Owner, inserts: Track["inserts"]) => {
     if (!open.has(owner.id)) return;
     for (const param of PARAMS) {
-      rows.push({ kind: "auto", owner, param, y, h: AUTO });
+      const label = param === "pan" && owner.id.startsWith("bus_") ? "Balance" : PARAM_LABEL[param];
+      rows.push({ kind: "auto", owner, lane: owner.id, param, label, y, h: AUTO });
       y += AUTO;
+    }
+    // plugin parameters: those with automation, and those chosen with "+ Plugin lane"
+    const slots = inserts.filter((i): i is PluginSlot => i.type === "plugin");
+    for (const sl of slots) {
+      const ids = new Set<number>();
+      for (const p of pl.automation) if (p.owner_id === sl.id && isPluginParam(p.param)) ids.add(pluginParamId(p.param));
+      for (const k of pl.shown) {
+        const [slot, param] = k.split("|");
+        if (slot === sl.id && isPluginParam(param)) ids.add(pluginParamId(param));
+      }
+      for (const id of [...ids].sort((a, b) => a - b)) {
+        const param = `plugin:${id}` as Param;
+        rows.push({ kind: "auto", owner: { ...owner, pan: pl.current(sl.id, id) }, lane: sl.id, param, label: `${sl.name} · ${pl.title(sl.id, id)}`, plugin: sl.name, y, h: AUTO });
+        y += AUTO;
+      }
+    }
+    if (slots.length) {
+      rows.push({ kind: "autoAdd", owner, slots, y, h: ADD_H });
+      y += ADD_H;
     }
   };
   for (const item of folderTree(tracks, collapsed)) {
@@ -56,19 +89,19 @@ function buildRows(tracks: Track[], buses: Bus[], open: Set<string>, collapsed: 
     const t = item.track;
     rows.push({ kind: "track", t, depth: item.depth, y, h: TRACK });
     y += TRACK;
-    lanes({ id: t.id, name: t.name, color: catColor(t.category), pan: t.pan });
+    lanes({ id: t.id, name: t.name, color: catColor(t.category), pan: t.pan }, t.inserts);
   }
   // buses: stem buses in mixer order, master last
   const ordered = [...buses.filter((b) => b.parent_id), ...buses.filter((b) => !b.parent_id)];
   ordered.forEach((b, i) => {
     rows.push({ kind: "bus", b, first: i === 0, y, h: BUS_H });
     y += BUS_H;
-    lanes({ id: b.id, name: b.name, color: b.parent_id ? "#9aa7b8" : "#e6c86e", pan: 0 });
+    lanes({ id: b.id, name: b.name, color: b.parent_id ? "#9aa7b8" : "#e6c86e", pan: 0 }, b.inserts ?? []);
   });
   return rows;
 }
 
-const AUTO_KEY = "vcsd.automationLanes";
+const AUTO_KEY = AUTO_OPEN_KEY;
 const FOLDER_KEY = "vcsd.collapsedFolders";
 function loadSet(key: string): Set<string> {
   try {
@@ -178,7 +211,24 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
   const [, force] = useState(0);
   const lanes = view?.lanes ?? [];
   const tracks = view?.tracks ?? [];
-  const rows = buildRows(tracks, view?.buses ?? [], autoOpen, collapsed);
+  // plugin lanes: re-read when one is shown/hidden elsewhere (plugin panel)
+  const [shownLanes, setShownLanes] = useState<Set<string>>(shownPluginLanes);
+  useEffect(() => {
+    const on = () => {
+      setShownLanes(shownPluginLanes());
+      setAutoOpen(loadOpen());
+    };
+    window.addEventListener(LANES_EVENT, on);
+    return () => window.removeEventListener(LANES_EVENT, on);
+  }, []);
+  useParamsVersion(); // lane names arrive asynchronously
+  const automation = (view?.automation ?? []) as AutoPoint[];
+  const rows = buildRows(tracks, view?.buses ?? [], autoOpen, collapsed, {
+    automation,
+    shown: shownLanes,
+    title: paramTitle,
+    current: (slot, id) => paramsOf(slot)?.find((p) => p.id === id)?.value ?? 0.5,
+  });
   const rowsH = rows.reduce((a, r) => a + r.h, 0);
   const contentH = RULER + SCENES + lanes.length * LANE + rowsH + 40;
   const stateRef = useRef({ view, tx, vp, sel, scrollY, size, rate, livePosition, rows });
@@ -510,7 +560,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         const refV = r.param === "pan" ? 0 : 0;
         ctx.fillStyle = "rgba(255,255,255,0.08)";
         ctx.fillRect(0, Math.round(autoY(r.param, refV, top)), W, 1);
-        let pts = autoPts.filter((p) => p.owner_id === r.owner.id && p.param === r.param);
+        let pts = autoPts.filter((p) => p.owner_id === r.lane && p.param === r.param);
         if (d?.kind === "auto" && d.autoPreview && pts.some((p) => p.id === d.id)) {
           const pv = d.autoPreview;
           pts = pts.filter((p) => p.id === d.id || p.sample !== pv.sample).map((p) => (p.id === d.id ? { ...p, sample: pv.sample, value: pv.value } : p));
@@ -557,7 +607,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
             newHits.push({ x: px - 6, y: py - 6 - scrollY, w: 12, h: 12, kind: "auto", id: p.id });
           }
         }
-        const wr = st.tx?.writing?.find((w) => w.owner_id === r.owner.id && w.param === r.param);
+        const wr = st.tx?.writing?.find((w) => w.owner_id === r.lane && w.param === r.param);
         if (wr && wr.value !== null) {
           // being written right now: live value at the playhead
           const wx = X(st.livePosition());
@@ -702,14 +752,14 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         drag.current = { kind: "auto", id: ph.id, x0: x, s0: s, moved: false, delta: 0, cur: s, autoTop: row.y };
       } else {
         // add a breakpoint: on the line keep its value, elsewhere take the pointer's
-        const pts = autoPoints(row.owner.id, row.param);
+        const pts = autoPoints(row.lane, row.param);
         const sample = e.altKey ? Math.round(s) : snapS(s);
         const lineV = valueAt(pts, sample, neutral(row.param, row.owner.pan));
         const value = Math.abs(autoY(row.param, lineV, ra.top) - y) <= 4 ? lineV : autoVal(row.param, y, ra.top);
         // listeners attach right away; the new point's id arrives asynchronously
         const pending: Drag = { kind: "auto", id: "", x0: x, s0: s, moved: false, delta: 0, cur: s, autoTop: row.y };
         drag.current = pending;
-        run<{ id: string }>("automation.set", { owner_id: row.owner.id, param: row.param === "pan" ? "pan" : "volume_db", sample, value }).then((r) => {
+        run<{ id: string }>("automation.set", { owner_id: row.lane, param: row.param, sample, value }).then((r) => {
           if (r) pending.id = r.id;
         });
       }
@@ -900,12 +950,14 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
               <FolderHead key={"f:" + r.path} row={r} eng={eng} selected={sel?.kind === "folder" && sel.id === r.path} onSelect={() => setSel({ kind: "folder", id: r.path })} onToggle={() => toggleFolder(r.path)} />
             ) : r.kind === "track" ? (
               <TrackHead key={r.t.id} t={r.t} depth={r.depth} eng={eng} selected={sel?.kind === "track" && sel.id === r.t.id} onSelect={() => setSel({ kind: "track", id: r.t.id })}
-                autoOpen={autoOpen.has(r.t.id)} hasAuto={((view.automation ?? []) as AutoPoint[]).some((p) => p.owner_id === r.t.id)} onToggleAuto={() => toggleAuto(r.t.id)} />
+                autoOpen={autoOpen.has(r.t.id)} hasAuto={hasAutomation(automation, r.t.id, r.t.inserts)} onToggleAuto={() => toggleAuto(r.t.id)} />
             ) : r.kind === "bus" ? (
               <BusHead key={r.b.id} b={r.b} eng={eng} first={r.first} autoOpen={autoOpen.has(r.b.id)}
-                hasAuto={((view.automation ?? []) as AutoPoint[]).some((p) => p.owner_id === r.b.id)} onToggleAuto={() => toggleAuto(r.b.id)} />
+                hasAuto={hasAutomation(automation, r.b.id, r.b.inserts ?? [])} onToggleAuto={() => toggleAuto(r.b.id)} />
+            ) : r.kind === "autoAdd" ? (
+              <PluginLaneAdd key={"add:" + r.owner.id} owner={r.owner} slots={r.slots} />
             ) : (
-              <AutoHead key={r.owner.id + r.param} owner={r.owner} param={r.param} eng={eng} points={autoPoints(r.owner.id, r.param)} />
+              <AutoHead key={r.lane + r.param} row={r} eng={eng} points={autoPoints(r.lane, r.param)} />
             ),
           )}
         </div>
@@ -936,15 +988,48 @@ function BusHead({ b, eng, first, autoOpen, hasAuto, onToggleAuto }: { b: Bus; e
   );
 }
 
-function AutoHead({ owner, param, eng, points }: { owner: Owner; param: Param; eng: EngineHook; points: AutoPoint[] }) {
+function AutoHead({ row, eng, points }: { row: Extract<Row, { kind: "auto" }>; eng: EngineHook; points: AutoPoint[] }) {
+  const { owner, param, lane, label } = row;
   const v = valueAt(points, eng.livePosition(), neutral(param, owner.pan));
+  const plugin = isPluginParam(param);
+  const what = plugin ? label : PARAM_LABEL[param].toLowerCase();
   return (
-    <div className="auto-head" style={{ height: AUTO }}>
-      <span className="small">{param === "pan" && owner.id.startsWith("bus_") ? "Balance" : PARAM_LABEL[param]}{param === "volume_db" && <span className="muted"> (vs fader)</span>}</span>
+    <div className={"auto-head" + (plugin ? " plugin" : "")} style={{ height: AUTO }}>
+      <span className="small ellipsis" title={label}>{label}{param === "volume_db" && <span className="muted"> (vs fader)</span>}</span>
       <span className="mono small auto-val">{formatValue(param, v)}</span>
       <span className="small muted">{points.length} pt</span>
-      <button className="tiny" disabled={!points.length} title={`Clear ${PARAM_LABEL[param].toLowerCase()} automation`}
-        onClick={() => confirm(`Remove all ${points.length} ${PARAM_LABEL[param].toLowerCase()} points on "${owner.name}"?`) && eng.run("automation.clear", { owner_id: owner.id, param: param === "pan" ? "pan" : "volume_db" })}>×</button>
+      <button className="tiny" disabled={!points.length} title={`Clear ${what} automation`}
+        onClick={() => confirm(`Remove all ${points.length} ${what} points on "${owner.name}"?`) && eng.run("automation.clear", { owner_id: lane, param })}>×</button>
+      {plugin && !points.length && <button className="tiny" title="Hide this lane" onClick={() => hidePluginLane(lane, param)}>–</button>}
+    </div>
+  );
+}
+
+/** Whether a track/bus has any automation, including its plugins'. */
+function hasAutomation(pts: AutoPoint[], owner: string, inserts: Track["inserts"]) {
+  const slots = new Set(inserts.filter((i) => i.type === "plugin").map((i) => (i as PluginSlot).id));
+  return pts.some((p) => p.owner_id === owner || slots.has(p.owner_id));
+}
+
+/** "+ Plugin lane": pick a parameter of one of the owner's plugins to automate. */
+function PluginLaneAdd({ owner, slots }: { owner: Owner; slots: PluginSlot[] }) {
+  useParamsVersion();
+  return (
+    <div className="auto-add" style={{ height: ADD_H }}>
+      <select className="small" value="" onFocus={() => slots.forEach((s) => paramsOf(s.id))}
+        onChange={(e) => {
+          const [slot, param] = e.target.value.split("|");
+          if (slot && param) showPluginLane(owner.id, slot, param as Param);
+        }}>
+        <option value="">+ Plugin lane…</option>
+        {slots.map((s) => (
+          <optgroup key={s.id} label={s.name}>
+            {(paramsOf(s.id) ?? []).filter((p) => p.automatable && !p.read_only && !p.is_bypass).map((p) => (
+              <option key={p.id} value={`${s.id}|plugin:${p.id}`}>{p.title}{p.units ? ` (${p.units})` : ""}</option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
     </div>
   );
 }

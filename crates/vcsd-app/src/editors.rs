@@ -22,13 +22,34 @@ struct Open {
     // field order = drop order: detach the view, then release the instance
     editor: Box<dyn Editor>,
     slot: String,
-    _inst: Arc<dyn Instance>,
+    inst: Arc<dyn Instance>,
     host: Rc<Host>,
     window: tauri::Window,
 }
 
 thread_local! {
     static OPEN: RefCell<HashMap<String, Open>> = RefCell::new(HashMap::new());
+}
+
+/// Number of open editors (readable off the main thread).
+static OPEN_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn count_open() {
+    OPEN_COUNT.store(OPEN.with(|o| o.borrow().len()), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// While editors are open, show automated values in their controls (~20×/s, main thread).
+fn start_display_sync(app: &AppHandle) {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    let app = app.clone();
+    STARTED.call_once(move || {
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(50));
+            if OPEN_COUNT.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                let _ = app.run_on_main_thread(|| OPEN.with(|o| o.borrow().values().for_each(|x| x.inst.sync_display())));
+            }
+        });
+    });
 }
 
 fn label(slot: &str) -> String {
@@ -218,15 +239,20 @@ fn open_on_main(app: &AppHandle, engine: &Engine, slot: &str, title: &str) -> Re
         // detach the view before the window goes away
         WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => {
             OPEN.with(|o| o.borrow_mut().remove(&key));
+            count_open();
         }
         _ => {}
     });
-    OPEN.with(|o| o.borrow_mut().insert(lbl, Open { editor, slot: slot.to_string(), _inst: inst, host, window }));
+    OPEN.with(|o| o.borrow_mut().insert(lbl, Open { editor, slot: slot.to_string(), inst, host, window }));
+    count_open();
+    start_display_sync(app);
     Ok(())
 }
 
 fn close_on_main(slot: &str) {
-    if let Some(x) = OPEN.with(|o| o.borrow_mut().remove(&label(slot))) {
+    let removed = OPEN.with(|o| o.borrow_mut().remove(&label(slot)));
+    count_open();
+    if let Some(x) = removed {
         let window = x.window.clone();
         drop(x); // detach first
         let _ = window.destroy();

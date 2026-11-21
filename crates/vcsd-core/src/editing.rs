@@ -244,20 +244,28 @@ pub fn delete_clip(s: &mut ProjectState, clip_id: &str) -> Result<()> {
 }
 
 /// Legal range for an automation value: volume is dB relative to the track
-/// fader (-96 dB is treated as silence), pan is -1 (L) .. +1 (R).
+/// fader (-96 dB is treated as silence), pan is -1 (L) .. +1 (R), plugin
+/// parameters are normalised 0..1.
 pub fn clamp_automation(param: AutomationParam, v: f32) -> f32 {
     let v = if v.is_finite() { v } else { 0.0 };
     match param {
         AutomationParam::VolumeDb => v.clamp(-96.0, 12.0),
         AutomationParam::Pan => v.clamp(-1.0, 1.0),
+        AutomationParam::Plugin(_) => v.clamp(0.0, 1.0),
     }
 }
 
+/// The plugin slot with this id, and the track or bus it sits on.
+pub fn plugin_slot<'a>(s: &'a ProjectState, slot_id: &str) -> Option<(&'a PluginInsert, &'a str)> {
+    let find = |ins: &'a [Insert], owner: &'a str| ins.iter().filter_map(Insert::as_plugin).find(|p| p.id == slot_id).map(|p| (p, owner));
+    s.tracks.values().find_map(|t| find(&t.inserts, &t.id)).or_else(|| s.buses.values().find_map(|b| find(&b.inserts, &b.id)))
+}
+
 fn check_owner(s: &ProjectState, owner_id: &str) -> Result<()> {
-    if s.tracks.contains_key(owner_id) || s.buses.contains_key(owner_id) {
+    if s.tracks.contains_key(owner_id) || s.buses.contains_key(owner_id) || plugin_slot(s, owner_id).is_some() {
         Ok(())
     } else {
-        Err(not_found("track or bus", owner_id))
+        Err(not_found("track, bus or plugin", owner_id))
     }
 }
 
@@ -305,6 +313,8 @@ pub fn automation_value_at(s: &ProjectState, owner_id: &str, param: AutomationPa
     let neutral = match param {
         AutomationParam::Pan => s.tracks.get(owner_id).map(|t| t.pan).unwrap_or(0.0),
         AutomationParam::VolumeDb => 0.0,
+        // the value set in the app, if any (otherwise the plugin's own state decides)
+        AutomationParam::Plugin(id) => plugin_slot(s, owner_id).and_then(|(p, _)| p.params.get(&id)).map(|v| *v as f32).unwrap_or(0.5),
     };
     match pts.as_slice() {
         [] => neutral,
@@ -389,9 +399,16 @@ pub fn write_automation_pass(
     if rec[rec.len() - 1].0 < end {
         rec.push((end, last));
     }
-    let tol = if param == AutomationParam::Pan { 0.01 } else { 0.25 };
+    let tol = match param {
+        AutomationParam::Pan => 0.01,
+        AutomationParam::Plugin(_) => 0.002,
+        AutomationParam::VolumeDb => 0.25,
+    };
     let mut out = thin(&rec, tol);
-    if ramp > 0 {
+    // a plugin lane's first pass has nothing to return to: the lane simply holds
+    // its first and last written values (the plugin's static value is unknown here)
+    let new_plugin_lane = matches!(param, AutomationParam::Plugin(_)) && !had_points;
+    if ramp > 0 && !new_plugin_lane {
         if had_points || (before - out[0].1).abs() > tol {
             out.insert(0, (start - ramp, before));
         }
@@ -403,6 +420,21 @@ pub fn write_automation_pass(
         s.automation.insert(id.clone(), AutomationPoint { id, owner_id: owner_id.into(), param, sample: t, value: v });
     }
     Ok(n)
+}
+
+/// Remove the automation of plugin slots that no longer exist (after a slot is removed).
+pub fn drop_orphan_plugin_automation(s: &mut ProjectState) -> usize {
+    let live: std::collections::HashSet<String> = s
+        .tracks
+        .values()
+        .flat_map(|t| &t.inserts)
+        .chain(s.buses.values().flat_map(|b| &b.inserts))
+        .filter_map(Insert::as_plugin)
+        .map(|p| p.id.clone())
+        .collect();
+    let before = s.automation.len();
+    s.automation.retain(|_, p| !matches!(p.param, AutomationParam::Plugin(_)) || live.contains(&p.owner_id));
+    before - s.automation.len()
 }
 
 /// Set the automation mode of a track or bus.

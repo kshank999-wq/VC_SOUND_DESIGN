@@ -351,7 +351,15 @@ body.resizing-h, body.resizing-h * { cursor: row-resize !important; }
 .plugin-head { display: flex; align-items: center; gap: 6px; cursor: move; border-radius: 8px 8px 0 0; user-select: none; }
 .plugin-body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; overflow: auto; }
 .param-list { display: flex; flex-direction: column; gap: 4px; }
-.param-row { display: grid; grid-template-columns: 110px minmax(0, 1fr) 84px; gap: 8px; align-items: center; font-size: 12px; }
+.param-row { display: grid; grid-template-columns: 110px minmax(0, 1fr) 84px 22px; gap: 8px; align-items: center; font-size: 12px; }
 .param-row input[type="range"] { width: 100%; }
 .param-val { text-align: right; font-size: 11px; color: #cfd6e0; }
 .warn-box { background: #3a2a1c; border: 1px solid #a65; border-radius: 4px; padding: 6px 8px; color: #f3c9a2; }
+
+/* plugin automation */
+.auto-head.plugin { background: #1f2229; }
+.auto-head.plugin .small:first-child { color: #c9b6f2; }
+.auto-add { display: flex; align-items: center; padding: 0 8px 0 18px; border-bottom: 1px solid var(--line); background: #181a1f; }
+.auto-add select { max-width: 100%; font-size: 11px; }
+.param-row .has-auto { color: #c9b6f2; border-color: #7d68b3; }
+.param-row.writing input[type="range"] { accent-color: #ff5a4f; }

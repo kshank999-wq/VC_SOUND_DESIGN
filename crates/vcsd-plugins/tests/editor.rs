@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use vcsd_plugins::vst3host::{scan_factory, Vst3Instance};
-use vcsd_plugins::{EditorHost, Instance, ParentWindow, RunLoop, Setup};
+use vcsd_plugins::{EditorHost, GesturePhase, Instance, ParentWindow, RunLoop, Setup};
 use vst3::ComPtr;
 use x11::xlib;
 
@@ -151,10 +151,17 @@ fn embeds_resizes_and_edits_through_the_run_loop() {
             break;
         }
     }
+    // the touch arrives as a gesture (for writing automation): begin, the value, end
+    let gs = inst.take_gestures();
+    let phases: Vec<GesturePhase> = gs.iter().map(|g| g.phase).collect();
+    assert_eq!(phases, [GesturePhase::Begin, GesturePhase::Move, GesturePhase::End]);
+    assert!(gs[0].value.is_nan(), "nothing known before the first move");
+    assert!((gs[1].value - 0.75).abs() < 1e-9 && (gs[2].value - 0.75).abs() < 1e-9);
+    assert!(inst.take_gestures().is_empty());
     let v = inst.params()[0].value;
     assert!((v - 0.75).abs() < 1e-9, "edit made in the plugin's window reached the controller: {v}");
     let mut buf = vec![0.5f32; 64];
-    inst.process(&mut buf, 2, 0);
+    inst.process(&mut buf, 2, 0, &[]);
     assert!((buf[0] - 0.75).abs() < 1e-6, "…and the processor (gain ×1.5): {}", buf[0]);
 
     drop(ed);

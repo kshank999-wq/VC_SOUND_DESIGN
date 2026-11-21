@@ -6,7 +6,8 @@
 //! `ClassInfo` property list, stored as binary plist data.
 #![allow(non_upper_case_globals, non_snake_case, clippy::missing_safety_doc)]
 
-use crate::{join_out, split_in, Instance, ParamInfo, PluginInfo, Setup};
+use crate::{join_out, split_in, Instance, ParamCurve, ParamInfo, PluginInfo, Setup};
+use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering::*};
@@ -259,6 +260,9 @@ pub struct AuInstance {
     proc: Mutex<Proc>,
     pending: Mutex<Vec<(u32, f32)>>,
     dirty: AtomicBool,
+    /// Parameter ranges (normalised automation → the unit's plain values).
+    ranges: Mutex<HashMap<u32, (f32, f32)>>,
+    automated: Mutex<HashMap<u32, f64>>,
 }
 
 unsafe impl Send for AuInstance {}
@@ -363,6 +367,8 @@ impl AuInstance {
                 proc: Mutex::new(Proc { next_pos: None, sample_time: 0.0, outs: vec![vec![0.0; setup.max_block]; ch] }),
                 pending: Mutex::new(vec![]),
                 dirty: AtomicBool::new(false),
+                ranges: Mutex::new(HashMap::new()),
+                automated: Mutex::new(HashMap::new()),
             })
         }
     }
@@ -420,6 +426,9 @@ impl Instance for AuInstance {
                 unsafe { AudioUnitGetParameter(self.unit, id, SCOPE_GLOBAL, 0, &mut v) };
                 let span = (pi.maxValue - pi.minValue).max(1e-9);
                 let norm = |x: f32| ((x - pi.minValue) / span).clamp(0.0, 1.0) as f64;
+                if let Some(a) = self.automated.lock().unwrap().get(&id) {
+                    v = pi.minValue + span * *a as f32;
+                }
                 Some(ParamInfo {
                     id,
                     title,
@@ -489,7 +498,7 @@ impl Instance for AuInstance {
         Ok(())
     }
 
-    fn process(&self, buf: &mut [f32], channels: usize, pos: i64) {
+    fn process(&self, buf: &mut [f32], channels: usize, pos: i64, automation: &[ParamCurve]) {
         let channels = channels.max(1);
         let frames = buf.len() / channels;
         let mut p = self.proc.lock().unwrap();
@@ -499,9 +508,25 @@ impl Instance for AuInstance {
         for (id, v) in std::mem::take(&mut *self.pending.lock().unwrap()) {
             unsafe { AudioUnitSetParameter(self.unit, id, SCOPE_GLOBAL, 0, v, 0) };
         }
+        // automated parameters: plain value ranges, looked up once
+        let ranges: Vec<(u32, f32, f32)> = automation
+            .iter()
+            .map(|c| {
+                let mut r = self.ranges.lock().unwrap();
+                let (lo, hi) =
+                    *r.entry(c.id).or_insert_with(|| self.param_info(c.id).map(|pi| (pi.minValue, pi.maxValue)).unwrap_or((0.0, 1.0)));
+                (c.id, lo, hi)
+            })
+            .collect();
+        // with automation, render in 64-frame steps and set each parameter at every step
+        let step = if automation.is_empty() { self.setup.max_block } else { 64.min(self.setup.max_block) };
         let mut off = 0;
         while off < frames {
-            let n = (frames - off).min(self.setup.max_block);
+            let n = (frames - off).min(step);
+            for (c, &(id, lo, hi)) in automation.iter().zip(&ranges) {
+                let v = lo + (hi - lo) * c.value_at(off as u32) as f32;
+                unsafe { AudioUnitSetParameter(self.unit, id, SCOPE_GLOBAL, 0, v, 0) };
+            }
             let chunk = &mut buf[off * channels..(off + n) * channels];
             {
                 let mut f = self.feed.lock().unwrap();
@@ -532,6 +557,10 @@ impl Instance for AuInstance {
             off += n;
         }
         p.next_pos = Some(pos + frames as i64);
+        let mut a = self.automated.lock().unwrap();
+        for c in automation {
+            a.insert(c.id, c.last());
+        }
     }
 
     fn reset(&self) {
