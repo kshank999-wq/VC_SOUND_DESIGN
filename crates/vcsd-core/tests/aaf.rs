@@ -61,8 +61,17 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
     for (t, v) in [(2 * sr0, 0.0f32), (3 * sr0, -20.0), (4 * sr0, 0.0)] {
         editing::set_automation(st, &glass_track, AutomationParam::VolumeDb, t, v).unwrap();
     }
-    // pan automation elsewhere is reported, not carried
-    editing::set_automation(st, &door_track, AutomationParam::Pan, sr0, 0.5).unwrap();
+    // pan: a sweep on the (mono) glass track, a balance move across the centre on the stereo wind
+    for (t, v) in [(2 * sr0, -1.0f32), (6 * sr0, 1.0)] {
+        editing::set_automation(st, &glass_track, AutomationParam::Pan, t, v).unwrap();
+    }
+    let wind_cue = st.cues.values().find(|c| c.description.contains("wind")).unwrap().id.clone();
+    let wind_track = st.clips.values().find(|c| c.cue_id.as_deref() == Some(wind_cue.as_str())).unwrap().track_id.clone();
+    assert_eq!(st.tracks[&wind_track].channels, 2, "the ambience is a stereo track");
+    for (t, v) in [(sr0, -0.5f32), (5 * sr0, 0.5)] {
+        editing::set_automation(st, &wind_track, AutomationParam::Pan, t, v).unwrap();
+    }
+    assert_eq!(st.tracks[&glass_track].channels, 1);
 
     let sr = st.project.sample_rate as i64;
     let start = sr; // from 01:00:01:00: clips before it are trimmed
@@ -75,7 +84,9 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
     assert!(rep.losses.iter().any(|l| l.starts_with("muted tracks left out (1)")), "{:?}", rep.losses);
     assert!(rep.losses.iter().any(|l| l.starts_with("overlapping clips split")), "{:?}", rep.losses);
     assert!(rep.losses.iter().any(|l| l.starts_with("track fader gain folded")), "{:?}", rep.losses);
-    assert!(rep.losses.iter().any(|l| l.starts_with("track pan automation not carried (1)")), "{:?}", rep.losses);
+    assert!(!rep.losses.iter().any(|l| l.starts_with("track pan")), "pan is carried: {:?}", rep.losses);
+    assert!(rep.losses.iter().any(|l| l.contains("pan law") && l.ends_with("(1)")), "{:?}", rep.losses);
+    assert_eq!(rep.panned_tracks, 2);
     assert!(
         !rep.losses.iter().any(|l| l.contains("volume") && l.contains("track ")),
         "track volume automation is carried: {:?}",
@@ -150,8 +161,9 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
     };
     for t in tracks {
         let mine = t["name"].as_str().unwrap().starts_with(&gtrack.name);
-        assert_eq!(!t["volume"].is_null(), mine, "{}", t["name"]);
+        let wind = t["name"].as_str().unwrap().starts_with(&s.state.tracks[&wind_track].name);
         if !mine {
+            assert!(wind || t["volume"].is_null(), "only automated tracks get a track gain: {}", t["name"]);
             continue;
         }
         assert_eq!(t["volume"]["operation"], "Mono Audio Gain");
@@ -167,6 +179,83 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
             let g = if b.0 > a.0 { a.1 + (b.1 - a.1) * (rel - a.0) / (b.0 - a.0) } else { a.1 };
             let want = db_at(start + (rel * span).round() as i64);
             assert!((20.0 * g.log10() - want).abs() < 0.12, "at {rel:.3}: {:.2} dB vs {want:.2} dB", 20.0 * g.log10());
+        }
+    }
+
+    // pan on the mono glass track: Mono Audio Pan following (pan + 1) / 2 exactly
+    let pan_lane: Vec<(i64, f32)> = {
+        let mut v: Vec<(i64, f32)> = s
+            .state
+            .automation
+            .values()
+            .filter(|p| p.owner_id == glass_track && p.param == AutomationParam::Pan)
+            .map(|p| (p.sample, p.value))
+            .collect();
+        v.sort_by_key(|p| p.0);
+        v
+    };
+    let lerp = |pts: &[(f64, f64)], x: f64| {
+        let i = pts.partition_point(|p| p.0 <= x).max(1) - 1;
+        let (a, b) = (pts[i], pts[(i + 1).min(pts.len() - 1)]);
+        if b.0 > a.0 {
+            a.1 + (b.1 - a.1) * (x - a.0) / (b.0 - a.0)
+        } else {
+            a.1
+        }
+    };
+    let lane_at = |lane: &[(i64, f32)], t: i64| {
+        let i = lane.partition_point(|p| p.0 <= t);
+        (match (i.checked_sub(1).map(|k| lane[k]), lane.get(i)) {
+            (Some(a), Some(b)) => a.1 + (b.1 - a.1) * ((t - a.0) as f32 / (b.0 - a.0) as f32),
+            (Some(a), None) => a.1,
+            (None, Some(b)) => b.1,
+            _ => 0.0,
+        }) as f64
+    };
+    let span = (end - start) as f64;
+    for t in tracks.iter().filter(|t| t["name"].as_str().unwrap().starts_with(&gtrack.name)) {
+        assert_eq!(t["pan"]["operation"], "Mono Audio Pan");
+        let pts: Vec<(f64, f64)> =
+            t["pan"]["points"].as_array().unwrap().iter().map(|p| (p[0].as_f64().unwrap(), p[1].as_f64().unwrap())).collect();
+        for k in 0..200 {
+            let rel = k as f64 / 200.0 * (span - 2.0) / span;
+            let want = (lane_at(&pan_lane, start + (rel * span).round() as i64) + 1.0) / 2.0;
+            assert!((lerp(&pts, rel) - want).abs() < 1e-4, "pan at {rel:.3}: {} vs {want}", lerp(&pts, rel));
+        }
+    }
+    // the stereo wind: hard-panned L/R, the balance in each side's gain (within 0.12 dB)
+    let wname = s.state.tracks[&wind_track].name.clone();
+    let wlane: Vec<(i64, f32)> = {
+        let mut v: Vec<(i64, f32)> = s
+            .state
+            .automation
+            .values()
+            .filter(|p| p.owner_id == wind_track && p.param == AutomationParam::Pan)
+            .map(|p| (p.sample, p.value))
+            .collect();
+        v.sort_by_key(|p| p.0);
+        v
+    };
+    for (suffix, left) in [(" L", true), (" R", false)] {
+        let t = tracks.iter().find(|t| t["name"] == format!("{wname}{suffix}").as_str()).expect("wind side");
+        assert_eq!(t["pan"]["constant"], if left { 0.0 } else { 1.0 }, "hard {suffix}");
+        let pts: Vec<(f64, f64)> =
+            t["volume"]["points"].as_array().unwrap().iter().map(|p| (p[0].as_f64().unwrap(), p[1].as_f64().unwrap())).collect();
+        for k in 0..400 {
+            let rel = k as f64 / 400.0 * (span - 2.0) / span;
+            let p = lane_at(&wlane, start + (rel * span).round() as i64);
+            let want = if left {
+                if p <= 0.0 {
+                    1.0
+                } else {
+                    1.0 - p
+                }
+            } else if p <= 0.0 {
+                1.0 + p
+            } else {
+                1.0
+            };
+            assert!((20.0 * (lerp(&pts, rel) / want).log10()).abs() < 0.12, "{suffix} at {rel:.3}: {} vs {want}", lerp(&pts, rel));
         }
     }
 

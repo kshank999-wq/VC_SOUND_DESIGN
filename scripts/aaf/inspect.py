@@ -93,17 +93,19 @@ def main(path):
             for m in seg.components:
                 out["markers"].append({"position": m["Position"].value, "comment": m["Comment"].value, "kind": m.classdef.class_name})
         else:
-            volume = None
-            if seg.classdef.class_name == "OperationGroup":
-                # track-level gain automation around the track's sequence
+            effects = {}
+            # track-level effects (gain, pan) around the track's sequence, outermost first
+            while seg.classdef.class_name == "OperationGroup":
                 params = [p for _, p in seg["Parameters"].items()]
-                vv = params[0]
-                assert vv.classdef.class_name == "VaryingValue", vv.classdef.class_name
-                volume = {
-                    "operation": seg.operation.name,
-                    "interpolation": vv["Interpolation"].value.name,
-                    "points": [[float(cp["Time"].value), float(cp["Value"].value)] for cp in vv["PointList"]],
-                }
+                prm = params[0]
+                fx = {"operation": seg.operation.name}
+                if prm.classdef.class_name == "VaryingValue":
+                    fx["interpolation"] = prm["Interpolation"].value.name
+                    fx["points"] = [[float(cp["Time"].value), float(cp["Value"].value)] for cp in prm["PointList"]]
+                else:
+                    fx["constant"] = float(prm.value)
+                key = {"Mono Audio Gain": "volume", "Mono Audio Pan": "pan"}[seg.operation.name]
+                effects[key] = fx
                 assert seg.length == seg.segments[0].length
                 seg = seg.segments[0]
             comps_ = [component(c) for c in seg.components]
@@ -114,7 +116,8 @@ def main(path):
                 "edit_rate": rational(slot.edit_rate),
                 "track": slot["PhysicalTrackNumber"].value if "PhysicalTrackNumber" in slot else None,
                 "length": seg.length,
-                "volume": volume,
+                "volume": effects.get("volume"),
+                "pan": effects.get("pan"),
                 "components": comps_,
             })
     print(json.dumps(out, indent=1))

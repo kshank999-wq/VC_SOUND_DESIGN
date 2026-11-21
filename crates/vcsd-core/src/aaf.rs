@@ -11,6 +11,8 @@
 //!   Mono Audio Gain effect;
 //! - track volume automation as a time-varying Mono Audio Gain around the
 //!   track (Amplitude `VaryingValue`, linear control points);
+//! - pan: Mono Audio Pan on mono tracks (static or automated); stereo tracks
+//!   as hard-panned L/R with the balance in each side's gain;
 //! - cue markers (`CommentMarker`s with code and description).
 //!
 //! The fixed parts of the file — the meta-dictionary (class and type
@@ -18,7 +20,7 @@
 //! definitions) — come from `assets/aaf_template.aaf`, generated with pyaaf2
 //! by `scripts/aaf/make_template.py`. Everything else is written here.
 //!
-//! What AAF can't carry (pan/bus/plugin automation, pan, bus routing, plugins, loop
+//! What AAF can't carry (bus/plugin automation, bus routing, plugins, loop
 //! crossfades, mutes…) is listed in the [`AafReport`]: the rendered stems in
 //! the same package include all of it.
 
@@ -64,6 +66,8 @@ mod key {
     pub const CONTAINER_AAF: &str = "71b51343bad8d211809b006008143e6f";
     pub const OP_MONO_AUDIO_GAIN: &str = "94a82e9d6809d3118a380050040ef7d2";
     pub const PARAM_AMPLITUDE: &str = "212396e46722d3118a4c0050040ef7d2";
+    pub const OP_MONO_AUDIO_PAN: &str = "93a82e9d6809d3118a380050040ef7d2";
+    pub const PARAM_PAN: &str = "222396e46722d3118a4c0050040ef7d2";
     pub const TYPE_RATIONAL: &str = "0001010300000000060e2b3401040101";
     pub const INTERP_LINEAR: &str = "a4856c5bde0ed31180a9006008143e6f";
 }
@@ -378,6 +382,8 @@ pub struct AafReport {
     pub losses: Vec<String>,
     /// Tracks whose volume automation is in the AAF (as time-varying track gain).
     pub automated_tracks: usize,
+    /// Tracks with a pan (static or automated) in the AAF.
+    pub panned_tracks: usize,
 }
 
 /// RIFF header + `fmt ` chunk of a WAV (the WAVEDescriptor `Summary`).
@@ -546,13 +552,58 @@ fn amplitude(g: f64) -> Vec<u8> {
 /// `input` inside a Mono Audio Gain operation with Amplitude `param`
 /// (a ConstantValue or a VaryingValue).
 fn gain_group(len: i64, input: Obj, param: Obj) -> Obj {
+    effect(key::OP_MONO_AUDIO_GAIN, key::PARAM_AMPLITUDE, len, input, param)
+}
+
+/// `input` inside a one-parameter audio effect (Mono Audio Gain / Pan).
+fn effect(op: &str, param_def: &str, len: i64, input: Obj, param: Obj) -> Obj {
     let mut g = Obj::new(class::OPERATION_GROUP)
         .weak(0x0201, "DataDefinition", Defs::Data, key::SOUND)
         .data(0x0202, "Length", i64v(len))
-        .weak(0x0b01, "Operation", Defs::Operation, key::OP_MONO_AUDIO_GAIN)
+        .weak(0x0b01, "Operation", Defs::Operation, op)
         .vector(0x0b02, "InputSegments", vec![input]);
-    g.props.push((0x0b03, "Parameters", Val::Set { key_pid: 0x4c01, items: vec![(hex(key::PARAM_AMPLITUDE), param)] }));
+    g.props.push((0x0b03, "Parameters", Val::Set { key_pid: 0x4c01, items: vec![(hex(param_def), param)] }));
     g
+}
+
+/// A parameter's value over a track: one constant, or control points `(timeline sample, value)`.
+#[derive(Debug, Clone, PartialEq)]
+enum Curve {
+    Const(f64),
+    Points(Vec<(i64, f64)>),
+}
+
+impl Curve {
+    /// Points that all hold one value become a constant.
+    fn from_points(p: Vec<(i64, f64)>) -> Curve {
+        match p.first() {
+            Some(&(_, v)) if p.iter().all(|x| (x.1 - v).abs() < 1e-9) => Curve::Const(v),
+            _ => Curve::Points(p),
+        }
+    }
+    fn param(&self, def: &str, len: i64, start: i64) -> Obj {
+        match self {
+            Curve::Const(v) => Obj::new(class::CONSTANT_VALUE).data(0x4c01, "Definition", hex(def)).data(0x4d01, "Value", amplitude(*v)),
+            Curve::Points(p) => {
+                let cps = p
+                    .iter()
+                    .map(|&(t, v)| {
+                        let rel = t - start;
+                        let time = if len <= i32::MAX as i64 {
+                            rational(rel as i32, len as i32)
+                        } else {
+                            rational((rel as f64 / len as f64 * 1e9) as i32, 1_000_000_000)
+                        };
+                        Obj::new(class::CONTROL_POINT).data(0x1a03, "Time", time).data(0x1a02, "Value", amplitude(v))
+                    })
+                    .collect();
+                Obj::new(class::VARYING_VALUE)
+                    .data(0x4c01, "Definition", hex(def))
+                    .weak(0x4e01, "Interpolation", Defs::Interpolation, key::INTERP_LINEAR)
+                    .vector(0x4e02, "PointList", cps)
+            }
+        }
+    }
 }
 
 /// Lane value in dB at `s` (linear between breakpoints, held at the ends), as the mixer plays it.
@@ -581,12 +632,19 @@ fn db_amp(db: f64) -> f64 {
 /// segments are split until the two agree within 0.1 dB (or 0.001 absolute
 /// near silence).
 pub(crate) fn volume_points(pts: &[(i64, f32)], start: i64, end: i64) -> Vec<(i64, f64)> {
+    let keys: Vec<i64> = pts.iter().map(|p| p.0).collect();
+    gain_points(&keys, start, end, &|t| db_amp(lane_db(pts, t)))
+}
+
+/// Control points for any gain curve `amp(t)` with corners at `keys`: split until
+/// amplitude-linear interpolation stays within 0.1 dB of it (0.001 absolute near silence).
+fn gain_points(keys: &[i64], start: i64, end: i64, amp: &dyn Fn(i64) -> f64) -> Vec<(i64, f64)> {
     let last = end - 1;
-    let mut keys = vec![start];
-    keys.extend(pts.iter().map(|p| p.0).filter(|&t| t > start && t < last));
-    keys.push(last);
-    keys.dedup();
-    let amp = |t: i64| db_amp(lane_db(pts, t));
+    let mut ks = vec![start];
+    ks.extend(keys.iter().copied().filter(|&t| t > start && t < last));
+    ks.push(last);
+    ks.sort();
+    ks.dedup();
     fn split(a: i64, b: i64, amp: &dyn Fn(i64) -> f64, out: &mut Vec<(i64, f64)>, depth: u32) {
         if b - a > 1 && depth < 12 {
             let m = a + (b - a) / 2;
@@ -602,31 +660,79 @@ pub(crate) fn volume_points(pts: &[(i64, f32)], start: i64, end: i64) -> Vec<(i6
         out.push((b, amp(b)));
     }
     let mut out = vec![(start, amp(start))];
-    for w in keys.windows(2) {
-        split(w[0], w[1], &amp, &mut out, 0);
+    for w in ks.windows(2) {
+        split(w[0], w[1], amp, &mut out, 0);
     }
     out
 }
 
-/// A track's sequence inside a gain operation that follows its volume lane.
-fn automated(len: i64, start: i64, seq: Obj, points: &[(i64, f64)]) -> Obj {
-    let cps = points
-        .iter()
-        .map(|&(t, g)| {
-            let rel = t - start;
-            let time = if len <= i32::MAX as i64 {
-                rational(rel as i32, len as i32)
+/// Gain and pan of one AAF track (one channel of one layer of a project track).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Mix {
+    gain: Option<Curve>,
+    pan: Option<Curve>,
+}
+
+/// Gain and pan for each channel of a project track over `[start, end)`.
+/// Mono tracks: volume lane → gain, pan lane (or static pan) → Mono Audio Pan,
+/// mapped exactly (both interpolate pan linearly). Stereo tracks: L/R are hard
+/// panned and the mixer's balance (with the volume lane) becomes each side's gain.
+fn track_mix(s: &ProjectState, t: &Track, start: i64, end: i64) -> Vec<Mix> {
+    let lane = |param: AutomationParam| {
+        let mut v: Vec<(i64, f32)> =
+            s.automation.values().filter(|p| p.owner_id == t.id && p.param == param).map(|p| (p.sample, p.value)).collect();
+        v.sort_by_key(|p| p.0);
+        v
+    };
+    let (vol, pan) = (lane(AutomationParam::VolumeDb), lane(AutomationParam::Pan));
+    let pan_at = |x: i64| if pan.is_empty() { t.pan as f64 } else { lane_db(&pan, x) };
+    let vol_at = |x: i64| if vol.is_empty() { 1.0 } else { db_amp(lane_db(&vol, x)) };
+    let keys: Vec<i64> = vol.iter().chain(&pan).map(|p| p.0).collect();
+    if t.channels < 2 {
+        let gain = (!vol.is_empty()).then(|| Curve::from_points(volume_points(&vol, start, end)));
+        let pan_curve = if pan.is_empty() {
+            (t.pan.abs() > 0.001).then(|| Curve::Const((t.pan as f64 + 1.0) / 2.0))
+        } else {
+            // linear in both: the breakpoints are enough
+            let last = end - 1;
+            let mut ks = vec![start];
+            ks.extend(pan.iter().map(|p| p.0).filter(|&x| x > start && x < last));
+            ks.push(last);
+            ks.dedup();
+            Some(Curve::from_points(ks.into_iter().map(|x| (x, (pan_at(x).clamp(-1.0, 1.0) + 1.0) / 2.0)).collect()))
+        };
+        return vec![Mix { gain, pan: pan_curve }];
+    }
+    let side = |left: bool| {
+        let bal = move |p: f64| {
+            if left {
+                if p <= 0.0 {
+                    1.0
+                } else {
+                    1.0 - p
+                }
+            } else if p <= 0.0 {
+                1.0 + p
             } else {
-                rational((rel as f64 / len as f64 * 1e9) as i32, 1_000_000_000)
-            };
-            Obj::new(class::CONTROL_POINT).data(0x1a03, "Time", time).data(0x1a02, "Value", amplitude(g))
-        })
-        .collect();
-    let vv = Obj::new(class::VARYING_VALUE)
-        .data(0x4c01, "Definition", hex(key::PARAM_AMPLITUDE))
-        .weak(0x4e01, "Interpolation", Defs::Interpolation, key::INTERP_LINEAR)
-        .vector(0x4e02, "PointList", cps);
-    gain_group(len, seq, vv)
+                1.0
+            }
+        };
+        let f = |x: i64| vol_at(x) * bal(pan_at(x).clamp(-1.0, 1.0));
+        // the balance has a corner where the pan crosses the centre
+        let mut ks = keys.clone();
+        for w in pan.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if (a.1 < 0.0) != (b.1 < 0.0) && (b.1 - a.1).abs() > 1e-9 {
+                ks.push(a.0 + ((0.0 - a.1) / (b.1 - a.1) * (b.0 - a.0) as f32) as i64);
+            }
+        }
+        let gain = match Curve::from_points(gain_points(&ks, start, end, &f)) {
+            Curve::Const(v) if (v - 1.0).abs() < 1e-9 => None,
+            c => Some(c),
+        };
+        Mix { gain, pan: Some(Curve::Const(if left { 0.0 } else { 1.0 })) }
+    };
+    vec![side(true), side(false)]
 }
 
 /// What to export and how to name it.
@@ -723,11 +829,13 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
 
     // ---- what the timeline can't hold
     let n_auto = |f: &dyn Fn(&AutomationPoint) -> bool| s.automation.values().filter(|p| f(p)).count();
-    losses.add("track pan automation not carried", n_auto(&|p| p.param == AutomationParam::Pan && s.tracks.contains_key(&p.owner_id)));
     losses.add("bus and master volume/balance automation not carried", n_auto(&|p| s.buses.contains_key(&p.owner_id)));
     losses.add("plugin parameter automation not carried", n_auto(&|p| matches!(p.param, AutomationParam::Plugin(_))));
-    let panned = s.tracks.values().filter(|t| t.pan.abs() > 0.001).count();
-    losses.add("track pan not carried", panned);
+    let pans = |t: &Track| t.pan.abs() > 0.001 || s.automation.values().any(|p| p.owner_id == t.id && p.param == AutomationParam::Pan);
+    losses.add(
+        "mono track pan uses the receiving app's pan law (VC Sound Design: −3 dB constant power)",
+        s.tracks.values().filter(|t| !t.mute && t.channels < 2 && pans(t)).count(),
+    );
     let inserts = s.tracks.values().map(|t| t.inserts.len()).chain(s.buses.values().map(|b| b.inserts.len())).sum();
     losses.add("insert effects and plugins not carried (rendered in stems and mix)", inserts);
     losses.add("bus routing and bus gain not carried: tracks are flat", s.buses.values().filter(|b| b.parent_id.is_some()).count());
@@ -822,21 +930,11 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         .data(0x1502, "FPS", u16v(fr.nominal() as u16))
         .data(0x1503, "Drop", u8v(fr.drop_frame as u8));
     let mut slots = vec![slot(1, "TC1", (fr.num as i32, fr.den as i32), tc)];
-    // track volume lanes → control points over the range
-    let mut volume: BTreeMap<String, Vec<(i64, f64)>> = BTreeMap::new();
+    // gain and pan of every channel of every track, from its static pan and lanes
+    let mut mixes: BTreeMap<String, Vec<Mix>> = BTreeMap::new();
     for (_, _, _, tid) in &audio_slots {
-        if volume.contains_key(tid) {
-            continue;
-        }
-        let mut pts: Vec<(i64, f32)> = s
-            .automation
-            .values()
-            .filter(|p| &p.owner_id == tid && p.param == AutomationParam::VolumeDb)
-            .map(|p| (p.sample, p.value))
-            .collect();
-        if !pts.is_empty() {
-            pts.sort_by_key(|p| p.0);
-            volume.insert(tid.clone(), volume_points(&pts, start, end));
+        if !mixes.contains_key(tid) {
+            mixes.insert(tid.clone(), track_mix(s, &s.tracks[tid], start, end));
         }
     }
     for (i, (name, ch, pieces, tid)) in audio_slots.iter().enumerate() {
@@ -854,8 +952,12 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
             items.push(filler(end - at));
         }
         let mut seq = sequence(key::SOUND, len, items);
-        if let Some(points) = volume.get(tid) {
-            seq = automated(len, start, seq, points);
+        let mix = &mixes[tid][(*ch as usize - 1).min(mixes[tid].len() - 1)];
+        if let Some(g) = &mix.gain {
+            seq = effect(key::OP_MONO_AUDIO_GAIN, key::PARAM_AMPLITUDE, len, seq, g.param(key::PARAM_AMPLITUDE, len, start));
+        }
+        if let Some(p) = &mix.pan {
+            seq = effect(key::OP_MONO_AUDIO_PAN, key::PARAM_PAN, len, seq, p.param(key::PARAM_PAN, len, start));
         }
         let mut sl = slot(i as u32 + 2, name, (sr, 1), seq);
         sl.props.push((0x4804, "PhysicalTrackNumber", Val::Data(u32v(i as u32 + 1))));
@@ -895,7 +997,14 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         clips: clip_count,
         markers,
         media_files: masters.len(),
-        automated_tracks: volume.len(),
+        automated_tracks: s
+            .automation
+            .values()
+            .filter(|p| mixes.contains_key(&p.owner_id) && p.param == AutomationParam::VolumeDb)
+            .map(|p| &p.owner_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        panned_tracks: mixes.keys().filter(|k| pans(&s.tracks[k.as_str()])).count(),
         losses: losses.list(),
     };
     let content = Obj { class: class::CONTENT_STORAGE, props: vec![(0x1901, "Mobs", Val::Set { key_pid: 0x4401, items: mobs })] };

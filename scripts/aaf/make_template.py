@@ -57,6 +57,16 @@ def build(path):
         gain["Bypass"].value = 1
         gain["ParametersDefined"].append(amp)
         f.dictionary.register_def(gain)
+        # pan: the standard "Mono Audio Pan" effect (Pan 0 = left, 0.5 = centre, 1 = right)
+        pan = f.create.ParameterDef("e4962322-2267-11d3-8a4c-0050040ef7d2", "Pan", "", "Rational")
+        f.dictionary.register_def(pan)
+        panop = f.create.OperationDef("9d2ea893-0968-11d3-8a38-0050040ef7d2", "Mono Audio Pan", "")
+        panop.media_kind = "sound"
+        panop["NumberInputs"].value = 1
+        panop["IsTimeWarp"].value = False
+        panop["Bypass"].value = 1
+        panop["ParametersDefined"].append(pan)
+        f.dictionary.register_def(panop)
         # volume automation: Amplitude as a VaryingValue, linear between control points
         f.dictionary.register_def(f.create.InterpolationDef("5b6c85a4-0ede-11d3-80a9-006008143e6f", "LinearInterp", ""))
 
@@ -87,7 +97,11 @@ def build(path):
             seq.components.append(og)
             seq.length = 1100
             if ch == 1:
-                slot.segment = seq
+                # a constant pan around the track
+                po = f.create.OperationGroup(panop, 1100, "sound")
+                po["InputSegments"].append(seq)
+                po["Parameters"].append(f.create.ConstantValue(pan, aaf2.rational.AAFRational(1, 4)))
+                slot.segment = po
             else:
                 # track-level volume automation: the track's sequence inside a gain
                 # operation whose Amplitude varies over time
