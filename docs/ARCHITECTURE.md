@@ -186,6 +186,8 @@ tracks as new tracks in a folder `OTIO/<timeline>`, placed at `global_start_time
 | Disabled track or clip | Muted |
 | Markers on the timeline, tracks and clips | Spotting markers in an "OTIO markers" lane (name — comment), for those inside a scene |
 | `metadata.vcsd` (our own export) | Clip gain and fades, track fader, pan, channels, volume and pan automation |
+| Effects with `metadata.vcsd.insert` (our own export) | The track's inserts, in order: built-in effects with their settings, plugins with their id, format, saved state and values under new slot ids. A disabled effect (`enabled: false`) comes in bypassed |
+| A plugin effect's `metadata.vcsd.automation` | Its parameter lanes. These come from the raw `points` (sample offsets, rescaled from the exporting project's rate), or, when a tool kept only the `keyframe_values`, from those (fractions of the track's range). "Constant" interpolation becomes holds; curved interpolation is read as linear |
 | Insert effects from our own export (`metadata.vcsd.insert`) | The track's inserts, in order: built-ins as they were, plugins with their id, format, state and values under a new slot id, and their parameter automation |
 | Without it: AAF-style "Mono Audio Gain" / "Mono Audio Pan" effects on tracks and clips (the AAF adapter's encoding, and our export's) | Constant clip gain becomes clip gain. Track gain and pan, and keyframed clip gain, become the track's gain, pan and volume/pan lanes (gains multiply, fitted within 0.1 dB) |
 
@@ -215,7 +217,15 @@ Levels and pan are checked two ways, each at 201 points of the automated clip (l
   into clip gain comes back as −9 dB.
 
 With bus levels and master balance folded in, importing into a project with flat buses gives the
-same master mix within 2 % of peak. A track with a built-in effect and an automated plugin comes
+same master mix within 2 % of peak.
+
+Plugin automation comes back in these cases:
+- exactly from the raw points, with the mix through a test plugin within 1e-5;
+- from keyframes alone, within 1e-4 at 201 points, with each breakpoint within a sample;
+- as holds from "Constant" keyframes;
+- at the same moments in a 44.1 kHz project.
+
+A disabled effect comes in bypassed. A track with a built-in effect and an automated plugin comes
 back with both: the plugin's state, values and automation are exact, and the mix through a test
 plugin matches to within 1e-5.
 

@@ -23,3 +23,10 @@ test("OTIO summaries name the timeline and their media folder", () => {
   assert.ok(l[0].startsWith('"Reel 2" at 10:00:00:00'));
   assert.equal(l[1], "Media: 2 linked in place, 1 written to Audio/Imported/OTIO");
 });
+
+test("OTIO summaries count rebuilt inserts and plugin automation", () => {
+  const { composition: _, ...rest } = base;
+  const l = otioSummary({ ...rest, timeline: "Reel 2", inserts: 2, plugins: 1, automated_parameters: 3 });
+  assert.equal(l[2], "Inserts: 2 (1 plugin, 3 automated parameters)");
+  assert.equal(otioSummary({ ...rest, timeline: "R", inserts: 0 }).length, 2);
+});

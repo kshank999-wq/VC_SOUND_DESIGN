@@ -69,6 +69,11 @@ pub struct OtioImportReport {
     pub clips: usize,
     pub markers: usize,
     pub automated_tracks: usize,
+    /// Inserts rebuilt (built-in effects and plugins), plugins among them, and
+    /// plugin parameters that came with automation.
+    pub inserts: usize,
+    pub plugins: usize,
+    pub automated_parameters: usize,
     pub media_linked: usize,
     pub media_written: usize,
     /// Clips left out because their media couldn't be found or read: why, per file.
@@ -166,6 +171,57 @@ fn number(v: &Value) -> Option<f64> {
     match s.split_once('/') {
         Some((n, d)) => Some(n.trim().parse::<f64>().ok()? / d.trim().parse::<f64>().ok().filter(|d| *d != 0.0)?),
         None => s.parse().ok(),
+    }
+}
+
+/// One plugin parameter's automation from our OTIO description: its raw
+/// `points` ([offset in samples of the exporting project's rate from the timeline
+/// start, value]) when present, else its `keyframe_values` ([fraction of the
+/// track's range, value]) — what's left when a tool keeps keyframes only. Values
+/// are normalised 0–1. "Constant" (step) interpolation becomes holds; Bezier and
+/// cubic are read as linear.
+fn plugin_lane(
+    auto: &Value,
+    from_meta: &dyn Fn(&Value) -> Option<i64>,
+    smp: &dyn Fn(f64) -> i64,
+    track_start: f64,
+    track_len: f64,
+    notes: &mut Notes,
+) -> Vec<(i64, f32)> {
+    let mut pts: Vec<(i64, f32)> = match auto["points"].as_array() {
+        Some(p) => p.iter().filter_map(|x| Some((from_meta(&x[0])?, number(&x[1])? as f32))).collect(),
+        None => auto["keyframe_values"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|k| Some((smp(track_start + number(&k[0])? * track_len), number(&k[1])? as f32)))
+            .collect(),
+    };
+    pts.sort_by_key(|p| p.0);
+    pts.dedup_by_key(|p| p.0);
+    for p in &mut pts {
+        p.1 = p.1.clamp(0.0, 1.0);
+    }
+    let interp = auto["keyframe_interpolation"].as_str().unwrap_or("Linear").to_ascii_lowercase();
+    match interp.as_str() {
+        "linear" | "" => pts,
+        "constant" | "step" | "hold" => {
+            // each value held until the sample before the next
+            let mut out = vec![];
+            for (i, &(t, v)) in pts.iter().enumerate() {
+                out.push((t, v));
+                if let Some(&(next, nv)) = pts.get(i + 1) {
+                    if next - 1 > t && nv != v {
+                        out.push((next - 1, v));
+                    }
+                }
+            }
+            out
+        }
+        _ => {
+            notes.add("plugin automation with curved interpolation read as linear", 1);
+            pts
+        }
     }
 }
 
@@ -580,17 +636,27 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             match serde_json::from_value::<Insert>(d["insert"].clone()) {
                 Ok(Insert::Plugin(mut p)) => {
                     p.id = new_id("ins");
-                    for (id, lane_pts) in d["automation"].as_object().into_iter().flatten() {
-                        let Ok(id) = id.parse::<u32>() else { continue };
-                        for pt in lane_pts["points"].as_array().into_iter().flatten() {
-                            if let (Some(t), Some(v)) = (from_meta(&pt[0]), pt[1].as_f64()) {
-                                plugin_points.push((p.id.clone(), id, t, v as f32));
-                            }
-                        }
+                    // OTIO's own switch: a disabled effect is a bypassed plugin
+                    if e["enabled"].as_bool() == Some(false) {
+                        p.bypass = true;
                     }
+                    for (id, auto) in d["automation"].as_object().into_iter().flatten() {
+                        let Ok(id) = id.trim().parse::<u32>() else {
+                            notes.add("plugin automation for parameters without a numeric id left out", 1);
+                            continue;
+                        };
+                        let pts = plugin_lane(auto, &from_meta, &smp, lane.start, lane.len, &mut notes);
+                        report.automated_parameters += !pts.is_empty() as usize;
+                        plugin_points.extend(pts.into_iter().map(|(t, v)| (p.id.clone(), id, t, v)));
+                    }
+                    report.plugins += 1;
+                    report.inserts += 1;
                     inserts.push(Insert::Plugin(p));
                 }
-                Ok(other) => inserts.push(other),
+                Ok(other) => {
+                    report.inserts += 1;
+                    inserts.push(other);
+                }
                 Err(_) => notes.add("insert effects that couldn't be read left out", 1),
             }
         }

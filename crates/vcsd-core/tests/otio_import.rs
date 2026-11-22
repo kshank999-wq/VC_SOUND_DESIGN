@@ -443,3 +443,131 @@ fn plugins_and_their_automation_come_back_from_an_otio() {
     let max = a.data.iter().zip(&b.data).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
     assert!(max < 1e-5, "mix differs by {max}");
 }
+
+/// The levels project with an automated test plugin on its track, exported as OTIO.
+fn plugin_otio(name: &str) -> (state::Session, std::path::PathBuf, i64, std::path::PathBuf) {
+    let (mut s, root, t0) = levels_project(name);
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let tid = st.clips.values().find(|c| c.timeline_start == t0).unwrap().track_id.clone();
+    st.tracks.get_mut(&tid).unwrap().inserts = vec![Insert::Plugin(PluginInsert {
+        id: "ins_gain".into(),
+        plugin_id: "vst3:test".into(),
+        format: "vst3".into(),
+        name: "Gain".into(),
+        vendor: "Test".into(),
+        path: String::new(),
+        bypass: false,
+        state: None,
+        params: Default::default(),
+    })];
+    for (dx, v) in [(0, 0.1f32), (sr / 4, 0.9), (sr / 2, 0.4)] {
+        editing::set_automation(st, "ins_gain", AutomationParam::Plugin(0), t0 + dx, v).unwrap();
+    }
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.otio = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let file = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+    (s, root, t0, file)
+}
+
+/// The imported plugin (the only one) and its parameter-0 lane, sorted.
+fn plugin_and_lane(st: &ProjectState) -> (PluginInsert, Vec<(i64, f32)>) {
+    let p = st.tracks.values().flat_map(|t| t.inserts.iter()).find_map(|i| i.as_plugin().cloned()).expect("a plugin");
+    let mut pts: Vec<(i64, f32)> = st
+        .automation
+        .values()
+        .filter(|a| a.owner_id == p.id && a.param == AutomationParam::Plugin(0))
+        .map(|a| (a.sample, a.value))
+        .collect();
+    pts.sort_by_key(|x| x.0);
+    (p, pts)
+}
+
+fn lane_value(pts: &[(i64, f32)], x: i64) -> f64 {
+    let i = pts.partition_point(|p| p.0 <= x);
+    let (a, b) = (pts[i.saturating_sub(1)], pts[i.min(pts.len() - 1)]);
+    if b.0 > a.0 && x >= a.0 {
+        a.1 as f64 + (b.1 - a.1) as f64 * (x - a.0) as f64 / (b.0 - a.0) as f64
+    } else {
+        a.1 as f64
+    }
+}
+
+/// Rewrite the plugin effect's description in an exported OTIO.
+fn edit_plugin_effect(file: &Path, out: &str, f: impl Fn(&mut serde_json::Value)) -> std::path::PathBuf {
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    for t in v["tracks"]["children"].as_array_mut().unwrap() {
+        for e in t["effects"].as_array_mut().unwrap() {
+            if e["metadata"]["vcsd"]["insert"]["type"] == "plugin" {
+                f(e);
+            }
+        }
+    }
+    let p = file.with_file_name(out);
+    std::fs::write(&p, serde_json::to_string(&v).unwrap()).unwrap();
+    p
+}
+
+#[test]
+fn plugin_automation_comes_back_from_keyframes_alone_and_a_disabled_effect_is_bypassed() {
+    let (s, _, t0, file) = plugin_otio("otiopkf");
+    let sr = s.state.project.sample_rate as i64;
+    let (_, want) = plugin_and_lane(&s.state);
+    // as a tool that keeps keyframes but not our raw points, and switches the effect off
+    let bare = edit_plugin_effect(&file, "keyframes.otio", |e| {
+        e["metadata"]["vcsd"]["automation"]["0"].as_object_mut().unwrap().remove("points");
+        e["enabled"] = serde_json::json!(false);
+    });
+    let (mut s2, root2) = session("otiopkf2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &bare, &OtioImportOptions::for_project(&root2, &bare))).unwrap();
+    assert_eq!((rep.inserts, rep.plugins, rep.automated_parameters), (1, 1, 1));
+    let (p, got) = plugin_and_lane(&s2.state);
+    assert!(p.bypass, "a disabled effect comes in bypassed");
+    for k in 0..=200 {
+        let x = t0 + k * (sr / 2) / 200;
+        assert!(
+            (lane_value(&got, x) - lane_value(&want, x)).abs() < 1e-4,
+            "parameter at {x}: {} vs {}",
+            lane_value(&got, x),
+            lane_value(&want, x)
+        );
+    }
+    for &(t, _) in &want {
+        assert!(got.iter().any(|g| (g.0 - t).abs() <= 1), "breakpoint {t} within a sample: {got:?}");
+    }
+
+    // step keyframes: each value held until the next
+    let steps = edit_plugin_effect(&file, "steps.otio", |e| {
+        let a = &mut e["metadata"]["vcsd"]["automation"]["0"];
+        a.as_object_mut().unwrap().remove("points");
+        a["keyframe_interpolation"] = serde_json::json!("Constant");
+    });
+    let (mut s3, root3) = session("otiopkf3", "24", "01:00:00:00");
+    s3.edit("i", |st| import(st, &steps, &OtioImportOptions::for_project(&root3, &steps))).unwrap();
+    let (_, held) = plugin_and_lane(&s3.state);
+    assert!((lane_value(&held, t0 + sr / 8) - 0.1).abs() < 1e-6, "held at 0.1 until 0.25 s: {held:?}");
+    assert!((lane_value(&held, t0 + sr / 4 + sr / 8) - 0.9).abs() < 1e-6, "then 0.9: {held:?}");
+}
+
+#[test]
+fn plugin_automation_keeps_its_timing_at_another_sample_rate() {
+    let (_, _, t0, file) = plugin_otio("otiopsr");
+    let root = tmp("otiopsr2");
+    let mut s2 = state::Session::create(
+        &root,
+        NewProject {
+            name: "44.1".into(),
+            frame_rate: FrameRate::parse("24").unwrap(),
+            sample_rate: 44_100,
+            start_tc: "01:00:00:00".into(),
+        },
+    )
+    .unwrap();
+    s2.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root, &file))).unwrap();
+    let (_, got) = plugin_and_lane(&s2.state);
+    let at = |x: i64| (x as f64 * 44_100.0 / 48_000.0).round() as i64;
+    let want: Vec<(i64, f32)> = vec![(at(t0), 0.1), (at(t0 + 12_000), 0.9), (at(t0 + 24_000), 0.4)];
+    assert_eq!(got, want, "the same moments at 44.1 kHz");
+}

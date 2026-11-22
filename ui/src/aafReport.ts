@@ -6,7 +6,7 @@ export type AafReport = {
 };
 
 /** OTIO import results: the same, with the timeline's name. */
-export type OtioReport = Omit<AafReport, "composition"> & { timeline: string };
+export type OtioReport = Omit<AafReport, "composition"> & { timeline: string; inserts?: number; plugins?: number; automated_parameters?: number };
 
 /** What an AAF (or OTIO) import brought in, and what it couldn't. */
 export function aafSummary(r: AafReport, mediaDir = "Audio/Imported/AAF"): string[] {
@@ -20,5 +20,10 @@ export function aafSummary(r: AafReport, mediaDir = "Audio/Imported/AAF"): strin
 }
 
 export function otioSummary(r: OtioReport): string[] {
-  return aafSummary({ ...r, composition: r.timeline }, "Audio/Imported/OTIO");
+  const lines = aafSummary({ ...r, composition: r.timeline }, "Audio/Imported/OTIO");
+  if (r.inserts) {
+    const auto = r.automated_parameters ? `, ${r.automated_parameters} automated parameter${r.automated_parameters === 1 ? "" : "s"}` : "";
+    lines.splice(2, 0, `Inserts: ${r.inserts} (${r.plugins ?? 0} plugin${r.plugins === 1 ? "" : "s"}${auto})`);
+  }
+  return lines;
 }
