@@ -267,7 +267,9 @@ top-level composition (by name, or the one with the most sound clips) is placed 
 | Clip fades; `Transition` | Fades; a transition is a crossfade of its length |
 | Mono Audio Gain on a clip (constant) | Clip gain |
 | Mono Audio Gain around a track (constant or varying), or a varying gain on a clip | Track gain, or a volume lane. AAF interpolates linear amplitude, so the lane is fitted within 0.1 dB, then thinned (collinear breakpoints dropped) |
-| Mono Audio Pan (constant or varying) | Track pan or a pan lane |
+| Mono Audio Pan (constant or varying) | Track pan or a pan lane (fitted within 0.002, then thinned to its breakpoints) |
+| Interpolation of varying gain and pan | Linear as is. Constant (and None) holds each value until the next point. B-spline, log and power are read as linear (noted) |
+| Parameter values | Rational, or any of AAF's integer types |
 | Comment and descriptive markers | Spotting markers in an "AAF markers" lane, for those inside a scene |
 | The "VCSD" comment (our own export) | The buses restored, as in the OTIO import, and the same `buses` option (auto / buses / fold, default auto): matched by name under the same parent or created, with their level, mute, inserts and automation. Each track is routed to its bus with its own fader, pan and lanes, and the fader that was folded into clip gain is taken back out |
 | Track inserts in the "VCSD" comment | Rebuilt in order on unprinted tracks, in either bus mode: built-in effects with their settings, plugins with their id, format, saved state and values under new slot ids, with their parameter automation. A printed track comes in as its render, so its inserts stay off (noted) |
@@ -301,8 +303,8 @@ depth come from the MXF's sound descriptor (generic, AES3 or wave), else from th
 D-10 without either, the channel count comes from the element's valid flags.
 
 **Reported, not imported:** media that can't be found or read (per file, with the clip count),
-effects other than gain and pan, non-linear interpolation (read as linear), and markers outside
-every scene.
+effects other than gain and pan, curved interpolation (read as linear), and markers outside every
+scene.
 
 **Verification:** `crates/vcsd-core/tests/aaf_import.rs` round-trips an export: the master mix
 of the imported project matches the original within the curve fits. It also imports an AAF
@@ -312,7 +314,12 @@ following:
   embedded PCM;
 - moved linked media found by name or in a search folder;
 - channel 3 of a linked two-track OP1a MXF (mono, then stereo), bit-exact;
-- clip gain, the varying track gain against the AAF curve, pan, and the marker.
+- clip gain, the varying track gain against the AAF curve, pan, and the marker;
+- a linear pan sweep (−1 → +1 → 0) within 0.003 as its breakpoints, and a Constant-interpolated
+  pan held, then jumping, at the right sample.
+
+Our own AAF's mono pan automation comes back within 0.003 from its Mono Audio Pan with `fold`, and
+as the lane itself when the buses are restored.
 
 Bus restore is checked with a round trip. It brings back a created sub-bus with a built-in insert,
 a bus level and fade, another bus's fade, and master balance, all with identical lanes. The

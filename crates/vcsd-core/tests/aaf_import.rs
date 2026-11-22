@@ -141,8 +141,8 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     assert_eq!(rep.composition, "Reel 1 v3");
     assert_eq!(rep.start_tc, "10:00:00:00");
     assert!(rep.missing_media.is_empty(), "{:?}", rep.missing_media);
-    assert_eq!(rep.tracks.len(), 3, "three sound tracks (the picture track is ignored): {rep:?}");
-    assert_eq!(rep.clips, 4);
+    assert_eq!(rep.tracks.len(), 5, "five sound tracks (the picture track is ignored): {rep:?}");
+    assert_eq!(rep.clips, 6);
     assert_eq!(rep.markers, 1);
     let st = &s.state;
     let f = 1920; // samples per frame at 25 fps
@@ -215,6 +215,35 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     let (_, got) = wav::read_raw(Path::new(&xa.path)).unwrap();
     let (_, want) = wav::read_raw(&dir.join("fx_ch3.wav")).unwrap();
     assert!(got == want, "channel 3 of the MXF");
+
+    // PAN: a linear sweep −1 → +1 at frame 25 → 0 at the end; STEP: −0.5 held, then +0.5
+    let pan_lane = |name: &str| {
+        let t = track(name);
+        let mut v: Vec<(i64, f32)> =
+            st.automation.values().filter(|p| p.owner_id == t.id && p.param == AutomationParam::Pan).map(|p| (p.sample, p.value)).collect();
+        v.sort_by_key(|p| p.0);
+        v
+    };
+    let pan_at = |lane: &[(i64, f32)], x: i64| {
+        let i = lane.partition_point(|p| p.0 <= x);
+        let (p, q) = (lane[i.saturating_sub(1)], lane[i.min(lane.len() - 1)]);
+        if q.0 > p.0 && x >= p.0 {
+            p.1 as f64 + (q.1 - p.1) as f64 * (x - p.0) as f64 / (q.0 - p.0) as f64
+        } else {
+            p.1 as f64
+        }
+    };
+    let sweep = pan_lane("PAN");
+    assert!(sweep.len() <= 4, "breakpoints, not a fit: {sweep:?}");
+    for k in 0..50 * f {
+        let u = k as f64 / (50 * f) as f64;
+        let want = if u <= 0.5 { -1.0 + 4.0 * u } else { 1.0 - 2.0 * (u - 0.5) };
+        assert!((pan_at(&sweep, k) - want).abs() < 0.003, "pan at {k}: {} vs {want}", pan_at(&sweep, k));
+    }
+    let step = pan_lane("STEP");
+    assert!((pan_at(&step, 12 * f) + 0.5).abs() < 1e-6 && (pan_at(&step, 25 * f - 1) + 0.5).abs() < 1e-6, "held: {step:?}");
+    assert!((pan_at(&step, 25 * f) - 0.5).abs() < 1e-6 && (pan_at(&step, 40 * f) - 0.5).abs() < 1e-6, "then the jump: {step:?}");
+    assert!(!rep.notes.iter().any(|n| n.contains("interpolation")), "{:?}", rep.notes);
 
     // the marker, in its own lane
     let mk = st.markers.values().next().unwrap();
@@ -468,4 +497,64 @@ fn a_printed_track_comes_back_as_its_render_without_its_plugins_again() {
     assert!(st2.tracks.values().all(|t| t.inserts.is_empty()));
     assert!(st2.automation.values().all(|a| !matches!(a.param, AutomationParam::Plugin(_))));
     let _ = t0;
+}
+
+#[test]
+fn mono_pan_automation_comes_back_from_our_aaf() {
+    let (mut s, root) = session("aafpan", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let id = st.clips.values().find(|c| !c.muted).unwrap().id.clone();
+    let c = st.clips.get_mut(&id).unwrap();
+    c.fill = FillMode::OneShot;
+    let (t0, len, tid) = (c.timeline_start, c.length, c.track_id.clone());
+    assert_eq!(st.tracks[&tid].channels, 1);
+    // hard left → right of centre → hard right, with a hold in the middle
+    for (dx, p) in [(0, -1.0f32), (sr / 4, 0.3), (sr / 2, 0.3), (sr, 1.0)] {
+        editing::set_automation(st, &tid, AutomationParam::Pan, t0 + dx, p).unwrap();
+    }
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.aaf = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+    let lane = |st: &ProjectState, t: &str| {
+        let mut v: Vec<(i64, f32)> =
+            st.automation.values().filter(|p| p.owner_id == t && p.param == AutomationParam::Pan).map(|p| (p.sample, p.value)).collect();
+        v.sort_by_key(|p| p.0);
+        v
+    };
+    let at = |l: &[(i64, f32)], x: i64| {
+        let i = l.partition_point(|p| p.0 <= x);
+        let (p, q) = (l[i.saturating_sub(1)], l[i.min(l.len() - 1)]);
+        if q.0 > p.0 && x >= p.0 {
+            p.1 as f64 + (q.1 - p.1) as f64 * (x - p.0) as f64 / (q.0 - p.0) as f64
+        } else {
+            p.1 as f64
+        }
+    };
+    let want = lane(&s.state, &tid);
+    for (mode, name) in [(vcsd_core::otio_import::BusLevels::Fold, "aafpanf"), (vcsd_core::otio_import::BusLevels::Auto, "aafpana")] {
+        let (mut s2, root2) = session(name, "24", "01:00:00:00");
+        let o2 = AafImportOptions { buses: mode, ..opts(&root2) };
+        let rep = s2.edit("i", |st| import(st, &aaf, &o2)).unwrap();
+        assert_eq!(rep.panned_tracks, 1, "{mode:?}");
+        let c2 = s2.state.clips.values().find(|c| c.timeline_start == t0).unwrap();
+        let got = lane(&s2.state, &c2.track_id);
+        if mode == vcsd_core::otio_import::BusLevels::Auto {
+            assert_eq!(got, want, "restored: the lane itself");
+        } else {
+            // from the AAF's Mono Audio Pan: the lane's breakpoints are its keyframes
+            assert!(got.len() <= want.len() + 2, "{got:?}");
+            for k in 0..=200 {
+                let x = t0 + len * k / 200;
+                assert!((at(&got, x) - at(&want, x)).abs() < 0.003, "pan at {x}: {} vs {}", at(&got, x), at(&want, x));
+            }
+        }
+    }
 }

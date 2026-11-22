@@ -158,6 +158,10 @@ fn cls(n: u8) -> Uuid {
     Uuid::parse_str(&format!("0d010101-0101-{n:02x}00-060e-2b3402060101")).unwrap()
 }
 
+/// Interpolation definitions (as stored): constant (hold) and none.
+const INTERP_CONSTANT: &str = "a5856c5bde0ed31180a9006008143e6f";
+const INTERP_NONE: &str = "a3856c5bde0ed31180a9006008143e6f";
+
 /// Legacy (pre-SMPTE) sound data definition, still written by some editors.
 const LEGACY_SOUND: &str = "e1ebe178ef6cd211807d006008143e6f";
 
@@ -240,11 +244,32 @@ fn rational(d: &[u8]) -> Option<(i64, i64)> {
 }
 
 /// An indirect value (byte order, type AUID, value) as a number: Rational only.
+/// An indirect value (byte order, type AUID, value) as a number: Rational, or
+/// any of AAF's integer types.
 fn indirect(d: &[u8]) -> Option<f64> {
-    if d.len() < 17 + 8 || hexs(&d[1..17]) != key::TYPE_RATIONAL {
+    if d.len() < 18 {
         return None;
     }
-    rational(&d[17..]).map(|(n, den)| n as f64 / den as f64)
+    let (ty, v) = (hexs(&d[1..17]), &d[17..]);
+    if ty == key::TYPE_RATIONAL {
+        return rational(v).map(|(n, den)| n as f64 / den as f64);
+    }
+    // aafUInt8 … aafInt64: 0101nn00-0000-0000-060e-2b3401040101, stored as GUID bytes
+    let n = u8::from_str_radix(ty.get(2..4)?, 16).ok()?;
+    if !(ty.starts_with("00") && &ty[4..] == "010100000000060e2b3401040101") || !(1..=8).contains(&n) {
+        return None;
+    }
+    let (size, signed) = [(1, false), (2, false), (4, false), (8, false), (1, true), (2, true), (4, true), (8, true)][n as usize - 1];
+    let b = v.get(..size)?;
+    let mut raw = [0u8; 8];
+    raw[..size].copy_from_slice(b);
+    let u = u64::from_le_bytes(raw);
+    Some(if signed {
+        let shift = 64 - 8 * size as u32;
+        ((u << shift) as i64 >> shift) as f64
+    } else {
+        u as f64
+    })
 }
 
 struct Aaf {
@@ -598,8 +623,11 @@ impl Content {
         if !a.is(p, c::VARYING_VALUE) {
             return None;
         }
-        if p.weak(0x4e01).map(hexs).is_some_and(|k| k != key::INTERP_LINEAR) {
-            w.notes.add("gain or pan curves with non-linear interpolation read as linear", 1);
+        // constant (and "none") interpolation holds each value until the next point
+        let interp = p.weak(0x4e01).map(hexs).unwrap_or_else(|| key::INTERP_LINEAR.to_string());
+        let steps = interp == INTERP_CONSTANT || interp == INTERP_NONE;
+        if !steps && interp != key::INTERP_LINEAR {
+            w.notes.add("gain or pan curves with curved interpolation (B-spline, log, power) read as linear", 1);
         }
         let (s0, slen) = (w.smp(pos), w.smp(len));
         let mut pts: Vec<(i64, f64)> = a
@@ -612,6 +640,18 @@ impl Content {
             })
             .collect();
         pts.sort_by_key(|x| x.0);
+        if steps {
+            let mut held = vec![];
+            for (i, &(t, v)) in pts.iter().enumerate() {
+                held.push((t, v));
+                if let Some(&(next, nv)) = pts.get(i + 1) {
+                    if next - 1 > t && nv != v {
+                        held.push((next - 1, v));
+                    }
+                }
+            }
+            pts = held;
+        }
         (!pts.is_empty()).then_some(Curve::Points(pts))
     }
 
@@ -1709,6 +1749,25 @@ pub(crate) fn guess_category(name: &str) -> Category {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indirect_values_read_rationals_and_integers() {
+        let ind = |ty: &str, v: &[u8]| {
+            let mut d = vec![0x4c];
+            d.extend(hex_bytes(ty));
+            d.extend(v);
+            indirect(&d)
+        };
+        assert_eq!(ind(key::TYPE_RATIONAL, &[3, 0, 0, 0, 4, 0, 0, 0]), Some(0.75));
+        assert_eq!(ind("0007010100000000060e2b3401040101", &(-5i32).to_le_bytes()), Some(-5.0), "aafInt32");
+        assert_eq!(ind("0001010100000000060e2b3401040101", &[200]), Some(200.0), "aafUInt8");
+        assert_eq!(ind("0006010100000000060e2b3401040101", &(-2i16).to_le_bytes()), Some(-2.0), "aafInt16");
+        assert_eq!(ind("0002100100000000060e2b3401040101", &[0, 0]), None, "a string isn't a number");
+    }
+
+    fn hex_bytes(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
 
     #[test]
     fn rate_conversion_rounds_to_nearest() {

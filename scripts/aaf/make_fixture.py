@@ -15,6 +15,9 @@ The composition "Reel 1 v3" runs at 25 fps from 10:00:00:00:
 - "MX": a clip with a constant Mono Audio Gain of 0.5, the whole track inside a
   Mono Audio Gain whose Amplitude varies 1 → 0.25 → 1, and a Mono Audio Pan of 0.75;
 - "FX 3": channel 3 of fx.mxf (the right channel of its second track);
+- "PAN": 50 frames of the music in a Mono Audio Pan sweeping (linear) 0 → 1 at
+  frame 25 → 0.5 at the end;
+- "STEP": the same, with Constant interpolation: pan 0.25 until frame 25, then 0.75;
 - a picture-only track (ignored), a timecode track, and a descriptive
   marker "door knock" at frame 50.
 """
@@ -97,6 +100,7 @@ def defs(f):
     dissolve["NumberInputs"].value = 2
     f.dictionary.register_def(dissolve)
     f.dictionary.register_def(f.create.InterpolationDef("5b6c85a4-0ede-11d3-80a9-006008143e6f", "LinearInterp", ""))
+    f.dictionary.register_def(f.create.InterpolationDef("5b6c85a5-0ede-11d3-80a9-006008143e6f", "ConstantInterp", ""))
     return amp, gain, pan, panop, dissolve
 
 
@@ -191,6 +195,27 @@ def build(out):
         clip = xmaster.create_source_clip(3, start=0, length=50 * RATE // FPS)
         clip.length = 50
         a3.segment.components.append(clip)
+
+        # PAN / STEP: pan automation, linear and stepped
+        for name, interp, keys in (("PAN", "LinearInterp", ((0, 0), (0.5, 1), (1, 0.5))),
+                                   ("STEP", "ConstantInterp", ((0, 0.25), (0.5, 0.75)))):
+            slot = comp.create_sound_slot(FPS)
+            slot.name = name
+            seq = f.create.Sequence(media_kind="sound")
+            c = mmaster.create_source_clip(1, start=0, length=50 * RATE // FPS)
+            c.length = 50
+            seq.components.append(c)
+            seq.length = 50
+            po = f.create.OperationGroup(panop, 50, "sound")
+            po["InputSegments"].append(seq)
+            vv = f.create.VaryingValue(pan, interp)
+            for tm, v in keys:
+                cp = f.create.ControlPoint()
+                cp["Time"].value = AAFRational(tm)
+                cp["Value"].value = AAFRational(v)
+                vv["PointList"].append(cp)
+            po["Parameters"].append(vv)
+            slot.segment = po
 
         ev = f.create.EventMobSlot()
         ev["SlotID"].value = 50
