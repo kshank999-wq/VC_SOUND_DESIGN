@@ -482,3 +482,58 @@ fn otio_describes_plugins_and_their_automation_as_effects() {
         assert_eq!(seen, names, "OpenTimelineIO reads the effects");
     }
 }
+
+#[test]
+fn track_colors_go_out_as_otio_colors() {
+    let (mut s, root, _, gt) = project("otiocolors");
+    // every channel value 0–255 must survive: a spread of awkward ones
+    let colors = ["#3a7bd5", "#010203", "#fefdfc", "#7f8081"];
+    s.state.tracks.get_mut(&gt).unwrap().color = Some(colors[0].into());
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.otio = true;
+    o.force = true;
+    for (k, c) in colors.iter().enumerate() {
+        s.state.tracks.get_mut(&gt).unwrap().color = Some((*c).into());
+        o.out_dir = Some(root.join(format!("c{k}")));
+        let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+        let file = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+        let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let tracks = raw["tracks"]["children"].as_array().unwrap();
+        let gname = &s.state.tracks[&gt].name;
+        let t = tracks.iter().find(|t| t["name"] == gname.as_str()).unwrap();
+        assert_eq!(t["color"]["OTIO_SCHEMA"], "Color.1");
+        assert_eq!(t["metadata"]["vcsd"]["color"], *c);
+        // its layers (the overlapping copy's "… (2)") are the same track: colored too; others not
+        let mine = |x: &serde_json::Value| x["name"].as_str().unwrap().starts_with(gname.as_str());
+        assert!(tracks.iter().filter(|x| mine(x)).all(|x| x["color"] == t["color"]) && tracks.iter().filter(|x| mine(x)).count() == 2);
+        assert!(tracks.iter().filter(|x| !mine(x)).all(|x| x.get("color").is_none()), "no color where there's none");
+        // read back by OpenTimelineIO itself: the same color
+        if let Some(py) = python() {
+            let code = format!(
+                "import sys, opentimelineio as o; t = o.adapters.read_from_file(sys.argv[1]); print([x.color.to_hex()[:7] for x in t.tracks if x.name == {:?}][0])",
+                gname
+            );
+            let out = std::process::Command::new(&py).args(["-c", &code]).arg(&file).output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), *c, "{}", String::from_utf8_lossy(&out.stderr));
+        }
+        // and by our import from OTIO's Color alone (our metadata stripped)
+        let mut v = raw.clone();
+        fn strip(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    m.remove("vcsd");
+                    m.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(a) => a.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        strip(&mut v);
+        let bare = file.with_file_name("bare.otio");
+        std::fs::write(&bare, serde_json::to_string(&v).unwrap()).unwrap();
+        let (mut s2, root2) = session(&format!("otiocolors{k}"), "24", "01:00:00:00");
+        s2.edit("i", |st| otio_import::import(st, &bare, &otio_import::OtioImportOptions::for_project(&root2, &bare))).unwrap();
+        let back = s2.state.tracks.values().find(|t| t.name.starts_with(gname.as_str())).unwrap();
+        assert_eq!(back.color.as_deref(), Some(*c), "from OTIO's Color alone");
+    }
+}

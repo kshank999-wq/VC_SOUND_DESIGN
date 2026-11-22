@@ -159,7 +159,7 @@ butt-spliced repeats, muted tracks and clips left out). It also shares its media
 | Cues | Timeline markers, coloured by category, with the description as comment |
 | Solo | Monitoring state, not applied: every track is exported audible. The flag is in the track's `metadata.vcsd.solo` (and listed in the report) |
 | Track order and folders | Tracks in project order (folder, position, name); each track's `metadata.vcsd.folder` and `order` |
-| Track color | `metadata.vcsd.color` ("#rrggbb"; absent when the track uses its category's) |
+| Track color | OTIO's own `Color` on the track (OpenTimelineIO 0.18; 0.16 and 0.17 read the file and keep it as an extra field), and `metadata.vcsd.color`. Absent when the track uses its category's. Each channel n is written as (n + 0.25)/255, so readers that truncate (OpenTimelineIO's `to_hex`) and readers that round both get n: plain n/255 can come back as n − 1 |
 | Buses | `metadata.vcsd.buses` on the timeline: each bus's parent, level, mute, inserts, volume and balance automation, and its plugins' automation (sample offsets from the range start). Each track's `metadata.vcsd.bus_id` names its bus. Other apps get the bus levels folded into the tracks' effects (above) |
 
 OTIO has no audio mix model, so levels follow the one convention OTIO tools share. The

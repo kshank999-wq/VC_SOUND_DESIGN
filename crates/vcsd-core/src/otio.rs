@@ -292,6 +292,15 @@ pub(crate) fn bus_tree(s: &ProjectState, start: i64) -> Value {
     json!(v)
 }
 
+/// "#rrggbb" as OTIO's `Color` (r, g, b in 0–1). Each channel n is written as
+/// (n + 0.25) / 255: readers that truncate (OpenTimelineIO's own `to_hex`: n/255
+/// can come back as n − 1) and readers that round both get n back.
+fn otio_color(hex: &str) -> Option<Value> {
+    let h = parse_hex_color(hex)?;
+    let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).map(|v| ((v as f64 + 0.25) / 255.0).min(1.0)).ok();
+    Some(json!({ "OTIO_SCHEMA": "Color.1", "name": "", "r": c(1)?, "g": c(3)?, "b": c(5)?, "a": 1.0 }))
+}
+
 /// Build the OTIO timeline and write it to `out`. `media` maps asset ids to the linked WAVs.
 pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o: &OtioOptions) -> Result<OtioReport> {
     let sr = s.project.sample_rate as f64;
@@ -473,7 +482,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
             if li > 0 {
                 name.push_str(&format!(" ({})", li + 1));
             }
-            children.push(json!({
+            let mut track = json!({
                 "OTIO_SCHEMA": "Track.1",
                 "metadata": { "vcsd": {
                     "track_id": t.id, "layer": li + 1, "channels": t.channels, "category": t.category.display(),
@@ -496,7 +505,12 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                 "source_range": null, "effects": effects.clone(), "markers": [], "enabled": !silenced,
                 "children": items,
                 "kind": "Audio",
-            }));
+            });
+            // the track's own color as OTIO's Color (OpenTimelineIO 0.18; older readers keep it as an extra field)
+            if let Some(c) = t.color.as_deref().and_then(otio_color) {
+                track["color"] = c;
+            }
+            children.push(track);
         }
     }
 
@@ -548,4 +562,19 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     report.file = out.display().to_string();
     report.losses = losses.list();
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_channel_value_survives_truncating_and_rounding_readers() {
+        for n in 0..=255u32 {
+            let c = otio_color(&format!("#{n:02x}{n:02x}{n:02x}")).unwrap();
+            let v = c["r"].as_f64().unwrap() * 255.0;
+            assert_eq!(v as u32, n, "truncated");
+            assert_eq!(v.round() as u32, n, "rounded");
+        }
+    }
 }

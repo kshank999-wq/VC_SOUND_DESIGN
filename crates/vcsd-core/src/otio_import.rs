@@ -188,7 +188,8 @@ struct OLane {
 fn otio_color(v: &Value) -> Option<String> {
     if schema(v) == "Color" {
         // truncated, as OpenTimelineIO's own Color.to_hex does
-        let c = |k: &str| (v[k].as_f64().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0) as u8;
+        // (a hair over, so n/255 comes back as n despite float rounding)
+        let c = |k: &str| (v[k].as_f64().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0 + 1e-6) as u8;
         return Some(format!("#{:02x}{:02x}{:02x}", c("r"), c("g"), c("b")));
     }
     let s = v.as_str()?.trim();
