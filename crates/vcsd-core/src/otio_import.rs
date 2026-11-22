@@ -970,7 +970,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                     match level_effect(e, it.at, it.len) {
                         // a zero gain is how AAF (via the adapter) carries a mute: a muted clip,
                         // its other gains its own
-                        Some((true, Level::Const(g))) if g == 0.0 => {
+                        Some((true, Level::Const(0.0))) => {
                             zero_muted = true;
                             notes.add("zero gains read as mutes (other gains kept as the levels)", 1);
                         }
@@ -1057,7 +1057,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             for e in lane.effects.iter().filter(|e| e["metadata"]["vcsd"]["insert"].is_null()) {
                 match level_effect(e, lane.start, lane.len) {
                     // a zero gain around the track: a muted track (as AAF carries it)
-                    Some((true, Level::Const(g))) if g == 0.0 => {
+                    Some((true, Level::Const(0.0))) => {
                         zero_track = true;
                         notes.add("zero gains read as mutes (other gains kept as the levels)", 1);
                     }
