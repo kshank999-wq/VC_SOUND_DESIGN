@@ -326,6 +326,10 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         s.buses.values().map(|b| b.inserts.len()).sum(),
     );
     losses.add("tracks printed with their plugins and insert effects: one rendered clip each, not editable clip by clip", o.prints.len());
+    losses.add(
+        "solo is monitoring state, not applied: every track exported audible (the solo flags are in VC Sound Design metadata)",
+        s.tracks.values().filter(|t| t.solo).count(),
+    );
 
     let mut tracks: Vec<&Track> = s.tracks.values().collect();
     tracks.sort_by(|a, b| (&a.folder, a.order, &a.name).cmp(&(&b.folder, b.order, &b.name)));
@@ -478,6 +482,8 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                     "bus_folded": bus_folded,
                     // the track's own mute (a disabled track may only be on a muted bus)
                     "mute": t.mute,
+                    // monitoring state: every track is exported audible; this restores the flag
+                    "solo": t.solo,
                     "bus_id": t.bus_id,
                     // automation: [offset in samples from the timeline start, value]
                     "volume_db": points(AutomationParam::VolumeDb),

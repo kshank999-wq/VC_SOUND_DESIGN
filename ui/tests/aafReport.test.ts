@@ -49,3 +49,8 @@ test("OTIO summaries say when left/right pairs were merged", () => {
   const { composition: _, ...rest } = base;
   assert.equal(otioSummary({ ...rest, timeline: "R", stereo_pairs: 2 })[2], "Stereo: 2 left/right pairs merged into one track each");
 });
+
+test("OTIO summaries say which tracks came back soloed", () => {
+  const { composition: _, ...rest } = base;
+  assert.equal(otioSummary({ ...rest, timeline: "R", soloed_tracks: 1 })[2], "Solo: 1 track soloed, as exported");
+});

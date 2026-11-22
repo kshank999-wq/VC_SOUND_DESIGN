@@ -1131,3 +1131,46 @@ fn a_disabled_compound_clip_comes_back_muted() {
     assert!(inner.mute, "muted with its compound clip");
     assert!(!st.tracks.values().find(|t| t.name == "MX").unwrap().mute, "the track around it plays");
 }
+
+#[test]
+fn solo_comes_back_from_our_otio_and_says_when_it_silences_the_project() {
+    let (mut s, root, t0) = levels_project("otiosolo");
+    let tid = s.state.clips.values().find(|c| c.timeline_start == t0).unwrap().track_id.clone();
+    s.state.tracks.get_mut(&tid).unwrap().solo = true;
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.otio = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let file = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let track = &raw["tracks"]["children"][0];
+    assert_eq!(
+        (track["metadata"]["vcsd"]["solo"].as_bool(), track["enabled"].as_bool()),
+        (Some(true), Some(true)),
+        "flagged, still audible"
+    );
+    let rep: serde_json::Value = serde_json::from_slice(&std::fs::read(r.dir.join("OTIO/otio_report.json")).unwrap()).unwrap();
+    assert!(rep["losses"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().starts_with("solo is monitoring state")));
+
+    // into a fresh project: soloed, nothing else to silence
+    let (mut s2, root2) = session("otiosolo2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root2, &file))).unwrap();
+    assert_eq!(rep.soloed_tracks, 1);
+    assert!(s2.state.tracks.values().all(|t| t.solo));
+    assert!(!rep.notes.iter().any(|n| n.starts_with("solo restored")), "{:?}", rep.notes);
+
+    // into a project with other tracks, none soloed: restored, and the report says what it does
+    let mut v = raw.clone();
+    v["tracks"]["children"][0]["metadata"]["vcsd"]["solo"] = serde_json::json!(false);
+    let plain = file.with_file_name("plain.otio");
+    std::fs::write(&plain, serde_json::to_string(&v).unwrap()).unwrap();
+    let (mut s3, root3) = session("otiosolo3", "24", "01:00:00:00");
+    s3.edit("a", |st| {
+        import(st, &plain, &OtioImportOptions { folder: Some("Other".into()), ..OtioImportOptions::for_project(&root3, &plain) })
+    })
+    .unwrap();
+    let rep = s3.edit("b", |st| import(st, &file, &OtioImportOptions::for_project(&root3, &file))).unwrap();
+    assert_eq!(rep.soloed_tracks, 1);
+    assert!(rep.notes.iter().any(|n| n.starts_with("solo restored on imported tracks")), "{:?}", rep.notes);
+    assert!(s3.state.tracks.values().filter(|t| t.folder == "Other").all(|t| !t.solo));
+}

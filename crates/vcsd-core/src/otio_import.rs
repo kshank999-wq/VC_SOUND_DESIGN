@@ -108,6 +108,8 @@ pub struct OtioImportReport {
     pub bus_levels: String,
     /// Left/right track pairs (as the AAF adapter writes stereo tracks) merged into one stereo track.
     pub stereo_pairs: usize,
+    /// Tracks whose solo came back (from our metadata).
+    pub soloed_tracks: usize,
     /// Buses whose levels and automation were restored, and how many were created.
     pub buses_restored: usize,
     pub buses_created: usize,
@@ -1108,7 +1110,8 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                     (Some(_), Some(m)) => m,
                     _ => lane.muted || zero_track,
                 },
-                solo: false,
+                // our metadata's solo flag (monitoring state; other apps' files have none)
+                solo: tv["solo"].as_bool().unwrap_or(false),
                 armed: false,
                 frozen_asset_id: None,
                 inserts,
@@ -1245,6 +1248,14 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
         if crate::spotting::add_marker(s, nm).is_ok() {
             report.markers += 1;
         }
+    }
+    report.soloed_tracks = report.tracks.iter().filter(|t| s.tracks[t.as_str()].solo).count();
+    let others = s.tracks.values().filter(|t| !report.tracks.contains(&t.id)).collect::<Vec<_>>();
+    if report.soloed_tracks > 0 && !others.is_empty() && !others.iter().any(|t| t.solo) {
+        notes.add(
+            "solo restored on imported tracks: while it's on, the project's other tracks are silent (unsolo to hear them)",
+            report.soloed_tracks,
+        );
     }
     report.notes = notes.0.iter().map(|(k, n)| format!("{k} ({n})")).collect();
     if report.tracks.is_empty() && report.markers == 0 {
