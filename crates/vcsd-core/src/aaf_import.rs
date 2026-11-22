@@ -84,6 +84,11 @@ pub struct AafImportReport {
     pub bus_levels: String,
     pub buses_restored: usize,
     pub buses_created: usize,
+    /// Track inserts rebuilt from VC Sound Design's description (built-in effects
+    /// and plugins), plugins among them, and plugin parameters with automation.
+    pub inserts: usize,
+    pub plugins: usize,
+    pub automated_parameters: usize,
     /// Media files used where they are.
     pub media_linked: usize,
     /// Media written to the import folder (extracted, converted, channel extracts).
@@ -1493,6 +1498,40 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
             automation_mode: AutoMode::Read,
         };
         order += 1;
+        // its inserts and their plugin automation (our description; AAF can't hold them).
+        // A printed track's clip already went through them, so they stay off it.
+        if meta["printed"].as_bool() == Some(true) {
+            let n = meta["inserts"].as_array().map(|a| a.len()).unwrap_or(0);
+            notes.add("inserts of printed tracks not rebuilt (their clip is the render through them)", n);
+        } else {
+            for i in meta["inserts"].as_array().into_iter().flatten() {
+                let Ok(ins) = serde_json::from_value::<Insert>(i.clone()) else {
+                    notes.add("insert effects that couldn't be read left out", 1);
+                    continue;
+                };
+                let ins = match ins {
+                    Insert::Plugin(mut p) => {
+                        let old = std::mem::replace(&mut p.id, new_id("ins"));
+                        for (param, pts) in meta["plugin_automation"][old.as_str()].as_object().into_iter().flatten() {
+                            let Ok(param) = param.parse::<u32>() else { continue };
+                            let mut any = false;
+                            for pt in pts.as_array().into_iter().flatten() {
+                                if let (Some(t), Some(v)) = (from_meta(&pt[0]), pt[1].as_f64()) {
+                                    add_point(s, &p.id, AutomationParam::Plugin(param), base + t, (v as f32).clamp(0.0, 1.0));
+                                    any = true;
+                                }
+                            }
+                            report.automated_parameters += any as usize;
+                        }
+                        report.plugins += 1;
+                        Insert::Plugin(p)
+                    }
+                    other => other,
+                };
+                report.inserts += 1;
+                track.inserts.push(ins);
+            }
+        }
 
         if routed.is_some() {
             // the track's own fader, pan and lanes (the AAF's track gain and pan include the buses)

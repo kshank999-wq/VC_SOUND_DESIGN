@@ -1043,7 +1043,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     // ---- what the timeline can't hold
     let n_auto = |f: &dyn Fn(&AutomationPoint) -> bool| s.automation.values().filter(|p| f(p)).count();
     losses.add(
-        "plugin parameter automation not carried (on unprinted tracks and buses)",
+        "plugin parameter automation not carried for other apps (on unprinted tracks and buses; in VC Sound Design's comment for its own import)",
         n_auto(&|p| matches!(p.param, AutomationParam::Plugin(_)) && !slot_track(&p.owner_id).is_some_and(|t| printed(&t))),
     );
     losses.add("tracks printed with their plugins and insert effects: one rendered clip each, not editable clip by clip", o.prints.len());
@@ -1054,7 +1054,10 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     );
     let inserts =
         s.tracks.values().filter(|t| !printed(&t.id)).map(|t| t.inserts.len()).chain(s.buses.values().map(|b| b.inserts.len())).sum();
-    losses.add("insert effects and plugins not carried (rendered in stems and mix)", inserts);
+    losses.add(
+        "insert effects and plugins not carried for other apps (rendered in stems and mix; described in VC Sound Design's comment for its own import)",
+        inserts,
+    );
     losses.add(
         "bus routing not carried: tracks are flat, with bus levels and automation folded into each track",
         s.buses.values().filter(|b| b.parent_id.is_some()).count(),
@@ -1248,6 +1251,10 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                 "printed": printed(tid),
                 "volume_db": lane(AutomationParam::VolumeDb),
                 "pan_automation": lane(AutomationParam::Pan),
+                // its inserts and their plugins' automation (not applied by other apps; a
+                // printed track's are in its render)
+                "inserts": t.inserts,
+                "plugin_automation": crate::otio::plugin_automation(s, &t.inserts, start),
             }),
         );
     }

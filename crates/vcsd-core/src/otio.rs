@@ -244,6 +244,25 @@ fn track_effects(s: &ProjectState, t: &Track, start: i64, end: i64) -> (Vec<Valu
     (out, folded)
 }
 
+/// The parameter automation of the plugins among `inserts`, by slot id and
+/// parameter id: points `[offset in samples from the range start, value]`.
+pub(crate) fn plugin_automation(s: &ProjectState, inserts: &[Insert], start: i64) -> Value {
+    let mut plugins = serde_json::Map::new();
+    for p in inserts.iter().filter_map(Insert::as_plugin) {
+        let mut lanes: BTreeMap<u32, Vec<Value>> = BTreeMap::new();
+        for a in s.automation.values().filter(|a| a.owner_id == p.id) {
+            if let AutomationParam::Plugin(id) = a.param {
+                lanes.entry(id).or_default().push(json!([a.sample - start, a.value]));
+            }
+        }
+        for l in lanes.values_mut() {
+            l.sort_by_key(|x| x[0].as_i64());
+        }
+        plugins.insert(p.id.clone(), json!(lanes.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<BTreeMap<_, _>>()));
+    }
+    Value::Object(plugins)
+}
+
 /// The bus tree, for VC Sound Design to rebuild (OTIO has no buses): each bus
 /// with its parent, level, mute, inserts (as in the project), volume and balance
 /// automation, and its plugins' parameter automation — points as
@@ -257,19 +276,7 @@ pub(crate) fn bus_tree(s: &ProjectState, start: i64) -> Value {
     let v: Vec<Value> = buses
         .into_iter()
         .map(|b| {
-            let mut plugins = serde_json::Map::new();
-            for p in b.inserts.iter().filter_map(Insert::as_plugin) {
-                let mut lanes: BTreeMap<u32, Vec<Value>> = BTreeMap::new();
-                for a in s.automation.values().filter(|a| a.owner_id == p.id) {
-                    if let AutomationParam::Plugin(id) = a.param {
-                        lanes.entry(id).or_default().push(json!([a.sample - start, a.value]));
-                    }
-                }
-                for l in lanes.values_mut() {
-                    l.sort_by_key(|x| x[0].as_i64());
-                }
-                plugins.insert(p.id.clone(), json!(lanes.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<BTreeMap<_, _>>()));
-            }
+            let plugins = plugin_automation(s, &b.inserts, start);
             json!({
                 "id": b.id, "name": b.name, "parent": b.parent_id, "order": b.order,
                 "gain_db": b.gain_db, "mute": b.mute, "stem": b.stem, "inserts": b.inserts,

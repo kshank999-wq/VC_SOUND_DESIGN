@@ -350,3 +350,122 @@ fn buses_and_their_automation_come_back_from_our_aaf() {
     assert_eq!((rep.bus_levels.as_str(), rep.buses_restored), ("fold", 0));
     assert!(!s3.state.buses.values().any(|b| b.name == "FX Sub"));
 }
+
+/// A test plugin: gain = 2 × parameter 0 (from its automation, else 0.5).
+struct GainPlugin;
+
+impl mixer::PluginHost for GainPlugin {
+    fn process(
+        &self,
+        _slot: &PluginInsert,
+        buf: &mut wav::AudioBuffer,
+        _pos: i64,
+        auto: &[mixer::ParamCurve],
+    ) -> std::result::Result<(), String> {
+        let ch = buf.channels as usize;
+        for f in 0..buf.frames() {
+            let v = auto.iter().find(|c| c.id == 0).map(|c| {
+                let i = c.points.partition_point(|p| p.0 as usize <= f).max(1) - 1;
+                let (a, b) = (c.points[i], c.points[(i + 1).min(c.points.len() - 1)]);
+                if b.0 > a.0 {
+                    a.1 + (b.1 - a.1) * (f as f64 - a.0 as f64) / (b.0 - a.0) as f64
+                } else {
+                    a.1
+                }
+            });
+            let g = 2.0 * v.unwrap_or(0.5) as f32;
+            for c in 0..ch {
+                buf.data[f * ch + c] *= g;
+            }
+        }
+        Ok(())
+    }
+    fn latency(&self, _slot: &PluginInsert) -> i64 {
+        0
+    }
+}
+
+/// A glass hit through a high-pass and an automated test plugin, exported as AAF.
+fn plugin_aaf(name: &str, print: bool) -> (state::Session, std::path::PathBuf, i64) {
+    let (mut s, root) = session(name, "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let id = st.clips.values().find(|c| !c.muted).unwrap().id.clone();
+    let c = st.clips.get_mut(&id).unwrap();
+    c.fill = FillMode::OneShot;
+    let (t0, tid) = (c.timeline_start, c.track_id.clone());
+    st.tracks.get_mut(&tid).unwrap().inserts = vec![
+        Insert::HighPass { hz: 150.0, q: 0.7 },
+        Insert::Plugin(PluginInsert {
+            id: "ins_gain".into(),
+            plugin_id: "vst3:test".into(),
+            format: "vst3".into(),
+            name: "Gain".into(),
+            vendor: "Test".into(),
+            path: String::new(),
+            bypass: false,
+            state: Some("c3RhdGU=".into()),
+            params: [(0u32, 0.3f64)].into_iter().collect(),
+        }),
+    ];
+    for (dx, v) in [(0, 0.1f32), (sr / 4, 0.9), (sr / 2, 0.4)] {
+        editing::set_automation(st, "ins_gain", AutomationParam::Plugin(0), t0 + dx, v).unwrap();
+    }
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.aaf = true;
+    o.aaf_print_plugins = print;
+    o.force = true;
+    o.plugins = Some(mixer::PluginHostRef(std::sync::Arc::new(GainPlugin)));
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+    (s, aaf, t0)
+}
+
+#[test]
+fn track_plugins_and_their_automation_come_back_from_our_aaf() {
+    let (s, aaf, t0) = plugin_aaf("aafplug", false);
+    let sr = s.state.project.sample_rate as i64;
+    for mode in [vcsd_core::otio_import::BusLevels::Auto, vcsd_core::otio_import::BusLevels::Fold] {
+        let (mut s2, root2) = session(&format!("aafplug2{mode:?}"), "24", "01:00:00:00");
+        let o = AafImportOptions { buses: mode, ..opts(&root2) };
+        let rep = s2.edit("i", |st| import(st, &aaf, &o)).unwrap();
+        assert_eq!((rep.inserts, rep.plugins, rep.automated_parameters), (2, 1, 1), "{mode:?}: {rep:?}");
+        let st2 = &s2.state;
+        let c2 = st2.clips.values().find(|c| c.timeline_start == t0).unwrap();
+        let t2 = &st2.tracks[&c2.track_id];
+        assert!(matches!(t2.inserts[0], Insert::HighPass { hz, .. } if hz == 150.0), "{:?}", t2.inserts);
+        let Insert::Plugin(p) = &t2.inserts[1] else { panic!("{:?}", t2.inserts) };
+        assert_ne!(p.id, "ins_gain");
+        assert_eq!((p.plugin_id.as_str(), p.state.as_deref(), p.params.get(&0)), ("vst3:test", Some("c3RhdGU="), Some(&0.3)));
+        let mut pts: Vec<(i64, f32)> = st2.automation.values().filter(|a| a.owner_id == p.id).map(|a| (a.sample, a.value)).collect();
+        pts.sort_by_key(|x| x.0);
+        assert_eq!(pts, vec![(t0, 0.1), (t0 + sr / 4, 0.9), (t0 + sr / 2, 0.4)], "{mode:?}");
+
+        // through the high-pass and the plugin, the same sound
+        let n = s.state.clips.values().find(|c| c.timeline_start == t0).unwrap().length as usize;
+        let host: std::sync::Arc<dyn mixer::PluginHost> = std::sync::Arc::new(GainPlugin);
+        let a = mixer::Mixer::new(&s.state, mixer::RenderOptions::default()).with_plugins(Some(host.clone())).render_master(t0, n).unwrap();
+        let b = mixer::Mixer::new(st2, mixer::RenderOptions::default()).with_plugins(Some(host)).render_master(t0, n).unwrap();
+        assert!(a.peak() > 0.01);
+        let max = a.data.iter().zip(&b.data).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+        assert!(max < 1e-4 * a.peak().max(1.0), "{mode:?}: mix differs by {max}");
+    }
+}
+
+#[test]
+fn a_printed_track_comes_back_as_its_render_without_its_plugins_again() {
+    let (_, aaf, t0) = plugin_aaf("aafplugprint", true);
+    let (mut s2, root2) = session("aafplugprint2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &aaf, &opts(&root2))).unwrap();
+    assert_eq!(rep.inserts, 0);
+    assert!(rep.notes.iter().any(|n| n.starts_with("inserts of printed tracks not rebuilt") && n.ends_with("(2)")), "{:?}", rep.notes);
+    let st2 = &s2.state;
+    assert!(st2.tracks.values().all(|t| t.inserts.is_empty()));
+    assert!(st2.automation.values().all(|a| !matches!(a.param, AutomationParam::Plugin(_))));
+    let _ = t0;
+}

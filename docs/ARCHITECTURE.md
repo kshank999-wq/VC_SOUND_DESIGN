@@ -88,7 +88,8 @@ content.
 | Stereo tracks | Two mono tracks hard-panned L/R; stereo media is linked per channel |
 | Pan on mono tracks, static or automated | Mono Audio Pan (Pan = (pan + 1) / 2) around the track; the breakpoints map exactly because both sides interpolate pan linearly. The receiving app's pan law applies (the app uses −3 dB constant power) |
 | Balance on stereo tracks, static or automated | Folded into each side's gain curve (with any volume automation), fitted within 0.1 dB, including the corner where the balance crosses centre |
-| VC Sound Design's own description | A mob comment (`UserComments` TaggedValue "VCSD", a JSON string) on the composition. It holds the bus tree, as in the OTIO export (parent, level, mute, inserts, volume and balance automation, plugin automation), and for each AAF track its project track, layer, channel, bus, fader, pan and lanes. Other apps show the comment or ignore it; the AAF import uses it to restore the buses |
+| VC Sound Design's own description | A mob comment (`UserComments` TaggedValue "VCSD", a JSON string) on the composition. It holds the bus tree, as in the OTIO export (parent, level, mute, inserts, volume and balance automation, plugin automation), and for each AAF track its project track, layer, channel, bus, fader, pan and lanes, and its
+inserts with their plugins' parameter automation. Other apps show the comment or ignore it; the AAF import uses it to restore the buses |
 | Bus and master levels: static gain, volume automation, balance automation | AAF has no buses, so each bus's levels down to the master are multiplied into the gain of every track it carries. On mono tracks a bus balance moves the panned signal's left/right; with a −3 dB constant-power pan law that is exactly a new pan plus a gain, which is written (pan fitted within 0.002, and each side within 0.1 dB wherever it is above −30 dB). Tracks on muted buses are left out |
 | Clip gain (+ static track fader, folded in) | Mono Audio Gain `OperationGroup`, constant Amplitude |
 | Linear fades in/out | `SourceClip` FadeIn/FadeOut length and type |
@@ -269,6 +270,7 @@ top-level composition (by name, or the one with the most sound clips) is placed 
 | Mono Audio Pan (constant or varying) | Track pan or a pan lane |
 | Comment and descriptive markers | Spotting markers in an "AAF markers" lane, for those inside a scene |
 | The "VCSD" comment (our own export) | The buses restored, as in the OTIO import, and the same `buses` option (auto / buses / fold, default auto): matched by name under the same parent or created, with their level, mute, inserts and automation. Each track is routed to its bus with its own fader, pan and lanes, and the fader that was folded into clip gain is taken back out |
+| Track inserts in the "VCSD" comment | Rebuilt in order on unprinted tracks, in either bus mode: built-in effects with their settings, plugins with their id, format, saved state and values under new slot ids, with their parameter automation. A printed track comes in as its render, so its inserts stay off (noted) |
 
 **Media:** linked WAV/BWF is used where it is. When it has moved, it is searched for by name next
 to the AAF and in the given folders. Embedded essence is extracted to
@@ -317,6 +319,10 @@ a bus level and fade, another bus's fade, and master balance, all with identical
 tracks keep their own fader, pan lane and clip gain, routed to their buses, and the mix matches
 within 1e-4. pyaaf2 reads the description as an ordinary mob comment. With `fold`, no buses
 change.
+
+Track plugins come back with an unprinted track, in both bus modes. It brings a high-pass and an
+automated plugin with its state, values and lane exact, and the mix through a test plugin within
+1e-4. A printed track comes in as its render with no inserts, and the report says so.
 
 It has not yet been tested with files from Media Composer, Pro Tools or Resolve.
 
