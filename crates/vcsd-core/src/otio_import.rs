@@ -696,6 +696,12 @@ impl Reader<'_> {
                             self.track(sub, format!("{name} / {n}"), pos - s0, Some((pos, pos + len)), &mut inner);
                         }
                     }
+                    // a disabled compound clip: everything in it muted
+                    if c["enabled"].as_bool() == Some(false) {
+                        for l in &mut inner {
+                            l.muted = true;
+                        }
+                    }
                     lanes.extend(inner);
                     items.push(None);
                     pos += len;
@@ -955,12 +961,19 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             chans = chans.max(ach.min(2));
             let v = &it.vcsd;
             let len = smp(it.len);
+            let mut zero_muted = false;
             // clip gain: ours, else constant gain effects (keyframed ones go to the track's lane)
             let mut clip_gain = v["gain_db"].as_f64();
             if clip_gain.is_none() {
                 let mut amp = 1.0;
                 for e in &it.effects {
                     match level_effect(e, it.at, it.len) {
+                        // a zero gain is how AAF (via the adapter) carries a mute: a muted clip,
+                        // its other gains its own
+                        Some((true, Level::Const(g))) if g == 0.0 => {
+                            zero_muted = true;
+                            notes.add("zero gains read as mutes (other gains kept as the levels)", 1);
+                        }
                         Some((true, Level::Const(g))) => amp *= g,
                         Some((gain, curve)) => levels.push((gain, it.at, it.at + it.len, curve)),
                         None => notes.add("clip effects other than gain left out", 1),
@@ -986,7 +999,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 fade_in: from_meta(&v["fade_in"]).unwrap_or_else(|| smp(it.fade_in)).clamp(0, len),
                 fade_out: from_meta(&v["fade_out"]).unwrap_or_else(|| smp(it.fade_out)).clamp(0, len),
                 fill: FillMode::OneShot,
-                muted: it.muted,
+                muted: it.muted || zero_muted,
                 take_id: None,
                 performance_event_id: None,
                 sub_index: None,
@@ -1003,6 +1016,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
         // restored buses: the track's own values, routed to its bus
         let routed = bus_map.as_ref().and_then(|m| tv["bus_id"].as_str().and_then(|b| m.get(b))).cloned();
         let raw = tv.is_object() && (routed.is_some() || tv["bus_folded"].as_bool() != Some(true));
+        let mut zero_track = false;
         // inserts described by our own export: rebuilt in order, plugins with new slot ids
         let mut inserts = vec![];
         let mut plugin_points: Vec<(String, u32, i64, f32)> = vec![];
@@ -1042,6 +1056,11 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
         if !raw {
             for e in lane.effects.iter().filter(|e| e["metadata"]["vcsd"]["insert"].is_null()) {
                 match level_effect(e, lane.start, lane.len) {
+                    // a zero gain around the track: a muted track (as AAF carries it)
+                    Some((true, Level::Const(g))) if g == 0.0 => {
+                        zero_track = true;
+                        notes.add("zero gains read as mutes (other gains kept as the levels)", 1);
+                    }
                     Some((gain, curve)) => levels.push((gain, lane.start, lane.start + lane.len, curve)),
                     None => notes.add("track effects other than gain and pan left out", 1),
                 }
@@ -1052,7 +1071,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
         let right_levels: Option<Vec<(bool, f64, f64, Level)>> = lane.right.as_ref().map(|r| {
             let mut v = clip_levels.clone();
             v.extend(r.effects.iter().filter_map(|e| level_effect(e, r.start, r.len)).map(|(g, c)| (g, r.start, r.start + r.len, c)));
-            v.retain(|l| l.0);
+            v.retain(|l| l.0 && !matches!(l.3, Level::Const(g) if g == 0.0));
             v
         });
         if right_levels.is_some() {
@@ -1087,7 +1106,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 // muted bus, which comes back muted itself); otherwise silent as it was
                 mute: match (&routed, tv["mute"].as_bool()) {
                     (Some(_), Some(m)) => m,
-                    _ => lane.muted,
+                    _ => lane.muted || zero_track,
                 },
                 solo: false,
                 armed: false,

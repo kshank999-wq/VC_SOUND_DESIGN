@@ -1036,3 +1036,98 @@ fn muted_tracks_kept_disabled_in_our_otio_come_back_muted() {
     assert!(st3.tracks[&at3(g0).track_id].mute && st3.tracks[&at3(w0).track_id].mute);
     assert!(at3(d0).muted);
 }
+
+#[test]
+fn mutes_carried_as_zero_gains_by_an_aaf_through_the_adapter_come_back_as_mutes() {
+    let Some(py) = python() else {
+        eprintln!("SKIPPED: OpenTimelineIO not installed");
+        return;
+    };
+    let has_adapter =
+        std::process::Command::new(&py).args(["-c", "import otio_aaf_adapter"]).output().map(|o| o.status.success()).unwrap_or(false);
+    if !has_adapter {
+        eprintln!("SKIPPED: the OpenTimelineIO AAF adapter isn't installed (python3 -m pip install otio-aaf-adapter==2.0.0)");
+        return;
+    }
+    // a muted glass track (−3 dB fader, −6 dB clip), the wind on a muted bus, a muted door clip (−4 dB)
+    let (mut s, root) = session("otiozero", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:06:00", "wind exterior", None);
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:05:00", "01:00:05:00", "door slam", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let lens: std::collections::HashMap<String, i64> = st.assets.values().map(|a| (a.id.clone(), a.length_samples)).collect();
+    for c in st.clips.values_mut() {
+        c.fill = FillMode::OneShot;
+        c.length = c.length.min(lens[&c.asset_id] - c.source_offset);
+    }
+    let clip_of = |st: &ProjectState, what: &str| {
+        let cue = st.cues.values().find(|c| c.description.contains(what)).unwrap().id.clone();
+        st.clips.values().find(|c| c.cue_id.as_deref() == Some(cue.as_str()) && !c.muted).unwrap().id.clone()
+    };
+    let (glass, wind, door) = (clip_of(st, "glass"), clip_of(st, "wind"), clip_of(st, "door"));
+    st.clips.get_mut(&glass).unwrap().gain_db = -6.0;
+    let gt = st.clips[&glass].track_id.clone();
+    st.tracks.get_mut(&gt).unwrap().gain_db = -3.0;
+    st.tracks.get_mut(&gt).unwrap().mute = true;
+    let wbus = st.tracks[&st.clips[&wind].track_id].bus_id.clone();
+    st.buses.get_mut(&wbus).unwrap().mute = true;
+    st.clips.get_mut(&door).unwrap().muted = true;
+    st.clips.get_mut(&door).unwrap().gain_db = -4.0;
+    let [g0, w0, d0] = [&glass, &wind, &door].map(|c| st.clips[c].timeline_start);
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.aaf = true;
+    o.force = true;
+    o.include_muted = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+    let otio = r.dir.join("from_aaf.otio");
+    let conv = "import sys, opentimelineio as otio\n\
+                tl = otio.adapters.read_from_file(sys.argv[1], adapter_name='AAF', simplify=True)\n\
+                otio.adapters.write_to_file(tl, sys.argv[2])";
+    let out = std::process::Command::new(&py).args(["-c", conv]).arg(&aaf).arg(&otio).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let (mut s2, root2) = session("otiozero2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &otio, &OtioImportOptions::for_project(&root2, &otio))).unwrap();
+    assert!(rep.notes.iter().any(|n| n.starts_with("zero gains read as mutes")), "{:?}", rep.notes);
+    let st2 = &s2.state;
+    let at = |t: i64| st2.clips.values().find(|c| c.timeline_start == t).unwrap_or_else(|| panic!("clip at {t}"));
+    let g = at(g0);
+    assert!(st2.tracks[&g.track_id].mute, "the muted track, muted");
+    assert!((g.gain_db + 9.0).abs() < 0.01, "its levels kept (clip −6 with the −3 fader the AAF folds in): {}", g.gain_db);
+    let w = &st2.tracks[&at(w0).track_id];
+    assert!(w.mute && w.channels == 2, "the muted bus's stereo track: one track, muted");
+    let d = at(d0);
+    assert!(d.muted && (d.gain_db + 4.0).abs() < 0.01, "the muted clip, with its own gain: {} {}", d.muted, d.gain_db);
+    assert!(!st2.tracks[&d.track_id].mute);
+}
+
+#[test]
+fn a_disabled_compound_clip_comes_back_muted() {
+    let Some(py) = python() else {
+        eprintln!("SKIPPED: OpenTimelineIO not installed (python3 -m pip install opentimelineio==0.18.1)");
+        return;
+    };
+    let dir = tmp("otiodisabledstack");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/otio/make_fixture.py");
+    let out = std::process::Command::new(&py).arg(script).arg(&dir).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // switch the nested stack (MX's compound clip) off
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("fixture.otio")).unwrap()).unwrap();
+    let mx = v["tracks"]["children"].as_array_mut().unwrap().iter_mut().find(|t| t["name"] == "MX").unwrap();
+    let stack =
+        mx["children"].as_array_mut().unwrap().iter_mut().find(|c| c["OTIO_SCHEMA"].as_str().unwrap().starts_with("Stack")).unwrap();
+    stack["enabled"] = serde_json::json!(false);
+    let file = dir.join("disabled.otio");
+    std::fs::write(&file, serde_json::to_string(&v).unwrap()).unwrap();
+    let (mut s, root) = session("otiodisabledstack2", "25", "10:00:00:00");
+    s.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root, &file))).unwrap();
+    let st = &s.state;
+    let inner = st.tracks.values().find(|t| t.name == "MX / inner").expect("the compound's track");
+    assert!(inner.mute, "muted with its compound clip");
+    assert!(!st.tracks.values().find(|t| t.name == "MX").unwrap().mute, "the track around it plays");
+}

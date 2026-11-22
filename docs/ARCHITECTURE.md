@@ -201,7 +201,8 @@ tracks as new tracks in a folder `OTIO/<timeline>`, placed at `global_start_time
 | Transition next to a gap | A fade in or out of `in + out` |
 | Transition between clips | A crossfade: the clip before runs on past the cut by the out offset, the clip after starts before it by the in offset (into their handles, as OTIO defines it). Handles the media doesn't have shorten it |
 | Nested stack (compound clip) | Its audio tracks as extra tracks ("outer / inner"), trimmed to the stack's range |
-| Disabled track or clip | Muted |
+| Disabled track, clip or nested stack | Muted (a disabled compound clip mutes everything in it) |
+| A constant zero gain effect on a clip or track, without our metadata (how AAF, which has no mute, carries one through the AAF adapter) | A muted clip or track, its other gains kept as its levels, so unmuting brings the sound back (noted) |
 | Markers on the timeline, tracks and clips | Spotting markers in an "OTIO markers" lane (name — comment), for those inside a scene |
 | `metadata.vcsd` (our own export) | Clip gain and fades, track fader, pan, channels, volume and pan automation |
 | Effects with `metadata.vcsd.insert` (our own export) | The track's inserts, in order: built-in effects with their settings, plugins with their id, format, saved state and values under new slot ids. A disabled effect (`enabled: false`) comes in bypassed |
@@ -279,6 +280,10 @@ Buses come back three ways:
 - **`auto` into a project whose bus has its own level:** it folds, keeping that level and automation
   and creating no buses.
 - **`buses` forced:** the file's lanes within its range, the project's beyond it.
+- **Mutes carried as zero gains:** our AAF with muted material, converted by the AAF adapter, comes
+  back with the muted track muted (its −9 dB clip gain kept, not −∞), the muted bus's stereo
+  pair as one muted track, and the muted clip muted with its −4 dB. A disabled compound clip in
+  the OTIO fixture mutes its track and nothing around it.
 - **AAF at another rate and place:** into a 44.1 kHz project, placed 10 s in, a bus level, its
   lane and the master balance land at the same moments, lined up with the clip.
 - **Back into the project it came from (OTIO and AAF):** all buses match and are left as they
