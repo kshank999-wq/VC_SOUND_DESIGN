@@ -503,14 +503,15 @@ fn level_effect(e: &Value, t0: f64, len: f64) -> Option<(bool, Level)> {
     let aaf = &e["metadata"]["AAF"];
     let names = [e["effect_name"].as_str(), e["name"].as_str(), aaf["Operation"]["Name"].as_str()];
     let is = |n: &str| names.iter().flatten().any(|x| x.eq_ignore_ascii_case(n));
-    let (gain, param) = if is("Mono Audio Gain") {
-        (true, "Amplitude")
+    // gain: Mono or Stereo Audio Gain, its level in Amplitude (or Level, as some apps write it)
+    let (gain, params): (bool, &[&str]) = if is("Mono Audio Gain") || is("Stereo Audio Gain") {
+        (true, &["Amplitude", "Level"])
     } else if is("Mono Audio Pan") {
-        (false, "Pan")
+        (false, &["Pan"])
     } else {
         return None;
     };
-    let p = &aaf["Parameters"][param];
+    let p = params.iter().map(|k| &aaf["Parameters"][*k]).find(|v| !v.is_null())?;
     if let Some(kf) = p["keyframe_values"].as_array() {
         let mut pts: Vec<(f64, f64)> = kf.iter().filter_map(|k| Some((t0 + number(&k[0])? * len, number(&k[1])?))).collect();
         pts.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -883,6 +884,9 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                         None => notes.add("clip effects other than gain left out", 1),
                     }
                 }
+                if amp > 3.982 {
+                    notes.add("gain above +12 dB clamped to +12 dB", 1);
+                }
                 if (amp - 1.0f64).abs() > 1e-9 {
                     levels_found = true;
                     clip_gain = Some(crate::aaf_import::amp_db(amp));
@@ -1018,6 +1022,14 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 add_point(s, &tid, param, base + t, crate::editing::clamp_automation(param, v as f32));
                 automated |= param == AutomationParam::VolumeDb;
             }
+        }
+        // the project's levels stop at +12 dB (a volume lane, clip gain)
+        let peak = levels.iter().chain(right_levels.iter().flatten()).filter(|l| l.0).map(|l| match &l.3 {
+            Level::Const(v) => *v,
+            other => other.times().iter().map(|x| x.1).fold(0.0, f64::max),
+        });
+        if peak.fold(0.0, f64::max) > 3.982 {
+            notes.add("gain above +12 dB clamped to +12 dB", 1);
         }
         // AAF-style levels: gains multiply, the last pan wins; fitted to dB / pan lanes
         if !levels.is_empty() || right_levels.as_ref().is_some_and(|r| !r.is_empty()) {

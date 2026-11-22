@@ -269,11 +269,15 @@ def build(out):
         ev["SlotID"].value = 50
         ev["EditRate"].value = FPS
         ev["SlotName"].value = "Markers"
+        ev["PhysicalTrackNumber"].value = 1
         eseq = f.create.Sequence(media_kind="DescriptiveMetadata")
         mk = f.create.DescriptiveMarker()
         mk["DataDefinition"].value = f.dictionary.lookup_datadef("DescriptiveMetadata")
         mk["Position"].value = 50
         mk["Comment"].value = "door knock"
+        # the tracks it describes, as Media Composer writes them (readers such as the
+        # OpenTimelineIO AAF adapter need them)
+        mk["DescribedSlots"].value = [a1.slot_id]
         eseq.components.append(mk)
         ev.segment = eseq
         comp.slots.append(ev)

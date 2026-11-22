@@ -835,3 +835,77 @@ fn stepped_pan_keyframes_come_back_held() {
     assert!((at(t0 + sr / 8) + 1.0).abs() < 1e-3, "held at −1 a quarter-second in: {pan:?}");
     assert!((at(t0 + sr / 2 + sr / 8) - 0.4).abs() < 1e-3, "then +0.4: {pan:?}");
 }
+
+#[test]
+fn volume_automation_comes_back_from_an_editors_aaf_converted_by_the_aaf_adapter() {
+    let Some(py) = python() else {
+        eprintln!("SKIPPED: OpenTimelineIO not installed");
+        return;
+    };
+    let has = |m: &str| {
+        std::process::Command::new(&py).args(["-c", &format!("import {m}")]).output().map(|o| o.status.success()).unwrap_or(false)
+    };
+    if !has("otio_aaf_adapter") || !has("aaf2") {
+        eprintln!("SKIPPED: the OpenTimelineIO AAF adapter or pyaaf2 isn't installed");
+        return;
+    }
+    // the AAF import's editor-style fixture (pyaaf2), converted to OTIO by the AAF adapter
+    let dir = tmp("otioaaffixture");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/aaf/make_fixture.py");
+    let out = std::process::Command::new(&py).arg(script).arg(&dir).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let otio = dir.join("fixture.otio");
+    let conv = "import sys, opentimelineio as otio\n\
+                tl = otio.adapters.read_from_file(sys.argv[1], adapter_name='AAF', simplify=True)\n\
+                otio.adapters.write_to_file(tl, sys.argv[2])";
+    let out = std::process::Command::new(&py).args(["-c", conv]).arg(dir.join("fixture.aaf")).arg(&otio).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let (mut s, root) = session("otioaaffix", "25", "10:00:00:00");
+    let rep = s.edit("i", |st| import(st, &otio, &OtioImportOptions::for_project(&root, &otio))).unwrap();
+    assert!(rep.notes.iter().any(|n| n.starts_with("gain above +12 dB clamped")), "{:?}", rep.notes);
+    let st = &s.state;
+    let f = 1920; // samples per frame at 25 fps
+    let vol = |tid: &str| lane_of(st, tid, AutomationParam::VolumeDb);
+    let at = |l: &[(i64, f32)], x: i64| {
+        let i = l.partition_point(|p| p.0 <= x);
+        let (p, q) = (l[i.saturating_sub(1)], l[i.min(l.len() - 1)]);
+        if q.0 > p.0 && x >= p.0 {
+            p.1 as f64 + (q.1 - p.1) as f64 * (x - p.0) as f64 / (q.0 - p.0) as f64
+        } else {
+            p.1 as f64
+        }
+    };
+    // CLIPGAIN (the adapter drops track names; its clip is the one 10 frames in): the clip's
+    // gain envelope 1 → 0.25 → 1 as the track's volume lane
+    let cg = st.clips.values().find(|c| c.timeline_start == 10 * f && c.length == 40 * f).expect("the CLIPGAIN clip");
+    let env = vol(&cg.track_id);
+    for k in 0..40 * f {
+        let u = k as f64 / (40 * f) as f64;
+        let amp = if u <= 0.5 { 1.0 - 1.5 * u } else { 0.25 + 1.5 * (u - 0.5) };
+        let (want, got) = (20.0 * amp.log10(), at(&env, 10 * f + k));
+        assert!((got - want).abs() < 0.11, "clip envelope at {k}: {got:.3} vs {want:.3} dB");
+    }
+    // LEVEL: Stereo Audio Gain, its Level stepping from −6 dB to +18 dB (clamped to +12)
+    let lv = st
+        .tracks
+        .keys()
+        .map(|t| vol(t))
+        .find(|l| l.iter().any(|p| (p.1 - 12.0).abs() < 1e-6))
+        .expect("the LEVEL track's lane, reaching +12 dB");
+    assert!((at(&lv, 10 * f) + 6.0206).abs() < 0.01 && (at(&lv, 25 * f - 1) + 6.0206).abs() < 0.01, "held: {lv:?}");
+    assert!((at(&lv, 25 * f) - 12.0).abs() < 1e-6 && (at(&lv, 45 * f) - 12.0).abs() < 1e-6, "then +12: {lv:?}");
+    // MX: the track gain curve 1 → 0.25 → 1 over 100 frames, under a constant clip gain of 0.5
+    let mx = st
+        .clips
+        .values()
+        .find(|c| c.timeline_start == 0 && c.length == 75 * f && (c.gain_db + 6.0206).abs() < 0.01)
+        .expect("the MX clip, its gain −6 dB");
+    let ml = vol(&mx.track_id);
+    for k in 0..=15 {
+        let x = (k * 100 * f / 20).min(75 * f - 1);
+        let u = x as f64 / (100 * f) as f64;
+        let amp = if u <= 0.5 { 1.0 - 1.5 * u } else { 0.25 + 1.5 * (u - 0.5) };
+        assert!((at(&ml, x) - 20.0 * amp.log10()).abs() < 0.11, "MX volume at {u:.2}: {}", at(&ml, x));
+    }
+}
