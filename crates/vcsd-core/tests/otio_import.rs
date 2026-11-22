@@ -909,3 +909,51 @@ fn volume_automation_comes_back_from_an_editors_aaf_converted_by_the_aaf_adapter
         assert!((at(&ml, x) - 20.0 * amp.log10()).abs() < 0.11, "MX volume at {u:.2}: {}", at(&ml, x));
     }
 }
+
+#[test]
+fn importing_back_into_the_project_it_came_from_keeps_its_buses_and_doesnt_double_their_levels() {
+    let (mut s, t0, file, parent_name) = bus_otio("otioback");
+    let before_auto = s.state.automation.len();
+    let sub = bus_named(&s.state, "FX Sub").id.clone();
+    let parent = bus_named(&s.state, &parent_name).id.clone();
+    let orig_track = s.state.clips.values().find(|c| c.timeline_start == t0).unwrap().track_id.clone();
+    let orig_lanes = [AutomationParam::VolumeDb, AutomationParam::Pan].map(|p| bus_lane(&s.state, &orig_track, p));
+
+    // the editor sends it back: the project's buses already hold these levels
+    let o = OtioImportOptions { folder: Some("Back".into()), ..OtioImportOptions::for_project(s.root().unwrap(), &file) };
+    let rep = s.edit("i", |st| import(st, &file, &o)).unwrap();
+    assert_eq!((rep.bus_levels.as_str(), rep.buses_matched, rep.buses_restored, rep.buses_created), ("buses", 3, 0, 0), "{rep:?}");
+    assert!(rep.notes.iter().all(|n| !n.starts_with("bus levels folded")), "{:?}", rep.notes);
+    let st = &s.state;
+    // the buses untouched: same plugin slot, same lanes
+    assert_eq!(bus_named(st, "FX Sub").inserts[0].as_plugin().unwrap().id, "ins_bus");
+    assert_eq!(st.buses.values().filter(|b| b.name == "FX Sub").count(), 1, "no second FX Sub");
+    // the new track: on the same sub-bus, with its own levels (not the buses' folded in)
+    let new_track = st.tracks.values().find(|t| t.folder == "Back").unwrap();
+    assert_eq!(new_track.bus_id, sub);
+    assert_eq!(new_track.gain_db, -3.0);
+    for (p, want) in [AutomationParam::VolumeDb, AutomationParam::Pan].into_iter().zip(&orig_lanes) {
+        assert_eq!(&bus_lane(st, &new_track.id, p), want, "{p:?}");
+    }
+    let added = st.automation.len() - before_auto;
+    let own: usize = orig_lanes.iter().map(|l| l.len()).sum();
+    assert_eq!(added, own, "only the new track's own lanes added: nothing on the buses");
+
+    // after the bus has changed, auto folds (and says which bus differs)
+    let (mut s2, _, file2, parent_name2) = bus_otio("otioback2");
+    let p2 = bus_named(&s2.state, &parent_name2).id.clone();
+    s2.edit("g", |st| {
+        st.buses.get_mut(&p2).unwrap().gain_db = -5.0;
+        Ok(())
+    })
+    .unwrap();
+    let o2 = OtioImportOptions::for_project(s2.root().unwrap(), &file2);
+    let rep = s2.edit("i", |st| import(st, &file2, &o2)).unwrap();
+    assert_eq!(rep.bus_levels, "fold");
+    assert!(
+        rep.notes.iter().any(|n| n.starts_with("bus levels folded") && n.contains(&parent_name2) && !n.contains("FX Sub")),
+        "{:?}",
+        rep.notes
+    );
+    let _ = parent;
+}

@@ -34,13 +34,15 @@ test("OTIO summaries count rebuilt inserts and plugin automation", () => {
 test("OTIO summaries report restored buses", () => {
   const { composition: _, ...rest } = base;
   const l = otioSummary({ ...rest, timeline: "R", bus_levels: "buses", buses_restored: 3, buses_created: 1 });
-  assert.equal(l[2], "Buses: 3 restored with their automation, 1 created");
+  assert.equal(l[2], "Buses: 3 restored with their automation (1 created)");
   assert.equal(otioSummary({ ...rest, timeline: "R", bus_levels: "fold", buses_restored: 0 }).length, 2);
 });
 
 test("AAF summaries count rebuilt inserts before restored buses", () => {
   const l = aafSummary({ ...base, inserts: 1, plugins: 1, automated_parameters: 1, bus_levels: "buses", buses_restored: 2 });
   assert.deepEqual(l.slice(2), ["Inserts: 1 (1 plugin, 1 automated parameter)", "Buses: 2 restored with their automation"]);
+  const m = aafSummary({ ...base, bus_levels: "buses", buses_restored: 0, buses_matched: 3 });
+  assert.equal(m[2], "Buses: 3 already matching, left as they were");
 });
 
 test("OTIO summaries say when left/right pairs were merged", () => {

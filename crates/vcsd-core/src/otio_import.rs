@@ -111,6 +111,8 @@ pub struct OtioImportReport {
     /// Buses whose levels and automation were restored, and how many were created.
     pub buses_restored: usize,
     pub buses_created: usize,
+    /// Project buses that already held the file's levels (left as they were).
+    pub buses_matched: usize,
     pub media_linked: usize,
     pub media_written: usize,
     /// Clips left out because their media couldn't be found or read: why, per file.
@@ -239,8 +241,73 @@ pub(crate) fn restore_buses(
     from_meta: &dyn Fn(&Value) -> Option<i64>,
 ) -> BusRestore {
     let mut out = BusRestore::default();
-    out.map = restore_buses_into(s, exported, track_buses, mode, base, len, from_meta, &mut out.restored, &mut out.created, &mut out.note);
+    out.map = restore_buses_into(s, exported, track_buses, mode, base, len, from_meta, &mut out);
     out
+}
+
+/// True when project bus `bid` already holds what the file describes for bus `b`:
+/// level and mute, inserts (plugins compared without their slot ids), and the
+/// volume, balance and plugin lanes within the imported range `[base, base + len]`.
+fn bus_matches(s: &ProjectState, bid: &str, b: &Value, base: i64, len: i64, from_meta: &dyn Fn(&Value) -> Option<i64>) -> bool {
+    let bus = &s.buses[bid];
+    if (bus.gain_db as f64 - b["gain_db"].as_f64().unwrap_or(0.0)).abs() > 1e-3 || bus.mute != b["mute"].as_bool().unwrap_or(false) {
+        return false;
+    }
+    let without_id = |mut v: Value| {
+        if let Some(o) = v.as_object_mut() {
+            o.remove("id");
+        }
+        v
+    };
+    let theirs: Vec<Value> = b["inserts"].as_array().cloned().unwrap_or_default();
+    if theirs.len() != bus.inserts.len()
+        || bus.inserts.iter().zip(&theirs).any(|(a, t)| serde_json::to_value(a).map(without_id).ok() != Some(without_id(t.clone())))
+    {
+        return false;
+    }
+    let (lo, hi) = (base, base + len);
+    let ours = |owner: &str, p: AutomationParam| {
+        let mut v: Vec<(i64, f64)> = s
+            .automation
+            .values()
+            .filter(|a| a.owner_id == owner && a.param == p && a.sample >= lo && a.sample <= hi)
+            .map(|a| (a.sample, a.value as f64))
+            .collect();
+        v.sort_by_key(|x| x.0);
+        v
+    };
+    let file = |pts: &Value| -> Vec<(i64, f64)> {
+        let mut v: Vec<(i64, f64)> =
+            pts.as_array().into_iter().flatten().filter_map(|p| Some((base + from_meta(&p[0])?, number(&p[1])?))).collect();
+        v.sort_by_key(|x| x.0);
+        v
+    };
+    let same = |a: &[(i64, f64)], b: &[(i64, f64)]| {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x.0 - y.0).abs() <= 1 && (x.1 - y.1).abs() < 1e-4)
+    };
+    if !same(&ours(bid, AutomationParam::VolumeDb), &file(&b["volume_db"]))
+        || !same(&ours(bid, AutomationParam::Pan), &file(&b["pan_automation"]))
+    {
+        return false;
+    }
+    // each plugin's lanes, in insert order
+    let their_slots: Vec<&str> = theirs.iter().filter(|i| i["type"] == "plugin").filter_map(|i| i["id"].as_str()).collect();
+    for (p, old) in bus.inserts.iter().filter_map(Insert::as_plugin).zip(their_slots) {
+        let lanes = &b["plugin_automation"][old];
+        let mut params: Vec<u32> = s
+            .automation
+            .values()
+            .filter(|a| a.owner_id == p.id && a.sample >= lo && a.sample <= hi)
+            .filter_map(|a| if let AutomationParam::Plugin(id) = a.param { Some(id) } else { None })
+            .collect();
+        params.extend(lanes.as_object().into_iter().flatten().filter_map(|(k, _)| k.parse::<u32>().ok()));
+        params.sort();
+        params.dedup();
+        if params.iter().any(|&id| !same(&ours(&p.id, AutomationParam::Plugin(id)), &file(&lanes[id.to_string()]))) {
+            return false;
+        }
+    }
+    true
 }
 
 /// What [`restore_buses`] did: exported bus id → project bus id when the buses
@@ -251,6 +318,8 @@ pub(crate) struct BusRestore {
     pub map: Option<HashMap<String, String>>,
     pub restored: usize,
     pub created: usize,
+    /// Project buses that already held the file's levels (left exactly as they were).
+    pub matched: usize,
     pub note: Option<String>,
 }
 
@@ -263,9 +332,7 @@ fn restore_buses_into(
     base: i64,
     len: i64,
     from_meta: &dyn Fn(&Value) -> Option<i64>,
-    restored: &mut usize,
-    created: &mut usize,
-    note: &mut Option<String>,
+    out: &mut BusRestore,
 ) -> Option<HashMap<String, String>> {
     if mode == BusLevels::Fold || exported.is_empty() {
         return None;
@@ -315,11 +382,21 @@ fn restore_buses_into(
             || !bus.inserts.is_empty()
             || s.automation.values().any(|a| a.owner_id == bid || slots.contains(&a.owner_id.as_str()))
     };
+    // a bus that already holds the file's levels (importing back into the project the
+    // file came from) is no conflict: it stays exactly as it is
+    let same: Vec<bool> =
+        plan.iter().map(|(id, t)| t.as_deref().is_some_and(|t| bus_matches(s, t, by_id[id], base, len, from_meta))).collect();
     if mode == BusLevels::Auto {
-        let busy: Vec<String> =
-            plan.iter().filter_map(|(_, t)| t.as_deref()).filter(|t| touched(t)).map(|t| s.buses[t].name.clone()).collect();
+        let busy: Vec<String> = plan
+            .iter()
+            .zip(&same)
+            .filter(|(_, same)| !**same)
+            .filter_map(|((_, t), _)| t.as_deref())
+            .filter(|t| touched(t))
+            .map(|t| s.buses[t].name.clone())
+            .collect();
         if !busy.is_empty() {
-            *note = Some(format!(
+            out.note = Some(format!(
                 "bus levels folded into the tracks: the project's buses have their own levels ({}); import with buses to restore them",
                 busy.join(", ")
             ));
@@ -327,8 +404,13 @@ fn restore_buses_into(
         }
     }
     let mut map: HashMap<String, String> = HashMap::new();
-    for (id, target) in plan {
+    for ((id, target), same) in plan.into_iter().zip(same) {
         let b = by_id[id];
+        if same {
+            out.matched += 1;
+            map.insert(id.to_string(), target.unwrap());
+            continue;
+        }
         let bid = match target {
             Some(t) => t,
             None => {
@@ -338,7 +420,7 @@ fn restore_buses_into(
                 if let Some(bus) = s.buses.get_mut(&new) {
                     bus.stem = b["stem"].as_bool().unwrap_or(true);
                 }
-                *created += 1;
+                out.created += 1;
                 new
             }
         };
@@ -389,7 +471,7 @@ fn restore_buses_into(
                 }
             }
         }
-        *restored += 1;
+        out.restored += 1;
         map.insert(id.to_string(), bid);
     }
     Some(map)
@@ -832,7 +914,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
     if let Some(n) = &restore.note {
         notes.add(n.clone(), 1);
     }
-    (report.buses_restored, report.buses_created) = (restore.restored, restore.created);
+    (report.buses_restored, report.buses_created, report.buses_matched) = (restore.restored, restore.created, restore.matched);
     let bus_map = restore.map;
     report.bus_levels = if bus_map.is_some() { "buses".into() } else { "fold".into() };
     let lanes = pair_stereo(lanes, &mut media);

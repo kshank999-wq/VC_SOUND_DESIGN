@@ -590,3 +590,41 @@ fn mono_pan_automation_comes_back_from_our_aaf() {
         }
     }
 }
+
+#[test]
+fn importing_our_aaf_back_into_its_project_keeps_the_buses_as_they_are() {
+    let (mut s, root) = session("aafback", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let c = st.clips.values().find(|c| !c.muted).unwrap().clone();
+    st.clips.get_mut(&c.id).unwrap().gain_db = -6.0;
+    st.tracks.get_mut(&c.track_id).unwrap().gain_db = -3.0;
+    let bus = st.tracks[&c.track_id].bus_id.clone();
+    st.buses.get_mut(&bus).unwrap().gain_db = -2.0;
+    editing::set_automation(st, &bus, AutomationParam::VolumeDb, c.timeline_start, 0.0).unwrap();
+    editing::set_automation(st, &bus, AutomationParam::VolumeDb, c.timeline_start + sr / 2, -8.0).unwrap();
+    let master = st.buses.values().find(|b| b.parent_id.is_none()).unwrap().id.clone();
+    editing::set_automation(st, &master, AutomationParam::Pan, 0, 0.3).unwrap();
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.aaf = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+
+    let before = s.state.automation.len();
+    let o2 = AafImportOptions { folder: Some("Back".into()), ..opts(&root) };
+    let rep = s.edit("i", |st| import(st, &aaf, &o2)).unwrap();
+    assert_eq!((rep.bus_levels.as_str(), rep.buses_restored, rep.buses_created), ("buses", 0, 0), "{rep:?}");
+    assert!(rep.buses_matched >= 2, "{rep:?}");
+    let st = &s.state;
+    assert_eq!(st.automation.len(), before, "nothing added to the buses (the track has no lanes)");
+    let t2 = st.tracks.values().find(|t| t.folder == "Back").unwrap();
+    assert_eq!((t2.bus_id.as_str(), t2.gain_db), (bus.as_str(), -3.0), "on its bus, with its own fader");
+    let c2 = st.clips.values().find(|x| x.track_id == t2.id).unwrap();
+    assert!((c2.gain_db + 6.0).abs() < 1e-3, "its own clip gain, not the folded −9 dB: {}", c2.gain_db);
+}

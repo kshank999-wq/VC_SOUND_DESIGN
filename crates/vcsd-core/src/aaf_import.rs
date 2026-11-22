@@ -84,6 +84,8 @@ pub struct AafImportReport {
     pub bus_levels: String,
     pub buses_restored: usize,
     pub buses_created: usize,
+    /// Project buses that already held the file's levels (left as they were).
+    pub buses_matched: usize,
     /// Track inserts rebuilt from VC Sound Design's description (built-in effects
     /// and plugins), plugins among them, and plugin parameters with automation.
     pub inserts: usize,
@@ -1458,7 +1460,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
     }
     let bus_map = restore.map.unwrap_or_default();
     report.bus_levels = if bus_map.is_empty() { "fold".into() } else { "buses".into() };
-    (report.buses_restored, report.buses_created) = (restore.restored, restore.created);
+    (report.buses_restored, report.buses_created, report.buses_matched) = (restore.restored, restore.created, restore.matched);
 
     for p in planned {
         let stereo = p.right.is_some();

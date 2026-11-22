@@ -3,7 +3,7 @@
 export type AafReport = {
   composition: string; start_tc: string; tracks: string[]; stereo_tracks: number; clips: number; markers: number;
   media_linked: number; media_written: number; missing_media: string[]; notes: string[];
-  bus_levels?: string; buses_restored?: number; buses_created?: number;
+  bus_levels?: string; buses_restored?: number; buses_created?: number; buses_matched?: number;
   inserts?: number; plugins?: number; automated_parameters?: number;
 };
 
@@ -22,8 +22,11 @@ export function aafSummary(r: AafReport, mediaDir = "Audio/Imported/AAF"): strin
     const auto = r.automated_parameters ? `, ${plural(r.automated_parameters, "automated parameter")}` : "";
     lines.push(`Inserts: ${r.inserts} (${plural(r.plugins ?? 0, "plugin")}${auto})`);
   }
-  if (r.bus_levels === "buses" && r.buses_restored) {
-    lines.push(`Buses: ${r.buses_restored} restored with their automation${r.buses_created ? `, ${r.buses_created} created` : ""}`);
+  if (r.bus_levels === "buses" && (r.buses_restored || r.buses_matched)) {
+    const parts = [];
+    if (r.buses_restored) parts.push(`${r.buses_restored} restored with their automation${r.buses_created ? ` (${r.buses_created} created)` : ""}`);
+    if (r.buses_matched) parts.push(`${r.buses_matched} already matching, left as they were`);
+    lines.push(`Buses: ${parts.join("; ")}`);
   }
   if (r.missing_media.length) lines.push("", "Missing media (clips left out):", ...r.missing_media.map((m) => "  " + m));
   if (r.notes.length) lines.push("", "Notes:", ...r.notes.map((n) => "  " + n));

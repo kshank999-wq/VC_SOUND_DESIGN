@@ -208,7 +208,15 @@ so.
 **Bus levels** (`buses` option, the import dialog, `--buses`). Restoring buses changes everything on
 them, so there are three modes:
 - `auto` (the default) restores them when the project's matching buses are untouched (unity,
-  unmuted, no automation or inserts) or missing. Otherwise it folds, and the report names the buses.
+  unmuted, no automation or inserts), missing, or already hold the file's levels. Otherwise it
+  folds, and the report names the buses that differ.
+
+  A bus "already holds the file's levels" when it has the same level and mute, the same inserts
+  (plugins compared without their slot ids) and the same volume, balance and plugin lanes within
+  the imported range. That's the case when importing back into the project the file came from.
+  Such buses are left exactly as they are, and the tracks are routed to them with their own
+  levels. Folding there would apply every bus level twice: once baked into the tracks, and again
+  by the buses they still pass through.
 - `buses` always restores them.
 - `fold` keeps the project's buses as they are; each track then carries what its buses did (the
   folded gain and pan effects).
@@ -255,7 +263,11 @@ Buses come back three ways:
   plugin matches within 1e-5.
 - **`auto` into a project whose bus has its own level:** it folds, keeping that level and automation
   and creating no buses.
-- **`buses` forced:** the file's lanes within its range, the project's beyond it. A track with a built-in effect and an automated plugin comes
+- **`buses` forced:** the file's lanes within its range, the project's beyond it.
+- **Back into the project it came from (OTIO and AAF):** all buses match and are left as they
+  were (same plugin slot, nothing added to their lanes, no duplicate buses). The new tracks sit on
+  the same buses with their own fader, lanes and clip gain. After a bus has changed, `auto` folds
+  and names only that bus. A track with a built-in effect and an automated plugin comes
 back with both: the plugin's state, values and automation are exact, and the mix through a test
 plugin matches to within 1e-5.
 
