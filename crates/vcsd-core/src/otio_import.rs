@@ -106,6 +106,8 @@ pub struct OtioImportReport {
     pub automated_parameters: usize,
     /// How bus levels came in: "buses" (restored) or "fold" (in the tracks).
     pub bus_levels: String,
+    /// Left/right track pairs (as the AAF adapter writes stereo tracks) merged into one stereo track.
+    pub stereo_pairs: usize,
     /// Buses whose levels and automation were restored, and how many were created.
     pub buses_restored: usize,
     pub buses_created: usize,
@@ -171,6 +173,8 @@ struct OLane {
     /// The track's own range on the timeline (seconds), for its effects' keyframes.
     start: f64,
     len: f64,
+    /// The right side of a stereo pair merged into this lane (AAF-style L/R tracks).
+    right: Option<Box<OLane>>,
 }
 
 /// A level parameter over time (seconds from the timeline start).
@@ -178,6 +182,8 @@ struct OLane {
 enum Level {
     Const(f64),
     Points(Vec<(f64, f64)>),
+    /// Held at each point's value until the next ("Constant" interpolation).
+    Steps(Vec<(f64, f64)>),
 }
 
 impl Level {
@@ -193,6 +199,16 @@ impl Level {
                     (None, None) => 1.0,
                 }
             }
+            Level::Steps(p) => {
+                let i = p.partition_point(|x| x.0 <= t);
+                i.checked_sub(1).or((!p.is_empty()).then_some(0)).map(|k| p[k].1).unwrap_or(1.0)
+            }
+        }
+    }
+    fn times(&self) -> &[(f64, f64)] {
+        match self {
+            Level::Const(_) => &[],
+            Level::Points(p) | Level::Steps(p) => p,
         }
     }
 }
@@ -379,6 +395,55 @@ fn restore_buses_into(
     Some(map)
 }
 
+/// Merge adjacent tracks that are one stereo track split into left and right (as
+/// the OpenTimelineIO AAF adapter writes our and editors' stereo tracks): named
+/// "… L"/"… R" or hard-panned left/right, playing the same stereo clips. Only
+/// tracks without our own metadata (ours carry their channel count).
+fn pair_stereo(lanes: Vec<OLane>, media: &mut Media) -> Vec<OLane> {
+    let hard = |l: &OLane, want: f64| {
+        l.effects
+            .iter()
+            .filter_map(|e| level_effect(e, l.start, l.len))
+            .any(|(g, c)| !g && matches!(c, Level::Const(v) if (v - want).abs() < 0.01))
+    };
+    let same = |a: &OLane, b: &OLane| {
+        a.items.len() == b.items.len()
+            && a.items.iter().zip(&b.items).all(|(x, y)| {
+                x.url.is_some()
+                    && x.url == y.url
+                    && (x.at - y.at).abs() < 1e-6
+                    && (x.len - y.len).abs() < 1e-6
+                    && (x.source - y.source).abs() < 1e-6
+                    && x.effects == y.effects
+                    && x.muted == y.muted
+            })
+    };
+    let mut out: Vec<OLane> = vec![];
+    let mut it = lanes.into_iter().peekable();
+    while let Some(l) = it.next() {
+        let pair = it.peek().is_some_and(|r| {
+            !l.vcsd.is_object()
+                && !r.vcsd.is_object()
+                && (hard(&l, 0.0) && hard(r, 1.0)
+                    || crate::aaf_import::strip_side(&l.name).is_some()
+                        && crate::aaf_import::strip_side(&l.name) == crate::aaf_import::strip_side(&r.name))
+                && same(&l, r)
+        });
+        let stereo = pair
+            && l.items.iter().all(|i| {
+                i.url.as_deref().and_then(|u| media.get(u).ok()).and_then(|(p, _)| wav::read_info(&p).ok()).is_some_and(|w| w.channels == 2)
+            });
+        if stereo {
+            let r = it.next().unwrap();
+            let name = crate::aaf_import::strip_side(&l.name).unwrap_or(&l.name).to_string();
+            out.push(OLane { name, right: Some(Box::new(r)), ..l });
+        } else {
+            out.push(l);
+        }
+    }
+    out
+}
+
 /// One plugin parameter's automation from our OTIO description: its raw
 /// `points` ([offset in samples of the exporting project's rate from the timeline
 /// start, value]) when present, else its `keyframe_values` ([fraction of the
@@ -449,7 +514,13 @@ fn level_effect(e: &Value, t0: f64, len: f64) -> Option<(bool, Level)> {
     if let Some(kf) = p["keyframe_values"].as_array() {
         let mut pts: Vec<(f64, f64)> = kf.iter().filter_map(|k| Some((t0 + number(&k[0])? * len, number(&k[1])?))).collect();
         pts.sort_by(|a, b| a.0.total_cmp(&b.0));
-        return (!pts.is_empty()).then_some((gain, Level::Points(pts)));
+        let interp = p["keyframe_interpolation"].as_str().unwrap_or("Linear").to_ascii_lowercase();
+        let curve = if interp == "constant" || interp == "none" || interp == "step" {
+            Level::Steps(pts.clone())
+        } else {
+            Level::Points(pts.clone())
+        };
+        return (!pts.is_empty()).then_some((gain, curve));
     }
     number(p).map(|v| (gain, Level::Const(v)))
 }
@@ -609,6 +680,7 @@ impl Reader<'_> {
                     effects: t["effects"].as_array().cloned().unwrap_or_default(),
                     start: offset,
                     len: pos - offset,
+                    right: None,
                 },
             );
         }
@@ -762,6 +834,8 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
     (report.buses_restored, report.buses_created) = (restore.restored, restore.created);
     let bus_map = restore.map;
     report.bus_levels = if bus_map.is_some() { "buses".into() } else { "fold".into() };
+    let lanes = pair_stereo(lanes, &mut media);
+    report.stereo_pairs = lanes.iter().filter(|l| l.right.is_some()).count();
     let mut levels_found = false;
     for lane in lanes {
         let tid = new_id("trk");
@@ -878,6 +952,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 Err(_) => notes.add("insert effects that couldn't be read left out", 1),
             }
         }
+        let clip_levels = levels.clone();
         if !raw {
             for e in lane.effects.iter().filter(|e| e["metadata"]["vcsd"]["insert"].is_null()) {
                 match level_effect(e, lane.start, lane.len) {
@@ -887,6 +962,18 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             }
         }
         levels_found |= tv.is_object() || !levels.is_empty();
+        // a merged L/R pair: each side's gains (clip-level ones shared); its hard pans are the pairing
+        let right_levels: Option<Vec<(bool, f64, f64, Level)>> = lane.right.as_ref().map(|r| {
+            let mut v = clip_levels.clone();
+            v.extend(r.effects.iter().filter_map(|e| level_effect(e, r.start, r.len)).map(|(g, c)| (g, r.start, r.start + r.len, c)));
+            v.retain(|l| l.0);
+            v
+        });
+        if right_levels.is_some() {
+            levels.retain(|l| l.0);
+            levels_found = true;
+        }
+        let chans = if lane.right.is_some() { 2 } else { chans };
         let channels = tv["channels"].as_u64().map(|c| c.clamp(1, 2) as u16).unwrap_or(chans);
         let category = guess_category(&lane.name);
         let bus_id = match (&routed, &category) {
@@ -933,18 +1020,37 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             }
         }
         // AAF-style levels: gains multiply, the last pan wins; fitted to dB / pan lanes
-        if !levels.is_empty() {
+        if !levels.is_empty() || right_levels.as_ref().is_some_and(|r| !r.is_empty()) {
             let at = |t: i64| t as f64 / psr as f64;
             let covers = |l: &(bool, f64, f64, Level), t: f64| l.1 <= t && t < l.2;
-            let gain = |t: i64| levels.iter().filter(|l| l.0 && covers(l, at(t))).map(|l| l.3.at(at(t))).product::<f64>();
-            let has_pan = levels.iter().any(|l| !l.0);
-            let pan = |t: i64| levels.iter().rev().find(|l| !l.0 && covers(l, at(t))).map(|l| l.3.at(at(t)) * 2.0 - 1.0).unwrap_or(0.0);
-            let mut keys = vec![];
-            for l in &levels {
-                keys.extend([smp(l.1) - 1, smp(l.1), smp(l.2) - 1, smp(l.2)]);
-                if let Level::Points(p) = &l.3 {
-                    keys.extend(p.iter().map(|x| smp(x.0)));
+            let side = |ls: &[(bool, f64, f64, Level)], t: i64| {
+                ls.iter().filter(|l| l.0 && covers(l, at(t))).map(|l| l.3.at(at(t))).product::<f64>()
+            };
+            let gain = |t: i64| match &right_levels {
+                // a pair: the louder side
+                Some(r) => side(&levels, t).max(side(r, t)),
+                None => side(&levels, t),
+            };
+            let has_pan = right_levels.is_some() || levels.iter().any(|l| !l.0);
+            let pan = |t: i64| match &right_levels {
+                // the mixer's balance: centre = unity both sides, the far side dips
+                Some(r) => {
+                    let (gl, gr) = (side(&levels, t), side(r, t));
+                    if gl <= 1e-9 && gr <= 1e-9 {
+                        0.0
+                    } else if gl >= gr {
+                        gr / gl - 1.0
+                    } else {
+                        1.0 - gl / gr
+                    }
                 }
+                None => levels.iter().rev().find(|l| !l.0 && covers(l, at(t))).map(|l| l.3.at(at(t)) * 2.0 - 1.0).unwrap_or(0.0),
+            };
+            let mut keys = vec![];
+            for l in levels.iter().chain(right_levels.iter().flatten()) {
+                keys.extend([smp(l.1) - 1, smp(l.1), smp(l.2) - 1, smp(l.2)]);
+                // both sides of each point: a held (stepped) value jumps there
+                keys.extend(l.3.times().iter().flat_map(|x| [smp(x.0) - 1, smp(x.0)]));
             }
             // the lanes only matter where the clips play
             let lo = lane.items.iter().map(|i| smp(i.at)).min().unwrap_or(0);

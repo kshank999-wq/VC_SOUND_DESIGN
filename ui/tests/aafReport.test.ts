@@ -42,3 +42,8 @@ test("AAF summaries count rebuilt inserts before restored buses", () => {
   const l = aafSummary({ ...base, inserts: 1, plugins: 1, automated_parameters: 1, bus_levels: "buses", buses_restored: 2 });
   assert.deepEqual(l.slice(2), ["Inserts: 1 (1 plugin, 1 automated parameter)", "Buses: 2 restored with their automation"]);
 });
+
+test("OTIO summaries say when left/right pairs were merged", () => {
+  const { composition: _, ...rest } = base;
+  assert.equal(otioSummary({ ...rest, timeline: "R", stereo_pairs: 2 })[2], "Stereo: 2 left/right pairs merged into one track each");
+});

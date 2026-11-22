@@ -1296,7 +1296,7 @@ pub(crate) fn amp_db(a: f64) -> f64 {
     }
 }
 
-fn strip_side(name: &str) -> Option<&str> {
+pub(crate) fn strip_side(name: &str) -> Option<&str> {
     [" L", " R", ".L", ".R", "_L", "_R"].iter().find_map(|s| name.strip_suffix(s)).map(str::trim_end)
 }
 

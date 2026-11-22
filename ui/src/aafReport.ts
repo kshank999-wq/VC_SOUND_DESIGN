@@ -8,7 +8,7 @@ export type AafReport = {
 };
 
 /** OTIO import results: the same, with the timeline's name. */
-export type OtioReport = Omit<AafReport, "composition"> & { timeline: string };
+export type OtioReport = Omit<AafReport, "composition"> & { timeline: string; stereo_pairs?: number };
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -31,5 +31,7 @@ export function aafSummary(r: AafReport, mediaDir = "Audio/Imported/AAF"): strin
 }
 
 export function otioSummary(r: OtioReport): string[] {
-  return aafSummary({ ...r, composition: r.timeline }, "Audio/Imported/OTIO");
+  const lines = aafSummary({ ...r, composition: r.timeline }, "Audio/Imported/OTIO");
+  if (r.stereo_pairs) lines.splice(2, 0, `Stereo: ${plural(r.stereo_pairs, "left/right pair")} merged into one track each`);
+  return lines;
 }

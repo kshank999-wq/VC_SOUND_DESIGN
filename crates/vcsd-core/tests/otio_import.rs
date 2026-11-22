@@ -703,3 +703,135 @@ fn a_project_whose_buses_have_their_own_levels_keeps_them_unless_asked() {
     assert_eq!(st3.buses[&pid3].gain_db, -2.0);
     assert_eq!(bus_lane(st3, &pid3, AutomationParam::VolumeDb), vec![(t0, 0.0), (t0 + sr / 2, -8.0), (100 * sr, -1.0)]);
 }
+
+fn lane_of(st: &ProjectState, owner: &str, p: AutomationParam) -> Vec<(i64, f32)> {
+    let mut v: Vec<(i64, f32)> =
+        st.automation.values().filter(|a| a.owner_id == owner && a.param == p).map(|a| (a.sample, a.value)).collect();
+    v.sort_by_key(|x| x.0);
+    v
+}
+
+#[test]
+fn a_stereo_track_split_left_right_by_the_aaf_adapter_comes_back_as_one() {
+    let Some(py) = python() else {
+        eprintln!("SKIPPED: OpenTimelineIO not installed");
+        return;
+    };
+    let has_adapter =
+        std::process::Command::new(&py).args(["-c", "import otio_aaf_adapter"]).output().map(|o| o.status.success()).unwrap_or(false);
+    if !has_adapter {
+        eprintln!("SKIPPED: the OpenTimelineIO AAF adapter isn't installed (python3 -m pip install otio-aaf-adapter==2.0.0)");
+        return;
+    }
+    let (mut s, root) = session("otiostereo", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:06:00", "wind exterior", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let lens: std::collections::HashMap<String, i64> = st.assets.values().map(|a| (a.id.clone(), a.length_samples)).collect();
+    for c in st.clips.values_mut() {
+        c.fill = FillMode::OneShot;
+        c.length = c.length.min(lens[&c.asset_id] - c.source_offset);
+    }
+    let wind = st.clips.values().find(|c| !c.muted).unwrap().clone();
+    assert_eq!(st.tracks[&wind.track_id].channels, 2);
+    let t0 = wind.timeline_start;
+    // balance swept across the centre, and a dip
+    editing::set_automation(st, &wind.track_id, AutomationParam::Pan, t0, -0.6).unwrap();
+    editing::set_automation(st, &wind.track_id, AutomationParam::Pan, t0 + 2 * sr, 0.6).unwrap();
+    editing::set_automation(st, &wind.track_id, AutomationParam::VolumeDb, t0 + sr, 0.0).unwrap();
+    editing::set_automation(st, &wind.track_id, AutomationParam::VolumeDb, t0 + 3 * sr, -12.0).unwrap();
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.aaf = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+    let otio = r.dir.join("from_aaf.otio");
+    let conv = "import sys, opentimelineio as otio\n\
+                tl = otio.adapters.read_from_file(sys.argv[1], adapter_name='AAF', simplify=True)\n\
+                otio.adapters.write_to_file(tl, sys.argv[2])";
+    let out = std::process::Command::new(&py).args(["-c", conv]).arg(&aaf).arg(&otio).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let (mut s2, root2) = session("otiostereo2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &otio, &OtioImportOptions::for_project(&root2, &otio))).unwrap();
+    assert_eq!((rep.stereo_pairs, rep.tracks.len(), rep.clips), (1, 1, 1), "the L and R tracks as one: {rep:?}");
+    let st2 = &s2.state;
+    let c2 = st2.clips.values().next().unwrap();
+    let t2 = &st2.tracks[&c2.track_id];
+    assert_eq!(t2.channels, 2);
+    let (a, b) = (&s.state, st2);
+    let val = |l: &[(i64, f32)], x: i64, base: f64| {
+        if l.is_empty() {
+            return base;
+        }
+        let i = l.partition_point(|p| p.0 <= x);
+        let (p, q) = (l[i.saturating_sub(1)], l[i.min(l.len() - 1)]);
+        if q.0 > p.0 && x >= p.0 {
+            p.1 as f64 + (q.1 - p.1) as f64 * (x - p.0) as f64 / (q.0 - p.0) as f64
+        } else {
+            p.1 as f64
+        }
+    };
+    let (pa, pb) = (lane_of(a, &wind.track_id, AutomationParam::Pan), lane_of(b, &t2.id, AutomationParam::Pan));
+    let (va, vb) = (lane_of(a, &wind.track_id, AutomationParam::VolumeDb), lane_of(b, &t2.id, AutomationParam::VolumeDb));
+    for k in 0..=200 {
+        let x = t0 + wind.length * k / 200;
+        // what each side plays: the level, then the balance (centre = unity, the far side dips)
+        let sides = |level_db: f64, bal: f64| {
+            let g = 10f64.powf(level_db / 20.0);
+            let b = bal.clamp(-1.0, 1.0);
+            if b <= 0.0 {
+                (g, g * (1.0 + b))
+            } else {
+                (g * (1.0 - b), g)
+            }
+        };
+        let (la, ra) = sides(val(&va, x, 0.0), val(&pa, x, 0.0));
+        let (lb, rb) = sides(val(&vb, x, 0.0) + t2.gain_db as f64, val(&pb, x, t2.pan as f64));
+        for (side, want, got) in [("left", la, lb), ("right", ra, rb)] {
+            assert!((20.0 * (got / want).log10()).abs() < 0.25, "{side} at {x}: {got:.5} vs {want:.5}");
+        }
+    }
+}
+
+#[test]
+fn stepped_pan_keyframes_come_back_held() {
+    let (mut s, root, t0) = levels_project("otiopanstep");
+    let sr = s.state.project.sample_rate as i64;
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.otio = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let file = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    strip_vcsd(&mut v);
+    for t in v["tracks"]["children"].as_array_mut().unwrap() {
+        for e in t["effects"].as_array_mut().unwrap() {
+            if e["name"] == "Mono Audio Pan" {
+                e["metadata"]["AAF"]["Parameters"]["Pan"]["keyframe_interpolation"] = serde_json::json!("Constant");
+            }
+        }
+    }
+    let stepped = file.with_file_name("stepped.otio");
+    std::fs::write(&stepped, serde_json::to_string(&v).unwrap()).unwrap();
+    let (mut s2, root2) = session("otiopanstep2", "24", "01:00:00:00");
+    s2.edit("i", |st| import(st, &stepped, &OtioImportOptions::for_project(&root2, &stepped))).unwrap();
+    let c2 = s2.state.clips.values().find(|c| c.timeline_start == t0).unwrap();
+    let pan = lane_of(&s2.state, &c2.track_id, AutomationParam::Pan);
+    // the sweep −1 → +0.4 over 0.5 s, held at its keyframes: hard left until the next one
+    let at = |x: i64| {
+        let i = pan.partition_point(|p| p.0 <= x);
+        let (p, q) = (pan[i.saturating_sub(1)], pan[i.min(pan.len() - 1)]);
+        if q.0 > p.0 && x >= p.0 {
+            p.1 as f64 + (q.1 - p.1) as f64 * (x - p.0) as f64 / (q.0 - p.0) as f64
+        } else {
+            p.1 as f64
+        }
+    };
+    assert!((at(t0 + sr / 8) + 1.0).abs() < 1e-3, "held at −1 a quarter-second in: {pan:?}");
+    assert!((at(t0 + sr / 2 + sr / 8) - 0.4).abs() < 1e-3, "then +0.4: {pan:?}");
+}

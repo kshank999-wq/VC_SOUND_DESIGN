@@ -193,7 +193,8 @@ tracks as new tracks in a folder `OTIO/<timeline>`, placed at `global_start_time
 | `metadata.vcsd.buses` (our own export) | The buses the imported tracks feed, with every bus above them. They are matched by name under the same parent (the root is the project's master) or created. Their level, mute, inserts (plugins under new slot ids) and plugin automation are set, and their volume and balance lanes are replaced within the imported range. The tracks then keep their own levels and are routed to them. See below for when |
 | A plugin effect's `metadata.vcsd.automation` | Its parameter lanes. These come from the raw `points` (sample offsets, rescaled from the exporting project's rate), or, when a tool kept only the `keyframe_values`, from those (fractions of the track's range). "Constant" interpolation becomes holds; curved interpolation is read as linear |
 | Insert effects from our own export (`metadata.vcsd.insert`) | The track's inserts, in order: built-ins as they were, plugins with their id, format, state and values under a new slot id, and their parameter automation |
-| Without it: AAF-style "Mono Audio Gain" / "Mono Audio Pan" effects on tracks and clips (the AAF adapter's encoding, and our export's) | Constant clip gain becomes clip gain. Track gain and pan, and keyframed clip gain, become the track's gain, pan and volume/pan lanes (gains multiply, fitted within 0.1 dB) |
+| Without it: AAF-style "Mono Audio Gain" / "Mono Audio Pan" effects on tracks and clips (the AAF adapter's encoding, and our export's) | Constant clip gain becomes clip gain. Track gain and pan, and keyframed clip gain, become the track's gain, pan and volume/pan lanes (gains multiply, fitted within 0.1 dB). "Constant" (or "None") keyframe interpolation holds each value until the next point |
+| Adjacent tracks that are one stereo track split left/right (as the AAF adapter writes stereo tracks): hard-panned L/R or named "… L"/"… R", playing the same stereo clips, without our metadata | One stereo track. The louder side's level is its gain and the other side's ratio its balance, as in the AAF import |
 
 **Media:** `file://` URLs, absolute paths, or paths relative to the `.otio`. WAV/BWF is used
 where it is; moved media is searched for by name next to the file and in the given folders.
@@ -221,6 +222,10 @@ library in an editor's layout (`scripts/otio/make_fixture.py`) and checks the fo
 - a moved AIFF found by name and byte-swapped correctly;
 - a nested stack trimmed to its range;
 - a missing reference reported, and the timeline and clip markers.
+
+A stereo bed with balance automation across the centre and a dip goes our AAF → the AAF adapter →
+OTIO. It comes back as one stereo track, each side within 0.25 dB at 201 points. A stepped pan
+(keyframes switched to "Constant") comes back held.
 
 Levels and pan are checked two ways, each at 201 points of the automated clip (levels within
 0.25 dB, pan within 0.003):
