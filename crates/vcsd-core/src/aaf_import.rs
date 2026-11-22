@@ -1636,6 +1636,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
             frozen_asset_id: None,
             inserts: vec![],
             automation_mode: AutoMode::Read,
+            color: None,
         };
         order += 1;
         // its inserts and their plugin automation (our description; AAF can't hold them).

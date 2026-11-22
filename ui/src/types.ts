@@ -58,6 +58,8 @@ export interface Track {
   channels: number; order: number; folder: string; gain_db: number; pan: number; mute: boolean; solo: boolean; armed: boolean;
   inserts: Insert[];
   automation_mode?: "read" | "touch" | "latch" | "write";
+  /** The track's own color ("#rrggbb"); absent = its category's. */
+  color?: string | null;
 }
 export interface Bus { id: string; name: string; order: number; parent_id: string | null; gain_db: number; mute: boolean; stem: boolean; inserts: Insert[]; automation_mode?: "read" | "touch" | "latch" | "write" }
 export interface HistoryEntry { asset_id: string; origin: string; at: number }

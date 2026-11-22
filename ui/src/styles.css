@@ -365,3 +365,7 @@ body.resizing-h, body.resizing-h * { cursor: row-resize !important; }
 .param-row.writing input[type="range"] { accent-color: #ff5a4f; }
 
 .aaf-opt.sub { padding-left: 18px; }
+
+/* the track's color swatch doubles as its picker */
+.track-color { position: relative; cursor: pointer; overflow: hidden; }
+.track-color input[type="color"] { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; border: 0; padding: 0; }

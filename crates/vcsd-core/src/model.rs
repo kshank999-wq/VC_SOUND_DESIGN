@@ -566,6 +566,20 @@ pub struct Track {
     pub inserts: Vec<Insert>,
     #[serde(default)]
     pub automation_mode: AutoMode,
+    /// The track's own color ("#rrggbb"); `None` = its category's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// A color as "#rrggbb" (lowercase), from "#rgb", "#rrggbb" or "#rrggbbaa".
+pub fn parse_hex_color(s: &str) -> Option<String> {
+    let h = s.trim().strip_prefix('#')?;
+    let full: String = match h.len() {
+        3 => h.chars().flat_map(|c| [c, c]).collect(),
+        6 | 8 => h[..6].to_string(),
+        _ => return None,
+    };
+    full.chars().all(|c| c.is_ascii_hexdigit()).then(|| format!("#{}", full.to_ascii_lowercase()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

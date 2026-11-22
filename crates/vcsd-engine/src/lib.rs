@@ -1056,6 +1056,14 @@ impl Engine {
                     if let Some(x) = os(a, "name") {
                         t.name = x.into();
                     }
+                    // "#rrggbb" sets the track's own color; null goes back to its category's
+                    match a.get("color") {
+                        Some(Value::Null) => t.color = None,
+                        Some(Value::String(c)) => {
+                            t.color = Some(parse_hex_color(c).ok_or_else(|| Error::Invalid(format!("color: '{c}' isn't #rrggbb")))?)
+                        }
+                        _ => {}
+                    }
                     if let Some(b) = bus {
                         t.bus_id = b;
                     }

@@ -1100,7 +1100,20 @@ function TrackHead({ t, depth, eng, selected, onSelect, autoOpen, hasAuto, onTog
       }}
     >
       <div className="th-row">
-        <span className="swatch" style={{ background: catColor(t.category) }} />
+        <label
+          className="swatch track-color"
+          style={{ background: t.color ?? catColor(t.category) }}
+          title={t.color ? `Track color ${t.color} (click to change, Alt-click for the category's)` : "Track color: the category's (click to choose one)"}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            if (e.altKey) {
+              e.preventDefault();
+              if (t.color) upd({ color: null });
+            }
+          }}
+        >
+          <input type="color" value={t.color ?? "#808080"} onChange={(e) => upd({ color: e.target.value })} />
+        </label>
         <span
           className="ellipsis th-name drag-grip"
           title={`${t.name}\n${t.folder || "(top level)"}\nDrag onto a folder or track to move it`}

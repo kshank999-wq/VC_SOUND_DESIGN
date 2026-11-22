@@ -179,6 +179,35 @@ struct OLane {
     len: f64,
     /// The right side of a stereo pair merged into this lane (AAF-style L/R tracks).
     right: Option<Box<OLane>>,
+    /// The track's color ("#rrggbb"), from our metadata or OTIO's own.
+    color: Option<String>,
+}
+
+/// A track color as OTIO tools write it: OTIO 0.18's `Color` (r, g, b in 0–1),
+/// "#rrggbb", or one of OTIO's named colors (as markers use them).
+fn otio_color(v: &Value) -> Option<String> {
+    if schema(v) == "Color" {
+        // truncated, as OpenTimelineIO's own Color.to_hex does
+        let c = |k: &str| (v[k].as_f64().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0) as u8;
+        return Some(format!("#{:02x}{:02x}{:02x}", c("r"), c("g"), c("b")));
+    }
+    let s = v.as_str()?.trim();
+    parse_hex_color(s).or_else(|| {
+        let hex = match s.to_ascii_uppercase().as_str() {
+            "BLACK" => "#000000",
+            "BLUE" => "#0000ff",
+            "CYAN" => "#00ffff",
+            "GREEN" => "#00ff00",
+            "MAGENTA" | "PINK" => "#ff00ff",
+            "ORANGE" => "#ff7f00",
+            "PURPLE" => "#7f007f",
+            "RED" => "#ff0000",
+            "WHITE" => "#ffffff",
+            "YELLOW" => "#ffff00",
+            _ => return None,
+        };
+        Some(hex.to_string())
+    })
 }
 
 /// A level parameter over time (seconds from the timeline start).
@@ -772,6 +801,8 @@ impl Reader<'_> {
                     start: offset,
                     len: pos - offset,
                     right: None,
+                    // ours, else OTIO's own
+                    color: otio_color(&t["metadata"]["vcsd"]["color"]).or_else(|| otio_color(&t["color"])),
                 },
             );
         }
@@ -1120,6 +1151,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 frozen_asset_id: None,
                 inserts,
                 automation_mode: AutoMode::Read,
+                color: lane.color.clone(),
             },
         );
         order += 1;

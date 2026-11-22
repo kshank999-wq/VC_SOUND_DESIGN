@@ -1226,3 +1226,55 @@ fn track_folders_and_order_come_back_from_our_otio() {
     assert_eq!(got.iter().map(|t| t.name.clone()).collect::<Vec<_>>(), want_order);
     assert!(got.iter().all(|t| t.order > before), "after the existing tracks");
 }
+
+#[test]
+fn track_colors_come_back_from_otio() {
+    assert_eq!(parse_hex_color("#FA0"), Some("#ffaa00".into()));
+    assert_eq!(parse_hex_color("#12345678"), Some("#123456".into()), "alpha dropped");
+    assert_eq!(parse_hex_color("red"), None);
+
+    let (mut s, root, t0) = levels_project("otiocolor");
+    let tid = s.state.clips.values().find(|c| c.timeline_start == t0).unwrap().track_id.clone();
+    s.state.tracks.get_mut(&tid).unwrap().color = Some("#3a7bd5".into());
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.otio = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let file = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+    let color_after = |file: &Path, name: &str| {
+        let (mut s2, root2) = session(name, "24", "01:00:00:00");
+        s2.edit("i", |st| import(st, file, &OtioImportOptions::for_project(&root2, file))).unwrap();
+        s2.state.tracks.values().next().unwrap().color.clone()
+    };
+    // our own: round trip
+    assert_eq!(color_after(&file, "otiocolor2"), Some("#3a7bd5".into()));
+
+    // other apps': OTIO 0.18's own Color, or a named color, without our metadata
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    strip_vcsd(&mut v);
+    v["tracks"]["children"][0]["color"] = serde_json::json!({"OTIO_SCHEMA": "Color.1", "r": 1.0, "g": 0.5, "b": 0.0, "a": 1.0, "name": ""});
+    let native = file.with_file_name("native.otio");
+    std::fs::write(&native, serde_json::to_string(&v).unwrap()).unwrap();
+    assert_eq!(color_after(&native, "otiocolor3"), Some("#ff7f00".into()), "as OpenTimelineIO converts it (below)");
+    v["tracks"]["children"][0]["color"] = serde_json::json!("ORANGE");
+    let named = file.with_file_name("named.otio");
+    std::fs::write(&named, serde_json::to_string(&v).unwrap()).unwrap();
+    assert_eq!(color_after(&named, "otiocolor4"), Some("#ff7f00".into()));
+    v["tracks"]["children"][0].as_object_mut().unwrap().remove("color");
+    let none = file.with_file_name("none.otio");
+    std::fs::write(&none, serde_json::to_string(&v).unwrap()).unwrap();
+    assert_eq!(color_after(&none, "otiocolor5"), None, "none: the category's");
+
+    // OpenTimelineIO itself reads a file with a track Color (0.18)
+    if let Some(py) = python() {
+        let out = std::process::Command::new(&py)
+            .args([
+                "-c",
+                "import sys, opentimelineio as o; t = o.adapters.read_from_file(sys.argv[1]); print(t.tracks[0].color.to_hex()[:7])",
+            ])
+            .arg(&native)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "#ff7f00", "{}", String::from_utf8_lossy(&out.stderr));
+    }
+}

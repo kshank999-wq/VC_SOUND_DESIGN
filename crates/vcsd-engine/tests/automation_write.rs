@@ -153,3 +153,18 @@ fn latch_touch_write_and_read() {
     // mode persists in the project
     assert_eq!(st["tracks"][0]["automation_mode"], "write");
 }
+
+#[test]
+fn track_colors_are_set_validated_and_reset() {
+    let (e, t, _) = setup();
+    let color = |e: &Arc<Engine>| call(e, "state.get", json!({}))["tracks"][0]["color"].clone();
+    assert!(color(&e).is_null(), "the category's by default");
+    call(&e, "track.update", json!({"id": t, "color": "#FF8800"}));
+    assert_eq!(color(&e), "#ff8800");
+    call(&e, "track.update", json!({"id": t, "color": "#0af"}));
+    assert_eq!(color(&e), "#00aaff", "short form");
+    assert!(e.call("track.update", json!({"id": t, "color": "orange"})).unwrap_err().contains("#rrggbb"));
+    assert_eq!(color(&e), "#00aaff", "a bad color changes nothing");
+    call(&e, "track.update", json!({"id": t, "color": null}));
+    assert!(color(&e).is_null(), "back to the category's");
+}

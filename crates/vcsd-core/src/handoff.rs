@@ -75,6 +75,7 @@ pub fn reconstruct(pkg: &Path) -> Result<(ProjectState, ReconstructReport)> {
                 frozen_asset_id: None,
                 inserts: vec![],
                 automation_mode: AutoMode::Read,
+                color: None,
             },
         );
         let cid = new_id("clp");
