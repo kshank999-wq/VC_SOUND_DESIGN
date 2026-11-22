@@ -22,6 +22,9 @@ The composition "Reel 1 v3" runs at 25 fps from 10:00:00:00:
   (Mono Audio Gain on the clip, linear 1 → 0.25 → 1);
 - "LEVEL": 50 frames of the music in a Stereo Audio Gain whose Level steps
   (Constant interpolation) from 0.5 to 8 (+18 dB) at frame 25;
+- mutes as other apps carry them (AAF has no mute): "MUTED", a clip with a clip
+  gain of 0.5 inside a zero gain; "SILENT", a whole track inside a zero gain;
+  "INACTIVE", a selector with filler selected and the clip as its alternate;
 - a picture-only track (ignored), a timecode track, and a descriptive
   marker "door knock" at frame 50.
 """
@@ -264,6 +267,45 @@ def build(out):
         sg["InputSegments"].append(seq)
         sg["Parameters"].append(varying(level, "ConstantInterp", ((0, 0.5), (0.5, 8))))
         slot.segment = sg
+
+        def music_clip(frames):
+            c = mmaster.create_source_clip(1, start=0, length=frames * RATE // FPS)
+            c.length = frames
+            return c
+
+        def const_gain(inner, frames, v):
+            g = f.create.OperationGroup(gain, frames, "sound")
+            g["InputSegments"].append(inner)
+            g["Parameters"].append(f.create.ConstantValue(amp, AAFRational(v)))
+            return g
+
+        # MUTED: clip gain 0.5, inside a zero gain
+        slot = comp.create_sound_slot(FPS)
+        slot.name = "MUTED"
+        seq = f.create.Sequence(media_kind="sound")
+        seq.components.append(const_gain(const_gain(music_clip(30), 30, AAFRational(1, 2)), 30, 0))
+        seq.length = 30
+        slot.segment = seq
+
+        # SILENT: the whole track inside a zero gain
+        slot = comp.create_sound_slot(FPS)
+        slot.name = "SILENT"
+        seq = f.create.Sequence(media_kind="sound")
+        seq.components.append(music_clip(30))
+        seq.length = 30
+        slot.segment = const_gain(seq, 30, 0)
+
+        # INACTIVE: a selector with filler selected, the clip an alternate
+        slot = comp.create_sound_slot(FPS)
+        slot.name = "INACTIVE"
+        seq = f.create.Sequence(media_kind="sound")
+        sel = f.create.Selector(media_kind="sound")
+        sel.length = 30
+        sel["Selected"].value = f.create.Filler("sound", 30)
+        sel["Alternates"].append(music_clip(30))
+        seq.components.append(sel)
+        seq.length = 30
+        slot.segment = seq
 
         ev = f.create.EventMobSlot()
         ev["SlotID"].value = 50

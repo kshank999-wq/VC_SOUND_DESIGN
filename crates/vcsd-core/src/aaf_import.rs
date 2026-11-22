@@ -466,6 +466,8 @@ struct Lane {
     pans: Vec<Span>,
     /// Zero gains around the track: our export silencing it, or genuinely silent.
     zero_spans: Vec<Span>,
+    /// Muted (a zero gain around it, in another app's AAF).
+    muted: bool,
 }
 
 impl Lane {
@@ -501,6 +503,8 @@ struct Walk<'a> {
     pending_in: i64,
     /// Walking inside a clip's zero gain.
     zero_clip: bool,
+    /// Walking an inactive alternate of a selector (a switched-off clip).
+    inactive: bool,
     notes: &'a mut Notes,
 }
 
@@ -716,7 +720,7 @@ impl Content {
             let fade_in = w.smp(n.i64(0x1202).unwrap_or(0)).max(std::mem::take(&mut w.pending_in));
             let fade_out = w.smp(n.i64(0x1204).unwrap_or(0));
             if l > 0 {
-                w.lane.clips.push(RawClip { at, len: l, src, fade_in, fade_out, gain, zeroed: w.zero_clip, muted: false });
+                w.lane.clips.push(RawClip { at, len: l, src, fade_in, fade_out, gain, zeroed: w.zero_clip, muted: w.inactive });
             }
         } else if a.is(n, c::OPERATION_GROUP) {
             let op = n.weak(0x0b01).map(hexs).unwrap_or_default();
@@ -768,7 +772,19 @@ impl Content {
             }
             self.walk(input, pos, gain, w, depth + 1);
         } else if a.is(n, c::SELECTOR) {
-            if let Some(sel) = a.child(n, 0x0f01) {
+            let sel = a.child(n, 0x0f01);
+            // nothing selected (filler) but a clip among the alternates: a switched-off clip,
+            // in the timeline but silent — it comes in muted
+            if sel.as_ref().is_none_or(|x| a.is(x, c::FILLER)) {
+                if let Some(alt) = a.children(n, 0x0f02).into_iter().find(|x| self.count_clips(x, 0) > 0) {
+                    w.notes.add("inactive clips (alternates of an empty selector) imported muted", 1);
+                    let was = std::mem::replace(&mut w.inactive, true);
+                    self.walk(&alt, pos, gain, w, depth + 1);
+                    w.inactive = was;
+                    return;
+                }
+            }
+            if let Some(sel) = sel {
                 self.walk(&sel, pos, gain, w, depth + 1);
             }
         } else if a.is(n, c::ESSENCE_GROUP) {
@@ -1390,7 +1406,15 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
         let Some(rate) = Content::slot_rate(sl) else { continue };
         let name = sl.string(0x4802).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("A{}", lanes.len() + 1));
         let slot = sl.u32(0x4801).unwrap_or(0);
-        let mut w = Walk { lane: Lane { name, slot, ..Default::default() }, rate, sr, pending_in: 0, zero_clip: false, notes: &mut notes };
+        let mut w = Walk {
+            lane: Lane { name, slot, ..Default::default() },
+            rate,
+            sr,
+            pending_in: 0,
+            zero_clip: false,
+            inactive: false,
+            notes: &mut notes,
+        };
         let origin = sl.i64(0x4b02).unwrap_or(0);
         content.walk(&seg, -origin, 1.0, &mut w, 0);
         if !w.lane.clips.is_empty() {
@@ -1412,10 +1436,17 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
     let slot_meta = |slot: u32| vcsd["slots"][slot.to_string()].clone();
     // what our export silenced (kept muted on request) comes back muted, its levels intact;
     // other zero gains are silence
+    // In other apps' AAFs (AAF has no mute), a zero gain is how a mute travels: the
+    // clip or track comes in muted, its other gains kept as its levels.
     for lane in &mut lanes {
         let m = slot_meta(lane.slot);
+        let described = m.is_object();
         if m["silenced"].as_bool() == Some(true) {
             lane.zero_spans.clear();
+        } else if !described && !lane.zero_spans.is_empty() {
+            lane.zero_spans.clear();
+            lane.muted = true;
+            notes.add("zero gains read as mutes (other gains kept as the levels)", 1);
         } else {
             let z = std::mem::take(&mut lane.zero_spans);
             lane.gains.extend(z);
@@ -1425,6 +1456,9 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
         for c in lane.clips.iter_mut().filter(|c| c.zeroed) {
             if muted.iter().any(|&(at, l)| (at - c.at).abs() <= 1 && (l - c.len).abs() <= 1) {
                 c.muted = true;
+            } else if !described {
+                c.muted = true;
+                notes.add("zero gains read as mutes (other gains kept as the levels)", 1);
             } else {
                 c.gain = 0.0;
             }
@@ -1589,7 +1623,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
             pan: 0.0,
             // silenced on export: its own mute when its buses come back (a muted bus is
             // restored muted), else muted as it sounded
-            mute: meta["silenced"].as_bool() == Some(true) && (routed.is_none() || meta["muted"].as_bool() == Some(true)),
+            mute: lane.muted || meta["silenced"].as_bool() == Some(true) && (routed.is_none() || meta["muted"].as_bool() == Some(true)),
             solo: false,
             armed: false,
             frozen_asset_id: None,

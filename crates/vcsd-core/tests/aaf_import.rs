@@ -141,8 +141,8 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     assert_eq!(rep.composition, "Reel 1 v3");
     assert_eq!(rep.start_tc, "10:00:00:00");
     assert!(rep.missing_media.is_empty(), "{:?}", rep.missing_media);
-    assert_eq!(rep.tracks.len(), 7, "seven sound tracks (the picture track is ignored): {rep:?}");
-    assert_eq!(rep.clips, 8);
+    assert_eq!(rep.tracks.len(), 10, "ten sound tracks (the picture track is ignored): {rep:?}");
+    assert_eq!(rep.clips, 11);
     assert_eq!(rep.markers, 1);
     let st = &s.state;
     let f = 1920; // samples per frame at 25 fps
@@ -274,6 +274,19 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     assert!(
         !rep.notes.iter().any(|n| n.starts_with("audio effects other than gain and pan")),
         "Stereo Audio Gain is read: {:?}",
+        rep.notes
+    );
+
+    // mutes as other apps carry them: muted, their other gains kept
+    let muted_clip = &clips(&track("MUTED").id)[0];
+    assert!(muted_clip.muted && (muted_clip.gain_db + 6.0206).abs() < 0.01, "zero gain → muted, clip gain kept: {:?}", muted_clip);
+    assert!(!track("MUTED").mute);
+    let silent = track("SILENT");
+    assert!(silent.mute && silent.gain_db > -90.0, "zero gain around the track → muted track: {} dB", silent.gain_db);
+    assert!(clips(&track("INACTIVE").id)[0].muted, "the selector's inactive clip, muted");
+    assert!(
+        rep.notes.iter().any(|n| n.starts_with("zero gains read as mutes")) && rep.notes.iter().any(|n| n.starts_with("inactive clips")),
+        "{:?}",
         rep.notes
     );
 

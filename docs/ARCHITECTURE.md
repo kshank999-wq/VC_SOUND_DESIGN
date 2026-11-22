@@ -315,6 +315,7 @@ top-level composition (by name, or the one with the most sound clips) is placed 
 | Interpolation of varying gain and pan | Linear as is. Constant (and None) holds each value until the next point. B-spline, log and power are read as linear (noted) |
 | Parameter values | Rational, or any of AAF's integer types |
 | Comment and descriptive markers | Spotting markers in an "AAF markers" lane, for those inside a scene |
+| Mutes as other apps carry them (AAF has no mute): a constant zero gain around a clip or track; a selector with filler selected and a clip among its alternates (a switched-off clip) | A muted clip or track, its other gains kept as its levels, so unmuting brings the sound back (noted). In our own AAFs the "VCSD" comment says which zero gains are mutes; any others there are genuine silence |
 | The "VCSD" comment (our own export) | The buses restored, as in the OTIO import, and the same `buses` option (auto / buses / fold, default auto): matched by name under the same parent or created, with their level, mute, inserts and automation. Each track is routed to its bus with its own fader, pan and lanes, and the fader that was folded into clip gain is taken back out |
 | Track inserts in the "VCSD" comment | Rebuilt in order on unprinted tracks, in either bus mode: built-in effects with their settings, plugins with their id, format, saved state and values under new slot ids, with their parameter automation. A printed track comes in as its render, so its inserts stay off (noted) |
 
@@ -364,7 +365,10 @@ following:
 - a clip gain envelope (1 → 0.25 → 1 on a clip 10 frames in) as the track's volume lane within
   0.11 dB;
 - a Stereo Audio Gain with its level in `Level`, stepping from −6 dB to +18 dB: held, then clamped
-  to +12 dB, with a note.
+  to +12 dB, with a note;
+- mutes as other apps carry them: a clip in a zero gain comes in muted with its −6 dB clip gain;
+  a track in a zero gain comes in muted, not at −∞; a selector's inactive alternate comes in as a
+  muted clip.
 
 Our own AAF's mono pan automation comes back within 0.003 from its Mono Audio Pan with `fold`, and
 as the lane itself when the buses are restored.
