@@ -337,7 +337,17 @@ fn otio_folds_bus_levels_and_balance_into_each_tracks_gain_and_pan() {
     let rel = r.files.iter().find(|f| f.ends_with(".otio")).unwrap();
     let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(r.dir.join(rel)).unwrap()).unwrap();
     let rep: serde_json::Value = serde_json::from_slice(&std::fs::read(r.dir.join("OTIO/otio_report.json")).unwrap()).unwrap();
-    assert!(rep["losses"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().starts_with("bus routing not carried: tracks are flat")));
+    assert!(rep["losses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|l| l.as_str().unwrap().starts_with("bus routing and bus automation in VC Sound Design metadata only")));
+    // the bus tree for VC Sound Design: the glass's bus with its level and lane, the track naming it
+    let tree = raw["metadata"]["vcsd"]["buses"].as_array().unwrap();
+    let gb = tree.iter().find(|b| b["id"] == gbus.as_str()).unwrap();
+    assert_eq!((gb["gain_db"].as_f64(), gb["parent"].as_str()), (Some(-2.0), Some(master.as_str())));
+    let (s0, _) = export::resolve_range(st, &export::ExportRange::All).unwrap();
+    assert_eq!(gb["volume_db"], serde_json::json!([[2 * sr - s0, 0.0], [4 * sr - s0, -10.0]]));
     let (start, end) = export::resolve_range(st, &export::ExportRange::All).unwrap();
     let len = (end - start) as f64;
     let track = |name: &str| {
@@ -435,7 +445,10 @@ fn otio_describes_plugins_and_their_automation_as_effects() {
         losses.iter().any(|l| l.starts_with("track plugins and insert effects described as OTIO effects") && l.ends_with("(2)")),
         "{losses:?}"
     );
-    assert!(losses.iter().any(|l| l.starts_with("insert effects and plugins on buses not carried") && l.ends_with("(1)")), "{losses:?}");
+    assert!(
+        losses.iter().any(|l| l.starts_with("insert effects and plugins on buses in VC Sound Design metadata only") && l.ends_with("(1)")),
+        "{losses:?}"
+    );
     let (start, end) = export::resolve_range(st, &export::ExportRange::All).unwrap();
     let gname = st.tracks[&gt].name.clone();
     let layer = raw["tracks"]["children"].as_array().unwrap().iter().find(|t| t["name"] == gname.as_str()).unwrap();

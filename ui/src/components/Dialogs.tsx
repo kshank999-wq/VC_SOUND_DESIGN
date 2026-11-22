@@ -144,6 +144,7 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
   const [label, setLabel] = useState("v" + ((eng.view?.pictures.length ?? 0) + 1));
   const [tc, setTc] = useState("");
   const [log, setLog] = useState<string[]>([]);
+  const [buses, setBuses] = useState("auto");
   if (!kind) return null;
   const titles = { picture: "Import picture reference", aaf: "Import AAF (editor's timeline)", otio: "Import OpenTimelineIO (.otio)", score: "Import VC Composer score (.json)", script: "Import VC Film Studio breakdown (.json)", relink: "Relink missing media (search folder)", take: "Add a recorded take (.wav)" };
   const go = async () => {
@@ -159,7 +160,7 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
       ok = r;
     }
     if (kind === "otio") {
-      const r = await eng.run<OtioReport>("otio.import", { path, at_tc: tc || undefined });
+      const r = await eng.run<OtioReport>("otio.import", { path, at_tc: tc || undefined, buses });
       if (r) {
         eng.toast(`OTIO imported: ${r.tracks.length} tracks, ${r.clips} clips`);
         if (r.missing_media.length || r.notes.length) return setLog(otioSummary(r));
@@ -189,6 +190,26 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
         )}
         {(kind === "aaf" || kind === "otio") && (
           <label className="field"><span>Start TC (blank = the file's own start)</span><input className="mono" value={tc} placeholder="01:00:00:00" onChange={(e) => setTc(e.target.value)} /></label>
+        )}
+        {kind === "otio" && (
+          <label className="field" title="For OTIO files from VC Sound Design, which describe their buses. Auto restores them when this project's matching buses are untouched.">
+            <span>Bus levels</span>
+            <select value={buses} onChange={(e) => setBuses(e.target.value)}>
+              <option value="auto">Auto</option>
+              <option value="buses">Restore buses and their automation</option>
+              <option value="fold">Fold into the tracks</option>
+            </select>
+          </label>
+        )}
+        {kind === "otio" && (
+          <label className="field" title="For OTIO files from VC Sound Design, which describe their buses. Auto restores them when this project's matching buses are untouched.">
+            <span>Bus levels</span>
+            <select value={buses} onChange={(e) => setBuses(e.target.value)}>
+              <option value="auto">Auto</option>
+              <option value="buses">Restore buses and their automation</option>
+              <option value="fold">Fold into the tracks</option>
+            </select>
+          </label>
         )}
         {log.length > 0 && <pre className="log">{log.join("\n")}</pre>}
         <div className="btns">

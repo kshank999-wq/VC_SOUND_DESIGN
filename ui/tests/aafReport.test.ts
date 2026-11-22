@@ -30,3 +30,10 @@ test("OTIO summaries count rebuilt inserts and plugin automation", () => {
   assert.equal(l[2], "Inserts: 2 (1 plugin, 3 automated parameters)");
   assert.equal(otioSummary({ ...rest, timeline: "R", inserts: 0 }).length, 2);
 });
+
+test("OTIO summaries report restored buses", () => {
+  const { composition: _, ...rest } = base;
+  const l = otioSummary({ ...rest, timeline: "R", bus_levels: "buses", buses_restored: 3, buses_created: 1 });
+  assert.equal(l[2], "Buses: 3 restored with their automation, 1 created");
+  assert.equal(otioSummary({ ...rest, timeline: "R", bus_levels: "fold", buses_restored: 0 }).length, 2);
+});

@@ -8,7 +8,7 @@ mod common;
 use common::*;
 use std::path::Path;
 use vcsd_core::builder::{populate, PopulateOptions};
-use vcsd_core::otio_import::{import, OtioImportOptions};
+use vcsd_core::otio_import::{import, BusLevels, OtioImportOptions};
 use vcsd_core::spotting::*;
 use vcsd_core::*;
 
@@ -341,7 +341,9 @@ fn bus_levels_folded_into_an_otio_come_back_as_the_tracks_levels() {
 
     // a fresh project: its buses are flat, so the track carries what the buses did
     let (mut s2, root2) = session("otiobusrt2", "24", "01:00:00:00");
-    s2.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root2, &file))).unwrap();
+    let fold = OtioImportOptions { buses: BusLevels::Fold, ..OtioImportOptions::for_project(&root2, &file) };
+    let rep = s2.edit("i", |st| import(st, &file, &fold)).unwrap();
+    assert_eq!(rep.bus_levels, "fold");
     let st2 = &s2.state;
     let c2 = st2.clips.values().find(|c| c.timeline_start == t0).unwrap();
     assert!((c2.gain_db + 6.0).abs() < 1e-3, "clip gain as it was");
@@ -570,4 +572,134 @@ fn plugin_automation_keeps_its_timing_at_another_sample_rate() {
     let at = |x: i64| (x as f64 * 44_100.0 / 48_000.0).round() as i64;
     let want: Vec<(i64, f32)> = vec![(at(t0), 0.1), (at(t0 + 12_000), 0.9), (at(t0 + 24_000), 0.4)];
     assert_eq!(got, want, "the same moments at 44.1 kHz");
+}
+
+/// The levels project with bus automation: its track on a new sub-bus "FX Sub"
+/// (with an automated plugin) under the track's bus (−2 dB, a fade), and the
+/// master's balance moving. Exported as OTIO.
+fn bus_otio(name: &str) -> (state::Session, i64, std::path::PathBuf, String) {
+    let (mut s, root, t0) = levels_project(name);
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let tid = st.clips.values().find(|c| c.timeline_start == t0).unwrap().track_id.clone();
+    let parent = st.tracks[&tid].bus_id.clone();
+    let parent_name = st.buses[&parent].name.clone();
+    let sub = mixer::add_bus(st, "FX Sub", Some(&parent)).unwrap();
+    st.tracks.get_mut(&tid).unwrap().bus_id = sub.clone();
+    let b = st.buses.get_mut(&sub).unwrap();
+    b.gain_db = 1.5;
+    b.inserts = vec![Insert::Plugin(PluginInsert {
+        id: "ins_bus".into(),
+        plugin_id: "vst3:test".into(),
+        format: "vst3".into(),
+        name: "Gain".into(),
+        vendor: "Test".into(),
+        path: String::new(),
+        bypass: false,
+        state: None,
+        params: Default::default(),
+    })];
+    editing::set_automation(st, "ins_bus", AutomationParam::Plugin(0), t0, 0.2).unwrap();
+    editing::set_automation(st, "ins_bus", AutomationParam::Plugin(0), t0 + sr / 3, 0.8).unwrap();
+    st.buses.get_mut(&parent).unwrap().gain_db = -2.0;
+    editing::set_automation(st, &parent, AutomationParam::VolumeDb, t0, 0.0).unwrap();
+    editing::set_automation(st, &parent, AutomationParam::VolumeDb, t0 + sr / 2, -8.0).unwrap();
+    let master = st.buses.values().find(|b| b.parent_id.is_none()).unwrap().id.clone();
+    editing::set_automation(st, &master, AutomationParam::Pan, t0, 0.3).unwrap();
+    editing::set_automation(st, &master, AutomationParam::Pan, t0 + sr, -0.3).unwrap();
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.otio = true;
+    o.force = true;
+    o.plugins = Some(mixer::PluginHostRef(std::sync::Arc::new(GainPlugin)));
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let file = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+    (s, t0, file, parent_name)
+}
+
+/// A bus's lane as (sample, value), sorted.
+fn bus_lane(st: &ProjectState, bus: &str, p: AutomationParam) -> Vec<(i64, f32)> {
+    let mut v: Vec<(i64, f32)> =
+        st.automation.values().filter(|a| a.owner_id == bus && a.param == p).map(|a| (a.sample, a.value)).collect();
+    v.sort_by_key(|x| x.0);
+    v
+}
+
+fn bus_named<'a>(st: &'a ProjectState, name: &str) -> &'a Bus {
+    st.buses.values().find(|b| b.name == name).unwrap_or_else(|| panic!("bus {name}"))
+}
+
+#[test]
+fn buses_and_their_automation_come_back_from_our_otio() {
+    let (s, t0, file, parent_name) = bus_otio("otiobuses");
+    let (mut s2, root2) = session("otiobuses2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root2, &file))).unwrap();
+    assert_eq!((rep.bus_levels.as_str(), rep.buses_restored, rep.buses_created), ("buses", 3, 1), "{rep:?}");
+    let (a, b) = (&s.state, &s2.state);
+    // the tree: FX Sub created under the project's own bus of the same name
+    let sub = bus_named(b, "FX Sub");
+    let parent = bus_named(b, &parent_name);
+    assert_eq!(sub.parent_id.as_deref(), Some(parent.id.as_str()));
+    let c2 = b.clips.values().find(|c| c.timeline_start == t0).unwrap();
+    assert_eq!(b.tracks[&c2.track_id].bus_id, sub.id, "the track routed to it");
+    assert_eq!(b.tracks[&c2.track_id].gain_db, -3.0, "the track's own fader, not the folded level");
+    // levels, inserts and automation as they were
+    assert_eq!((sub.gain_db, parent.gain_db), (1.5, -2.0));
+    for (x, y) in [(bus_named(a, &parent_name), parent), (bus_named(a, "Review Mix"), bus_named(b, "Review Mix"))] {
+        for p in [AutomationParam::VolumeDb, AutomationParam::Pan] {
+            assert_eq!(bus_lane(a, &x.id, p), bus_lane(b, &y.id, p), "{} {p:?}", x.name);
+        }
+    }
+    let slot = sub.inserts[0].as_plugin().unwrap();
+    assert_ne!(slot.id, "ins_bus");
+    assert_eq!(bus_lane(b, &slot.id, AutomationParam::Plugin(0)), bus_lane(a, "ins_bus", AutomationParam::Plugin(0)));
+    // the same mix, through the bus plugin
+    let n = a.clips.values().find(|c| c.timeline_start == t0).unwrap().length as usize;
+    let host: std::sync::Arc<dyn mixer::PluginHost> = std::sync::Arc::new(GainPlugin);
+    let ma = mixer::Mixer::new(a, mixer::RenderOptions::default()).with_plugins(Some(host.clone())).render_master(t0, n).unwrap();
+    let mb = mixer::Mixer::new(b, mixer::RenderOptions::default()).with_plugins(Some(host)).render_master(t0, n).unwrap();
+    assert!(ma.peak() > 0.01);
+    let max = ma.data.iter().zip(&mb.data).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    assert!(max < 1e-5, "mix differs by {max}");
+}
+
+#[test]
+fn a_project_whose_buses_have_their_own_levels_keeps_them_unless_asked() {
+    let (_, t0, file, parent_name) = bus_otio("otiobusy");
+    let sr = 48_000i64;
+    // the receiving project already mixed its bus: auto folds instead
+    let (mut s2, root2) = session("otiobusy2", "24", "01:00:00:00");
+    let pid = bus_named(&s2.state, &parent_name).id.clone();
+    s2.edit("g", |st| {
+        st.buses.get_mut(&pid).unwrap().gain_db = -4.0;
+        editing::set_automation(st, &pid, AutomationParam::VolumeDb, 100 * sr, -1.0).map(|_| ())
+    })
+    .unwrap();
+    let rep = s2.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root2, &file))).unwrap();
+    assert_eq!(rep.bus_levels, "fold");
+    assert!(rep.notes.iter().any(|n| n.starts_with("bus levels folded into the tracks") && n.contains(&parent_name)), "{:?}", rep.notes);
+    let st2 = &s2.state;
+    assert_eq!(st2.buses[&pid].gain_db, -4.0, "its level kept");
+    assert_eq!(bus_lane(st2, &pid, AutomationParam::VolumeDb), vec![(100 * sr, -1.0)], "its automation kept");
+    assert!(!st2.buses.values().any(|b| b.name == "FX Sub"), "no buses made");
+    let c2 = st2.clips.values().find(|c| c.timeline_start == t0).unwrap();
+    assert!(
+        st2.automation.values().any(|a| a.owner_id == c2.track_id && a.param == AutomationParam::VolumeDb),
+        "the track carries the bus fade"
+    );
+
+    // asked to restore: the file's level and lanes within its range, the project's beyond it
+    let (mut s3, root3) = session("otiobusy3", "24", "01:00:00:00");
+    let pid3 = bus_named(&s3.state, &parent_name).id.clone();
+    s3.edit("g", |st| {
+        st.buses.get_mut(&pid3).unwrap().gain_db = -4.0;
+        editing::set_automation(st, &pid3, AutomationParam::VolumeDb, t0 + sr / 4, -30.0)?;
+        editing::set_automation(st, &pid3, AutomationParam::VolumeDb, 100 * sr, -1.0).map(|_| ())
+    })
+    .unwrap();
+    let o = OtioImportOptions { buses: BusLevels::Buses, ..OtioImportOptions::for_project(&root3, &file) };
+    let rep = s3.edit("i", |st| import(st, &file, &o)).unwrap();
+    assert_eq!(rep.bus_levels, "buses");
+    let st3 = &s3.state;
+    assert_eq!(st3.buses[&pid3].gain_db, -2.0);
+    assert_eq!(bus_lane(st3, &pid3, AutomationParam::VolumeDb), vec![(t0, 0.0), (t0 + sr / 2, -8.0), (100 * sr, -1.0)]);
 }

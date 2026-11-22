@@ -49,6 +49,36 @@ pub struct OtioImportOptions {
     pub at: Option<i64>,
     /// Track folder for the new tracks; `None` = "OTIO/<timeline>".
     pub folder: Option<String>,
+    /// What to do with the buses our own export describes.
+    pub buses: BusLevels,
+}
+
+/// Bus levels in an OTIO from VC Sound Design (`metadata.vcsd.buses`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BusLevels {
+    /// Restore the buses when the project's matching buses are untouched (unity,
+    /// unmuted, no automation or inserts) or missing; otherwise fold.
+    #[default]
+    Auto,
+    /// Restore the buses: match by name under the same parent (or create them),
+    /// set their level, mute and inserts, and replace their automation within
+    /// the imported range; tracks keep their own levels and are routed to them.
+    Buses,
+    /// Keep the project's buses as they are; each track carries what its buses
+    /// did (the folded gain and pan effects).
+    Fold,
+}
+
+impl BusLevels {
+    pub fn parse(s: &str) -> Option<BusLevels> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" | "" => Some(BusLevels::Auto),
+            "buses" | "restore" => Some(BusLevels::Buses),
+            "fold" => Some(BusLevels::Fold),
+            _ => None,
+        }
+    }
 }
 
 impl OtioImportOptions {
@@ -74,6 +104,11 @@ pub struct OtioImportReport {
     pub inserts: usize,
     pub plugins: usize,
     pub automated_parameters: usize,
+    /// How bus levels came in: "buses" (restored) or "fold" (in the tracks).
+    pub bus_levels: String,
+    /// Buses whose levels and automation were restored, and how many were created.
+    pub buses_restored: usize,
+    pub buses_created: usize,
     pub media_linked: usize,
     pub media_written: usize,
     /// Clips left out because their media couldn't be found or read: why, per file.
@@ -172,6 +207,152 @@ fn number(v: &Value) -> Option<f64> {
         Some((n, d)) => Some(n.trim().parse::<f64>().ok()? / d.trim().parse::<f64>().ok().filter(|d| *d != 0.0)?),
         None => s.parse().ok(),
     }
+}
+
+/// The buses the imported tracks feed (and their parents), restored from our
+/// export's `metadata.vcsd.buses` per `mode`. Returns exported bus id → project
+/// bus id when restored, `None` when the tracks carry the levels instead.
+#[allow(clippy::too_many_arguments)]
+fn restore_buses(
+    s: &mut ProjectState,
+    exported: &[Value],
+    lanes: &[OLane],
+    mode: BusLevels,
+    base: i64,
+    len: i64,
+    from_meta: &dyn Fn(&Value) -> Option<i64>,
+    notes: &mut Notes,
+    report: &mut OtioImportReport,
+) -> Option<HashMap<String, String>> {
+    if mode == BusLevels::Fold || exported.is_empty() {
+        return None;
+    }
+    let by_id: HashMap<&str, &Value> = exported.iter().filter_map(|b| Some((b["id"].as_str()?, b))).collect();
+    // the buses the tracks use, with every bus above them, parents first
+    let mut used: Vec<&str> = vec![];
+    for l in lanes {
+        let mut chain = vec![];
+        let mut cur = l.vcsd["bus_id"].as_str();
+        while let Some(id) = cur.filter(|id| by_id.contains_key(id) && !chain.contains(id)) {
+            chain.push(id);
+            cur = by_id[id]["parent"].as_str();
+        }
+        for id in chain.into_iter().rev() {
+            if !used.contains(&id) {
+                used.push(id);
+            }
+        }
+    }
+    if used.is_empty() {
+        return None;
+    }
+    // match by name under the same (matched) parent; the root is the project's master
+    let master = crate::mixer::master_bus(s).ok()?.id.clone();
+    let mut plan: Vec<(&str, Option<String>)> = vec![];
+    let mut matched: HashMap<&str, Option<String>> = HashMap::new();
+    for &id in &used {
+        let b = by_id[id];
+        let target = match b["parent"].as_str() {
+            None => Some(master.clone()),
+            Some(parent) => matched.get(parent).cloned().flatten().and_then(|p| {
+                s.buses
+                    .values()
+                    .find(|x| x.parent_id.as_deref() == Some(p.as_str()) && Some(x.name.as_str()) == b["name"].as_str())
+                    .map(|x| x.id.clone())
+            }),
+        };
+        matched.insert(id, target.clone());
+        plan.push((id, target));
+    }
+    let touched = |bid: &str| {
+        let bus = &s.buses[bid];
+        let slots: Vec<&str> = bus.inserts.iter().filter_map(Insert::as_plugin).map(|p| p.id.as_str()).collect();
+        bus.gain_db.abs() > 1e-6
+            || bus.mute
+            || !bus.inserts.is_empty()
+            || s.automation.values().any(|a| a.owner_id == bid || slots.contains(&a.owner_id.as_str()))
+    };
+    if mode == BusLevels::Auto {
+        let busy: Vec<String> =
+            plan.iter().filter_map(|(_, t)| t.as_deref()).filter(|t| touched(t)).map(|t| s.buses[t].name.clone()).collect();
+        if !busy.is_empty() {
+            notes.add(
+                format!(
+                    "bus levels folded into the tracks: the project's buses have their own levels ({}); import with buses to restore them",
+                    busy.join(", ")
+                ),
+                1,
+            );
+            return None;
+        }
+    }
+    let mut map: HashMap<String, String> = HashMap::new();
+    for (id, target) in plan {
+        let b = by_id[id];
+        let bid = match target {
+            Some(t) => t,
+            None => {
+                let parent = b["parent"].as_str().and_then(|p| map.get(p)).cloned();
+                let name = b["name"].as_str().unwrap_or("Bus");
+                let Ok(new) = crate::mixer::add_bus(s, name, parent.as_deref()) else { continue };
+                if let Some(bus) = s.buses.get_mut(&new) {
+                    bus.stem = b["stem"].as_bool().unwrap_or(true);
+                }
+                report.buses_created += 1;
+                new
+            }
+        };
+        // level, mute, inserts (plugins under new slot ids, with their automation)
+        let mut slot_map: HashMap<String, String> = HashMap::new();
+        let inserts: Vec<Insert> = b["inserts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|i| serde_json::from_value::<Insert>(i.clone()).ok())
+            .map(|i| match i {
+                Insert::Plugin(mut p) => {
+                    let new = new_id("ins");
+                    slot_map.insert(std::mem::replace(&mut p.id, new), p.id.clone());
+                    Insert::Plugin(p)
+                }
+                other => other,
+            })
+            .collect();
+        let old_slots: Vec<String> = s.buses[&bid].inserts.iter().filter_map(Insert::as_plugin).map(|p| p.id.clone()).collect();
+        {
+            let bus = s.buses.get_mut(&bid).unwrap();
+            bus.gain_db = b["gain_db"].as_f64().unwrap_or(0.0) as f32;
+            bus.mute = b["mute"].as_bool().unwrap_or(false);
+            bus.inserts = inserts;
+        }
+        s.automation.retain(|_, a| !old_slots.contains(&a.owner_id));
+        // the bus's lanes within the imported range are the file's
+        let (lo, hi) = (base, base + len);
+        s.automation.retain(|_, a| {
+            !(a.owner_id == bid && matches!(a.param, AutomationParam::VolumeDb | AutomationParam::Pan) && a.sample >= lo && a.sample <= hi)
+        });
+        for (key, param) in [("volume_db", AutomationParam::VolumeDb), ("pan_automation", AutomationParam::Pan)] {
+            for p in b[key].as_array().into_iter().flatten() {
+                if let (Some(t), Some(v)) = (from_meta(&p[0]), number(&p[1])) {
+                    add_point(s, &bid, param, base + t, crate::editing::clamp_automation(param, v as f32));
+                }
+            }
+        }
+        for (old, lanes) in b["plugin_automation"].as_object().into_iter().flatten() {
+            let Some(slot) = slot_map.get(old) else { continue };
+            for (pid, pts) in lanes.as_object().into_iter().flatten() {
+                let Ok(pid) = pid.parse::<u32>() else { continue };
+                for p in pts.as_array().into_iter().flatten() {
+                    if let (Some(t), Some(v)) = (from_meta(&p[0]), number(&p[1])) {
+                        add_point(s, slot, AutomationParam::Plugin(pid), base + t, (v as f32).clamp(0.0, 1.0));
+                    }
+                }
+            }
+        }
+        report.buses_restored += 1;
+        map.insert(id.to_string(), bid);
+    }
+    Some(map)
 }
 
 /// One plugin parameter's automation from our OTIO description: its raw
@@ -546,6 +727,11 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
     let license =
         License { name: "Editorial media (OTIO)".into(), redistributable: true, source: "editorial".into(), ..Default::default() };
+    // ---- buses (our own export): restore them, or let the tracks carry them
+    let exported: Vec<Value> = tl["metadata"]["vcsd"]["buses"].as_array().cloned().unwrap_or_default();
+    let end_t = lanes.iter().map(|l| l.start + l.len).fold(0.0f64, f64::max);
+    let bus_map = restore_buses(s, &exported, &lanes, o.buses, base, smp(end_t), &from_meta, &mut notes, &mut report);
+    report.bus_levels = if bus_map.is_some() { "buses".into() } else { "fold".into() };
     let mut levels_found = false;
     for lane in lanes {
         let tid = new_id("trk");
@@ -624,7 +810,9 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
         let tv = &lane.vcsd;
         // our raw track values, unless the buses were folded into the effects (then
         // the effects are what the track sounded like; this project's buses are its own)
-        let raw = tv.is_object() && tv["bus_folded"].as_bool() != Some(true);
+        // restored buses: the track's own values, routed to its bus
+        let routed = bus_map.as_ref().and_then(|m| tv["bus_id"].as_str().and_then(|b| m.get(b))).cloned();
+        let raw = tv.is_object() && (routed.is_some() || tv["bus_folded"].as_bool() != Some(true));
         // inserts described by our own export: rebuilt in order, plugins with new slot ids
         let mut inserts = vec![];
         let mut plugin_points: Vec<(String, u32, i64, f32)> = vec![];
@@ -671,9 +859,12 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
         levels_found |= tv.is_object() || !levels.is_empty();
         let channels = tv["channels"].as_u64().map(|c| c.clamp(1, 2) as u16).unwrap_or(chans);
         let category = guess_category(&lane.name);
-        let bus_id = match &category {
-            Category::Custom(_) => s.buses.values().find(|b| b.name == crate::mixer::MASTER_BUS).map(|b| b.id.clone()).unwrap_or_default(),
-            cat => crate::builder::bus_for_category(s, cat),
+        let bus_id = match (&routed, &category) {
+            (Some(b), _) => b.clone(),
+            (None, Category::Custom(_)) => {
+                s.buses.values().find(|b| b.name == crate::mixer::MASTER_BUS).map(|b| b.id.clone()).unwrap_or_default()
+            }
+            (None, cat) => crate::builder::bus_for_category(s, cat),
         };
         s.tracks.insert(
             tid.clone(),

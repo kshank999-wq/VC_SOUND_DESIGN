@@ -137,6 +137,7 @@ butt-spliced repeats, muted tracks and clips left out). It also shares its media
 | Track inserts: plugins and built-in effects, with plugin parameter automation | `Effect`s on the track before the level and pan (inserts are pre-fader), named after the plugin (`effect_name` "VST3 plugin", "Audio Unit", or the built-in's). Each carries the insert in full in `metadata.vcsd.insert`: built-in settings, or the plugin's id, format, vendor, saved state and parameter values. A plugin's automation goes in `metadata.vcsd.automation`: per parameter id, keyframes `[fraction of the range, normalised value]` (exact, since plugin lanes ramp linearly between points) and the raw points. Other apps see the effects but won't run them. To hear them there, print the track (the shared "Print tracks with plugins" option), which then carries its render instead. Bus inserts have nowhere to go and are listed |
 | Clip fades, bus, and the raw fader, pan and lanes (offsets from the range start) | `metadata.vcsd` on the clip or track |
 | Cues | Timeline markers, coloured by category, with the description as comment |
+| Buses | `metadata.vcsd.buses` on the timeline: each bus's parent, level, mute, inserts, volume and balance automation, and its plugins' automation (sample offsets from the range start). Each track's `metadata.vcsd.bus_id` names its bus. Other apps get the bus levels folded into the tracks' effects (above) |
 
 OTIO has no audio mix model, so levels follow the one convention OTIO tools share. The
 OpenTimelineIO AAF adapter carries AAF's Mono Audio Gain as an `Effect` whose
@@ -187,6 +188,7 @@ tracks as new tracks in a folder `OTIO/<timeline>`, placed at `global_start_time
 | Markers on the timeline, tracks and clips | Spotting markers in an "OTIO markers" lane (name — comment), for those inside a scene |
 | `metadata.vcsd` (our own export) | Clip gain and fades, track fader, pan, channels, volume and pan automation |
 | Effects with `metadata.vcsd.insert` (our own export) | The track's inserts, in order: built-in effects with their settings, plugins with their id, format, saved state and values under new slot ids. A disabled effect (`enabled: false`) comes in bypassed |
+| `metadata.vcsd.buses` (our own export) | The buses the imported tracks feed, with every bus above them. They are matched by name under the same parent (the root is the project's master) or created. Their level, mute, inserts (plugins under new slot ids) and plugin automation are set, and their volume and balance lanes are replaced within the imported range. The tracks then keep their own levels and are routed to them. See below for when |
 | A plugin effect's `metadata.vcsd.automation` | Its parameter lanes. These come from the raw `points` (sample offsets, rescaled from the exporting project's rate), or, when a tool kept only the `keyframe_values`, from those (fractions of the track's range). "Constant" interpolation becomes holds; curved interpolation is read as linear |
 | Insert effects from our own export (`metadata.vcsd.insert`) | The track's inserts, in order: built-ins as they were, plugins with their id, format, state and values under a new slot id, and their parameter automation |
 | Without it: AAF-style "Mono Audio Gain" / "Mono Audio Pan" effects on tracks and clips (the AAF adapter's encoding, and our export's) | Constant clip gain becomes clip gain. Track gain and pan, and keyframed clip gain, become the track's gain, pan and volume/pan lanes (gains multiply, fitted within 0.1 dB) |
@@ -199,6 +201,14 @@ per file.
 
 Files with neither our metadata nor gain effects come in at unity gain, centred, and the report says
 so.
+
+**Bus levels** (`buses` option, the import dialog, `--buses`). Restoring buses changes everything on
+them, so there are three modes:
+- `auto` (the default) restores them when the project's matching buses are untouched (unity,
+  unmuted, no automation or inserts) or missing. Otherwise it folds, and the report names the buses.
+- `buses` always restores them.
+- `fold` keeps the project's buses as they are; each track then carries what its buses did (the
+  folded gain and pan effects).
 
 **Verification:** `crates/vcsd-core/tests/otio_import.rs` round-trips an OTIO export, with no
 library needed. The imported mix matches the original to within 1e-5 per sample, and the
@@ -225,7 +235,15 @@ Plugin automation comes back in these cases:
 - as holds from "Constant" keyframes;
 - at the same moments in a 44.1 kHz project.
 
-A disabled effect comes in bypassed. A track with a built-in effect and an automated plugin comes
+A disabled effect comes in bypassed.
+
+Buses come back three ways:
+- **Restored into a fresh project:** a created sub-bus with an automated plugin under the project's
+  same-named bus, bus level and fade, and master balance, with lanes identical. The mix through the
+  plugin matches within 1e-5.
+- **`auto` into a project whose bus has its own level:** it folds, keeping that level and automation
+  and creating no buses.
+- **`buses` forced:** the file's lanes within its range, the project's beyond it. A track with a built-in effect and an automated plugin comes
 back with both: the plugin's state, values and automation are exact, and the mix through a test
 plugin matches to within 1e-5.
 

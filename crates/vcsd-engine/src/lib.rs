@@ -1708,6 +1708,9 @@ impl Engine {
                     .collect();
                 let tb = Self::st(g)?.tb();
                 o.at = os(a, "at_tc").filter(|t| !t.trim().is_empty()).map(|t| tb.sample_at_tc(t)).transpose().map_err(e)?;
+                if let Some(b) = os(a, "buses") {
+                    o.buses = vcsd_core::otio_import::BusLevels::parse(b).ok_or("buses: auto, buses or fold")?;
+                }
                 let rep = self.edit(g, "import OTIO", |st| vcsd_core::otio_import::import(st, &path, &o))?;
                 Ok(serde_json::to_value(rep).map_err(e)?)
             }

@@ -244,6 +244,44 @@ fn track_effects(s: &ProjectState, t: &Track, start: i64, end: i64) -> (Vec<Valu
     (out, folded)
 }
 
+/// The bus tree, for VC Sound Design to rebuild (OTIO has no buses): each bus
+/// with its parent, level, mute, inserts (as in the project), volume and balance
+/// automation, and its plugins' parameter automation — points as
+/// `[offset in samples from the range start, value]`.
+fn bus_tree(s: &ProjectState, start: i64) -> Value {
+    let points = |owner: &str, param: AutomationParam| -> Vec<Value> {
+        lane(s, owner, param, start).into_iter().map(|(x, v)| json!([x, v])).collect()
+    };
+    let mut buses: Vec<&Bus> = s.buses.values().collect();
+    buses.sort_by(|a, b| (a.order, &a.name).cmp(&(b.order, &b.name)));
+    let v: Vec<Value> = buses
+        .into_iter()
+        .map(|b| {
+            let mut plugins = serde_json::Map::new();
+            for p in b.inserts.iter().filter_map(Insert::as_plugin) {
+                let mut lanes: BTreeMap<u32, Vec<Value>> = BTreeMap::new();
+                for a in s.automation.values().filter(|a| a.owner_id == p.id) {
+                    if let AutomationParam::Plugin(id) = a.param {
+                        lanes.entry(id).or_default().push(json!([a.sample - start, a.value]));
+                    }
+                }
+                for l in lanes.values_mut() {
+                    l.sort_by_key(|x| x[0].as_i64());
+                }
+                plugins.insert(p.id.clone(), json!(lanes.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<BTreeMap<_, _>>()));
+            }
+            json!({
+                "id": b.id, "name": b.name, "parent": b.parent_id, "order": b.order,
+                "gain_db": b.gain_db, "mute": b.mute, "stem": b.stem, "inserts": b.inserts,
+                "volume_db": points(&b.id, AutomationParam::VolumeDb),
+                "pan_automation": points(&b.id, AutomationParam::Pan),
+                "plugin_automation": plugins,
+            })
+        })
+        .collect();
+    json!(v)
+}
+
 /// Build the OTIO timeline and write it to `out`. `media` maps asset ids to the linked WAVs.
 pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o: &OtioOptions) -> Result<OtioReport> {
     let sr = s.project.sample_rate as f64;
@@ -265,7 +303,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         s.tracks.values().filter(|t| !t.mute && pans(t)).count(),
     );
     losses.add(
-        "bus routing not carried: tracks are flat, with bus levels and automation folded into each track's gain and pan effects",
+        "bus routing and bus automation in VC Sound Design metadata only: other apps get bus levels folded into each track's gain and pan effects",
         s.buses.values().filter(|b| b.parent_id.is_some()).count(),
     );
     let inserts: usize = s.tracks.values().filter(|t| !t.mute && !printed(&t.id)).map(|t| t.inserts.len()).sum();
@@ -274,7 +312,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         inserts,
     );
     losses.add(
-        "insert effects and plugins on buses not carried (rendered in stems and mix)",
+        "insert effects and plugins on buses in VC Sound Design metadata only (other apps don't apply them; they are in the stems and mix)",
         s.buses.values().map(|b| b.inserts.len()).sum(),
     );
     losses.add("tracks printed with their plugins and insert effects: one rendered clip each, not editable clip by clip", o.prints.len());
@@ -419,6 +457,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                     "bus": bus, "gain_db": t.gain_db, "pan": t.pan, "printed": printed(&t.id),
                     // true: the effects carry bus levels too (what the track sounds like), the raw values don't
                     "bus_folded": bus_folded,
+                    "bus_id": t.bus_id,
                     // automation: [offset in samples from the timeline start, value]
                     "volume_db": points(AutomationParam::VolumeDb),
                     "pan_automation": points(AutomationParam::Pan),
@@ -463,6 +502,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         "metadata": { "vcsd": {
             "project": s.project.name, "sample_rate": s.project.sample_rate, "frame_rate": fr.label(),
             "start_tc": tb.tc_at(start), "drop_frame": fr.drop_frame,
+            "buses": bus_tree(s, start),
         } },
         "name": o.name,
         "global_start_time": rt(tb.frame_at(start) as f64, fr.as_f64()),
