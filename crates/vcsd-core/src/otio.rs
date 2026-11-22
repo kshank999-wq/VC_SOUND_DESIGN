@@ -248,7 +248,7 @@ fn track_effects(s: &ProjectState, t: &Track, start: i64, end: i64) -> (Vec<Valu
 /// with its parent, level, mute, inserts (as in the project), volume and balance
 /// automation, and its plugins' parameter automation — points as
 /// `[offset in samples from the range start, value]`.
-fn bus_tree(s: &ProjectState, start: i64) -> Value {
+pub(crate) fn bus_tree(s: &ProjectState, start: i64) -> Value {
     let points = |owner: &str, param: AutomationParam| -> Vec<Value> {
         lane(s, owner, param, start).into_iter().map(|(x, v)| json!([x, v])).collect()
     };

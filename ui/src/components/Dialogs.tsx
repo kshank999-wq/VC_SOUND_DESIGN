@@ -151,7 +151,7 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
     let ok = null;
     if (kind === "picture") ok = await eng.run("picture.import", { path, label, start_tc: tc || undefined }, "Picture imported");
     if (kind === "aaf") {
-      const r = await eng.run<AafReport>("aaf.import", { path, at_tc: tc || undefined });
+      const r = await eng.run<AafReport>("aaf.import", { path, at_tc: tc || undefined, buses });
       if (r) {
         eng.toast(`AAF imported: ${r.tracks.length} tracks, ${r.clips} clips`);
         // keep the dialog open to show what was left out
@@ -191,8 +191,8 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
         {(kind === "aaf" || kind === "otio") && (
           <label className="field"><span>Start TC (blank = the file's own start)</span><input className="mono" value={tc} placeholder="01:00:00:00" onChange={(e) => setTc(e.target.value)} /></label>
         )}
-        {kind === "otio" && (
-          <label className="field" title="For OTIO files from VC Sound Design, which describe their buses. Auto restores them when this project's matching buses are untouched.">
+        {(kind === "otio" || kind === "aaf") && (
+          <label className="field" title="For AAF and OTIO files from VC Sound Design, which describe their buses. Auto restores them when this project's matching buses are untouched.">
             <span>Bus levels</span>
             <select value={buses} onChange={(e) => setBuses(e.target.value)}>
               <option value="auto">Auto</option>
@@ -201,8 +201,8 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
             </select>
           </label>
         )}
-        {kind === "otio" && (
-          <label className="field" title="For OTIO files from VC Sound Design, which describe their buses. Auto restores them when this project's matching buses are untouched.">
+        {(kind === "otio" || kind === "aaf") && (
+          <label className="field" title="For AAF and OTIO files from VC Sound Design, which describe their buses. Auto restores them when this project's matching buses are untouched.">
             <span>Bus levels</span>
             <select value={buses} onChange={(e) => setBuses(e.target.value)}>
               <option value="auto">Auto</option>

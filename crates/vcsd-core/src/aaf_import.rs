@@ -55,6 +55,9 @@ pub struct AafImportOptions {
     pub composition: Option<String>,
     /// Track folder for the new tracks; `None` = "AAF/<composition>".
     pub folder: Option<String>,
+    /// Bus levels in an AAF from VC Sound Design (its "VCSD" comment):
+    /// restore the buses, or keep them folded into the tracks.
+    pub buses: crate::otio_import::BusLevels,
 }
 
 impl AafImportOptions {
@@ -76,6 +79,11 @@ pub struct AafImportReport {
     pub markers: usize,
     pub automated_tracks: usize,
     pub panned_tracks: usize,
+    /// How bus levels came in: "buses" (restored from VC Sound Design's
+    /// description) or "fold" (in the tracks, as AAF carries them).
+    pub bus_levels: String,
+    pub buses_restored: usize,
+    pub buses_created: usize,
     /// Media files used where they are.
     pub media_linked: usize,
     /// Media written to the import folder (extracted, converted, channel extracts).
@@ -412,6 +420,8 @@ struct RawClip {
 #[derive(Debug, Clone, Default)]
 struct Lane {
     name: String,
+    /// The AAF track (slot) id.
+    slot: u32,
     clips: Vec<RawClip>,
     gains: Vec<Span>,
     pans: Vec<Span>,
@@ -1299,7 +1309,8 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
         }
         let Some(rate) = Content::slot_rate(sl) else { continue };
         let name = sl.string(0x4802).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("A{}", lanes.len() + 1));
-        let mut w = Walk { lane: Lane { name, ..Default::default() }, rate, sr, pending_in: 0, notes: &mut notes };
+        let slot = sl.u32(0x4801).unwrap_or(0);
+        let mut w = Walk { lane: Lane { name, slot, ..Default::default() }, rate, sr, pending_in: 0, notes: &mut notes };
         let origin = sl.i64(0x4b02).unwrap_or(0);
         content.walk(&seg, -origin, 1.0, &mut w, 0);
         if !w.lane.clips.is_empty() {
@@ -1363,13 +1374,47 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
     let mut order = s.tracks.values().map(|t| t.order + 1).max().unwrap_or(0);
     let mut assets: HashMap<PathBuf, String> = HashMap::new();
     let license = License { name: "Editorial media (AAF)".into(), redistributable: true, source: "editorial".into(), ..Default::default() };
+    // ---- buses: VC Sound Design's own description (the composition's "VCSD"
+    // comment), restored per `o.buses`; otherwise they stay folded into the tracks
+    let vcsd: serde_json::Value = a
+        .children(&comp, 0x4406)
+        .iter()
+        .find(|t| t.string(0x5001).as_deref() == Some("VCSD"))
+        .and_then(|t| t.data(0x5003).map(<[u8]>::to_vec))
+        .filter(|d| d.len() > 17 && hexs(&d[1..17]) == key::TYPE_STRING)
+        .and_then(|d| serde_json::from_str(&utf16(&d[17..])).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let meta_sr = vcsd["sample_rate"].as_f64().unwrap_or(psr as f64);
+    let from_meta = |v: &serde_json::Value| v.as_f64().map(|x| (x * psr as f64 / meta_sr).round() as i64);
+    let slot_meta = |slot: u32| vcsd["slots"][slot.to_string()].clone();
+    let exported: Vec<serde_json::Value> = vcsd["buses"].as_array().cloned().unwrap_or_default();
+    let track_bus_ids: Vec<String> = planned.iter().filter_map(|p| slot_meta(p.left.slot)["bus_id"].as_str().map(String::from)).collect();
+    let track_buses: Vec<&str> = track_bus_ids.iter().map(String::as_str).collect();
+    let comp_len = planned.iter().map(|p| p.left.extent().1).max().unwrap_or(0);
+    let restore = crate::otio_import::restore_buses(s, &exported, &track_buses, o.buses, base, comp_len, &from_meta);
+    if let Some(n) = &restore.note {
+        notes.add(n.clone(), 1);
+    }
+    let bus_map = restore.map.unwrap_or_default();
+    report.bus_levels = if bus_map.is_empty() { "fold".into() } else { "buses".into() };
+    (report.buses_restored, report.buses_created) = (restore.restored, restore.created);
+
     for p in planned {
         let stereo = p.right.is_some();
         let lane = &p.left;
         let category = guess_category(&p.name);
-        let bus_id = match &category {
-            Category::Custom(_) => s.buses.values().find(|b| b.name == crate::mixer::MASTER_BUS).map(|b| b.id.clone()).unwrap_or_default(),
-            cat => crate::builder::bus_for_category(s, cat),
+        // restored buses: this track's own levels, routed to its bus
+        let meta = slot_meta(lane.slot);
+        let routed = meta["bus_id"].as_str().and_then(|b| bus_map.get(b)).cloned();
+        // its fader, folded into clip gain on the way out (unless printed)
+        let fader_in_clips =
+            if routed.is_some() && meta["printed"].as_bool() != Some(true) { meta["gain_db"].as_f64().unwrap_or(0.0) } else { 0.0 };
+        let bus_id = match (&routed, &category) {
+            (Some(b), _) => b.clone(),
+            (None, Category::Custom(_)) => {
+                s.buses.values().find(|b| b.name == crate::mixer::MASTER_BUS).map(|b| b.id.clone()).unwrap_or_default()
+            }
+            (None, cat) => crate::builder::bus_for_category(s, cat),
         };
         let tid = new_id("trk");
         let mut clips = vec![];
@@ -1413,7 +1458,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
                 timeline_start: base + rc.at,
                 source_offset: offset,
                 length: rc.len,
-                gain_db: amp_db(rc.gain) as f32,
+                gain_db: (amp_db(rc.gain) - fader_in_clips) as f32,
                 fade_in: rc.fade_in.min(rc.len),
                 fade_out: rc.fade_out.min(rc.len),
                 fill: FillMode::OneShot,
@@ -1449,6 +1494,30 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
         };
         order += 1;
 
+        if routed.is_some() {
+            // the track's own fader, pan and lanes (the AAF's track gain and pan include the buses)
+            track.gain_db = meta["gain_db"].as_f64().unwrap_or(0.0) as f32;
+            track.pan = meta["pan"].as_f64().unwrap_or(0.0).clamp(-1.0, 1.0) as f32;
+            let mut automated = false;
+            for (key, param) in [("volume_db", AutomationParam::VolumeDb), ("pan_automation", AutomationParam::Pan)] {
+                for pt in meta[key].as_array().into_iter().flatten() {
+                    if let (Some(t), Some(v)) = (from_meta(&pt[0]), pt[1].as_f64()) {
+                        add_point(s, &tid, param, base + t, crate::editing::clamp_automation(param, v as f32));
+                        automated |= param == AutomationParam::VolumeDb;
+                    }
+                }
+            }
+            report.automated_tracks += automated as usize;
+            report.panned_tracks += (track.pan.abs() > 0.001 || meta["pan_automation"].as_array().is_some_and(|a| !a.is_empty())) as usize;
+            report.stereo_tracks += stereo as usize;
+            report.clips += clips.len();
+            s.tracks.insert(tid.clone(), track);
+            for c in clips {
+                s.clips.insert(c.id.clone(), c);
+            }
+            report.tracks.push(tid);
+            continue;
+        }
         // gain and pan as functions of time (samples from the composition start)
         let right = p.right.as_ref();
         let gain = |t: i64| match right {

@@ -209,6 +209,10 @@ enum Cmd {
         /// Folders searched (by file name) for linked media that moved
         #[arg(long = "search")]
         search: Vec<PathBuf>,
+        /// Bus levels from a VC Sound Design AAF: auto (restore if the project's
+        /// buses are untouched), buses (restore), fold (into the tracks)
+        #[arg(long, default_value = "auto")]
+        buses: String,
     },
     /// Import an OpenTimelineIO timeline (.otio) as new tracks
     ImportOtio {
@@ -633,9 +637,10 @@ fn run(cli: Cli) -> Result<()> {
                 mutate(&dir, "relink", |st| relink::relink_by_hash(st, &search.iter().map(|p| p.as_path()).collect::<Vec<_>>()))?;
             println!("scanned {} files · relinked {} · still missing {}", rep.scanned_files, rep.relinked.len(), rep.still_missing.len());
         }
-        Cmd::ImportAaf { dir, aaf, at, composition, search } => {
+        Cmd::ImportAaf { dir, aaf, at, composition, search, buses } => {
             let mut o = aaf_import::AafImportOptions::for_project(&dir, &aaf);
             o.search_dirs = search;
+            o.buses = otio_import::BusLevels::parse(&buses).ok_or_else(|| Error::Invalid("--buses: auto, buses or fold".into()))?;
             o.composition = composition;
             let (_, r) = mutate(&dir, "import AAF", |st| {
                 o.at = at.as_deref().map(|t| st.tb().sample_at_tc(t)).transpose()?;
@@ -652,6 +657,9 @@ fn run(cli: Cli) -> Result<()> {
                 r.media_linked,
                 r.media_written
             );
+            if r.bus_levels == "buses" {
+                println!("  buses: {} restored ({} created)", r.buses_restored, r.buses_created);
+            }
             for m in &r.missing_media {
                 println!("  missing: {m}");
             }

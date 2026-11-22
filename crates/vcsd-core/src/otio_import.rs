@@ -213,16 +213,43 @@ fn number(v: &Value) -> Option<f64> {
 /// export's `metadata.vcsd.buses` per `mode`. Returns exported bus id → project
 /// bus id when restored, `None` when the tracks carry the levels instead.
 #[allow(clippy::too_many_arguments)]
-fn restore_buses(
+pub(crate) fn restore_buses(
     s: &mut ProjectState,
     exported: &[Value],
-    lanes: &[OLane],
+    track_buses: &[&str],
     mode: BusLevels,
     base: i64,
     len: i64,
     from_meta: &dyn Fn(&Value) -> Option<i64>,
-    notes: &mut Notes,
-    report: &mut OtioImportReport,
+) -> BusRestore {
+    let mut out = BusRestore::default();
+    out.map = restore_buses_into(s, exported, track_buses, mode, base, len, from_meta, &mut out.restored, &mut out.created, &mut out.note);
+    out
+}
+
+/// What [`restore_buses`] did: exported bus id → project bus id when the buses
+/// were restored (None: the tracks carry the levels), how many buses were
+/// restored and created, and why it folded instead, if it did.
+#[derive(Debug, Default)]
+pub(crate) struct BusRestore {
+    pub map: Option<HashMap<String, String>>,
+    pub restored: usize,
+    pub created: usize,
+    pub note: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_buses_into(
+    s: &mut ProjectState,
+    exported: &[Value],
+    track_buses: &[&str],
+    mode: BusLevels,
+    base: i64,
+    len: i64,
+    from_meta: &dyn Fn(&Value) -> Option<i64>,
+    restored: &mut usize,
+    created: &mut usize,
+    note: &mut Option<String>,
 ) -> Option<HashMap<String, String>> {
     if mode == BusLevels::Fold || exported.is_empty() {
         return None;
@@ -230,9 +257,9 @@ fn restore_buses(
     let by_id: HashMap<&str, &Value> = exported.iter().filter_map(|b| Some((b["id"].as_str()?, b))).collect();
     // the buses the tracks use, with every bus above them, parents first
     let mut used: Vec<&str> = vec![];
-    for l in lanes {
+    for &tb in track_buses {
         let mut chain = vec![];
-        let mut cur = l.vcsd["bus_id"].as_str();
+        let mut cur = Some(tb);
         while let Some(id) = cur.filter(|id| by_id.contains_key(id) && !chain.contains(id)) {
             chain.push(id);
             cur = by_id[id]["parent"].as_str();
@@ -276,13 +303,10 @@ fn restore_buses(
         let busy: Vec<String> =
             plan.iter().filter_map(|(_, t)| t.as_deref()).filter(|t| touched(t)).map(|t| s.buses[t].name.clone()).collect();
         if !busy.is_empty() {
-            notes.add(
-                format!(
-                    "bus levels folded into the tracks: the project's buses have their own levels ({}); import with buses to restore them",
-                    busy.join(", ")
-                ),
-                1,
-            );
+            *note = Some(format!(
+                "bus levels folded into the tracks: the project's buses have their own levels ({}); import with buses to restore them",
+                busy.join(", ")
+            ));
             return None;
         }
     }
@@ -298,7 +322,7 @@ fn restore_buses(
                 if let Some(bus) = s.buses.get_mut(&new) {
                     bus.stem = b["stem"].as_bool().unwrap_or(true);
                 }
-                report.buses_created += 1;
+                *created += 1;
                 new
             }
         };
@@ -349,7 +373,7 @@ fn restore_buses(
                 }
             }
         }
-        report.buses_restored += 1;
+        *restored += 1;
         map.insert(id.to_string(), bid);
     }
     Some(map)
@@ -730,7 +754,13 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
     // ---- buses (our own export): restore them, or let the tracks carry them
     let exported: Vec<Value> = tl["metadata"]["vcsd"]["buses"].as_array().cloned().unwrap_or_default();
     let end_t = lanes.iter().map(|l| l.start + l.len).fold(0.0f64, f64::max);
-    let bus_map = restore_buses(s, &exported, &lanes, o.buses, base, smp(end_t), &from_meta, &mut notes, &mut report);
+    let track_buses: Vec<&str> = lanes.iter().filter_map(|l| l.vcsd["bus_id"].as_str()).collect();
+    let restore = restore_buses(s, &exported, &track_buses, o.buses, base, smp(end_t), &from_meta);
+    if let Some(n) = &restore.note {
+        notes.add(n.clone(), 1);
+    }
+    (report.buses_restored, report.buses_created) = (restore.restored, restore.created);
+    let bus_map = restore.map;
     report.bus_levels = if bus_map.is_some() { "buses".into() } else { "fold".into() };
     let mut levels_found = false;
     for lane in lanes {

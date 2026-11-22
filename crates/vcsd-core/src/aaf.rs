@@ -59,6 +59,7 @@ pub(crate) mod class {
     pub const VARYING_VALUE: &str = "0d010101-0101-3e00-060e-2b3402060101";
     pub const CONTROL_POINT: &str = "0d010101-0101-1900-060e-2b3402060101";
     pub const COMMENT_MARKER: &str = "0d010101-0101-0800-060e-2b3402060101";
+    pub const TAGGED_VALUE: &str = "0d010101-0101-3f00-060e-2b3402060101";
     pub const WAVE_DESCRIPTOR: &str = "0d010101-0101-2c00-060e-2b3402060101";
     pub const IMPORT_DESCRIPTOR: &str = "0d010101-0101-4a00-060e-2b3402060101";
     pub const NETWORK_LOCATOR: &str = "0d010101-0101-3200-060e-2b3402060101";
@@ -75,6 +76,7 @@ pub(crate) mod key {
     pub const OP_MONO_AUDIO_PAN: &str = "93a82e9d6809d3118a380050040ef7d2";
     pub const PARAM_PAN: &str = "222396e46722d3118a4c0050040ef7d2";
     pub const TYPE_RATIONAL: &str = "0001010300000000060e2b3401040101";
+    pub const TYPE_STRING: &str = "0002100100000000060e2b3401040101";
     pub const INTERP_LINEAR: &str = "a4856c5bde0ed31180a9006008143e6f";
 }
 
@@ -1227,7 +1229,43 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         slots.push(ev);
     }
     let comp_id = new_mob_id();
-    let comp = mob_head(Obj::new(class::COMPOSITION_MOB), &o.name, &comp_id, now).vector(0x4403, "Slots", slots);
+    // VC Sound Design's own description (a mob comment other apps show or ignore):
+    // the bus tree, and per AAF track its project track, bus and raw levels, so an
+    // import can restore the buses rather than keep them folded into the tracks
+    let mut slot_meta = serde_json::Map::new();
+    for (i, (_, ch, _, tid)) in audio_slots.iter().enumerate() {
+        let t = &s.tracks[tid];
+        let layer = audio_slots[..i].iter().filter(|x| &x.3 == tid && x.1 == *ch).count() + 1;
+        let lane = |p: AutomationParam| -> Vec<serde_json::Value> {
+            owner_lane(s, tid, p).into_iter().map(|(x, v)| serde_json::json!([x - start, v])).collect()
+        };
+        slot_meta.insert(
+            (i + 2).to_string(),
+            serde_json::json!({
+                "track_id": tid, "name": t.name, "layer": layer, "channel": ch, "channels": t.channels,
+                "bus_id": t.bus_id, "gain_db": t.gain_db, "pan": t.pan,
+                // unprinted tracks have their fader folded into clip gain; printed ones into the track gain
+                "printed": printed(tid),
+                "volume_db": lane(AutomationParam::VolumeDb),
+                "pan_automation": lane(AutomationParam::Pan),
+            }),
+        );
+    }
+    let vcsd = serde_json::json!({
+        "version": 1,
+        "sample_rate": s.project.sample_rate,
+        "buses": crate::otio::bus_tree(s, start),
+        "slots": slot_meta,
+    });
+    let mut value = vec![0x4c];
+    value.extend(hex(key::TYPE_STRING));
+    value.extend(utf16z(&vcsd.to_string()));
+    let comment = Obj::new(class::TAGGED_VALUE).data(0x5001, "Name", utf16z("VCSD")).data(0x5003, "Value", value);
+    let comp = mob_head(Obj::new(class::COMPOSITION_MOB), &o.name, &comp_id, now).vector(0x4403, "Slots", slots).vector(
+        0x4406,
+        "UserComments",
+        vec![comment],
+    );
     mobs.push((comp_id, comp));
 
     let report = AafReport {

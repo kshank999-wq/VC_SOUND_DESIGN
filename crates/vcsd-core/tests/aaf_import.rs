@@ -77,7 +77,10 @@ fn an_exported_aaf_imports_back_to_the_same_mix() {
     // into a fresh project at the same rate and start
     let (mut s2, root2) = session("aafrt2", "24", "01:00:00:00");
     scene(&mut s2, "1", "01:00:00:00", "01:00:10:00");
-    let rep = s2.edit("i", |st| import(st, &aaf, &opts(&root2))).unwrap();
+    // as AAF carries it (other apps' view): buses folded into the tracks
+    let fold = AafImportOptions { buses: vcsd_core::otio_import::BusLevels::Fold, ..opts(&root2) };
+    let rep = s2.edit("i", |st| import(st, &aaf, &fold)).unwrap();
+    assert_eq!(rep.bus_levels, "fold");
     assert!(rep.missing_media.is_empty(), "{:?}", rep.missing_media);
     assert_eq!(rep.start_tc, "01:00:00:00");
     assert!(rep.stereo_tracks >= 1, "the L/R pair came back as one stereo track: {rep:?}");
@@ -233,4 +236,117 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     let o3 = AafImportOptions { search_dirs: vec![dir.join("elsewhere")], at: Some(0), ..opts(&root3) };
     let rep = s3.edit("i", |st| import(st, &aaf, &o3)).unwrap();
     assert!(rep.missing_media.is_empty(), "{:?}", rep.missing_media);
+}
+
+#[test]
+fn buses_and_their_automation_come_back_from_our_aaf() {
+    let (mut s, root) = session("aafbus", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:06:00", "wind exterior", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let sr = st.project.sample_rate as i64;
+    let lens: std::collections::HashMap<String, i64> = st.assets.values().map(|a| (a.id.clone(), a.length_samples)).collect();
+    for c in st.clips.values_mut() {
+        c.fill = FillMode::OneShot;
+        c.length = c.length.min(lens[&c.asset_id] - c.source_offset);
+    }
+    let clip_of = |st: &ProjectState, what: &str| {
+        let cue = st.cues.values().find(|c| c.description.contains(what)).unwrap().id.clone();
+        st.clips.values().find(|c| c.cue_id.as_deref() == Some(cue.as_str()) && !c.muted).unwrap().id.clone()
+    };
+    let (glass, wind) = (clip_of(st, "glass"), clip_of(st, "wind"));
+    st.clips.get_mut(&glass).unwrap().gain_db = -6.0;
+    let (gt, wt) = (st.clips[&glass].track_id.clone(), st.clips[&wind].track_id.clone());
+    let t0 = st.clips[&glass].timeline_start;
+    st.tracks.get_mut(&gt).unwrap().gain_db = -3.0;
+    editing::set_automation(st, &gt, AutomationParam::Pan, t0, -0.5).unwrap();
+    editing::set_automation(st, &gt, AutomationParam::Pan, t0 + sr, 0.5).unwrap();
+    // the glass on a new sub-bus (+1.5 dB, a built-in insert) under its bus (−2 dB, a fade);
+    // the master's balance moving; the wind's bus dipping
+    let parent = st.tracks[&gt].bus_id.clone();
+    let parent_name = st.buses[&parent].name.clone();
+    let sub = mixer::add_bus(st, "FX Sub", Some(&parent)).unwrap();
+    st.tracks.get_mut(&gt).unwrap().bus_id = sub.clone();
+    st.buses.get_mut(&sub).unwrap().gain_db = 1.5;
+    st.buses.get_mut(&sub).unwrap().inserts = vec![Insert::Gain { db: -1.0 }];
+    st.buses.get_mut(&parent).unwrap().gain_db = -2.0;
+    editing::set_automation(st, &parent, AutomationParam::VolumeDb, t0, 0.0).unwrap();
+    editing::set_automation(st, &parent, AutomationParam::VolumeDb, t0 + sr / 2, -8.0).unwrap();
+    let wbus = st.tracks[&wt].bus_id.clone();
+    editing::set_automation(st, &wbus, AutomationParam::VolumeDb, sr, 0.0).unwrap();
+    editing::set_automation(st, &wbus, AutomationParam::VolumeDb, 3 * sr, -6.0).unwrap();
+    let master = st.buses.values().find(|b| b.parent_id.is_none()).unwrap().id.clone();
+    editing::set_automation(st, &master, AutomationParam::Pan, 0, 0.3).unwrap();
+    editing::set_automation(st, &master, AutomationParam::Pan, 5 * sr, -0.3).unwrap();
+
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.aaf = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+
+    // an independent reader sees our description as an ordinary mob comment
+    if let Some(py) = python() {
+        let code = "import sys, json, aaf2\n\
+                    f = aaf2.open(sys.argv[1], 'r')\n\
+                    m = next(f.content.compositionmobs())\n\
+                    print(json.dumps(json.loads(dict(m.comments.items())['VCSD'])['buses']))";
+        let out = std::process::Command::new(&py).args(["-c", code]).arg(&aaf).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let buses: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(buses.as_array().unwrap().iter().any(|b| b["name"] == "FX Sub" && b["gain_db"] == 1.5), "{buses}");
+    }
+
+    let (mut s2, root2) = session("aafbus2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &aaf, &opts(&root2))).unwrap();
+    assert_eq!(rep.bus_levels, "buses", "{rep:?}");
+    assert_eq!(rep.buses_created, 1, "FX Sub");
+    assert!(rep.buses_restored >= 4, "FX Sub, its parent, the wind's bus and the master: {rep:?}");
+    let (a, b) = (&s.state, &s2.state);
+    let named = |st: &ProjectState, n: &str| st.buses.values().find(|x| x.name == n).unwrap_or_else(|| panic!("bus {n}")).clone();
+    let (sub2, parent2) = (named(b, "FX Sub"), named(b, &parent_name));
+    assert_eq!(sub2.parent_id.as_deref(), Some(parent2.id.as_str()));
+    assert_eq!((sub2.gain_db, parent2.gain_db), (1.5, -2.0));
+    assert!(matches!(sub2.inserts.as_slice(), [Insert::Gain { db }] if *db == -1.0));
+    let lane = |st: &ProjectState, owner: &str, p: AutomationParam| {
+        let mut v: Vec<(i64, f32)> =
+            st.automation.values().filter(|x| x.owner_id == owner && x.param == p).map(|x| (x.sample, x.value)).collect();
+        v.sort_by_key(|x| x.0);
+        v
+    };
+    for name in [parent_name.as_str(), "Review Mix", a.buses[&wbus].name.as_str()] {
+        let (x, y) = (named(a, name), named(b, name));
+        for p in [AutomationParam::VolumeDb, AutomationParam::Pan] {
+            assert_eq!(lane(a, &x.id, p), lane(b, &y.id, p), "{name} {p:?}");
+        }
+    }
+    // the glass: routed to FX Sub with its own fader, pan lane and clip gain (not folded)
+    let gc = b.clips.values().find(|c| c.timeline_start == t0).unwrap();
+    let gtrack = &b.tracks[&gc.track_id];
+    assert_eq!(gtrack.bus_id, sub2.id);
+    assert_eq!(gtrack.gain_db, -3.0);
+    assert!((gc.gain_db + 6.0).abs() < 1e-3, "{}", gc.gain_db);
+    assert_eq!(lane(b, &gtrack.id, AutomationParam::Pan), lane(a, &gt, AutomationParam::Pan));
+    let wtrack = b.tracks.values().find(|t| t.channels == 2).expect("the stereo bed, paired");
+    assert_eq!(wtrack.bus_id, named(b, &a.buses[&wbus].name).id);
+
+    // the same mix
+    let (start, end) = mixer::timeline_extent(a);
+    let n = (end - start) as usize;
+    let ma = mixer::Mixer::new(a, mixer::RenderOptions::default()).render_master(start, n).unwrap();
+    let mb = mixer::Mixer::new(b, mixer::RenderOptions::default()).render_master(start, n).unwrap();
+    assert!(ma.peak() > 0.05);
+    let max = ma.data.iter().zip(&mb.data).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    assert!(max < 1e-4 * ma.peak().max(1.0), "mix differs by {max}");
+
+    // folding instead: the project's buses untouched, the tracks carrying the levels
+    let (mut s3, root3) = session("aafbus3", "24", "01:00:00:00");
+    let fold = AafImportOptions { buses: vcsd_core::otio_import::BusLevels::Fold, ..opts(&root3) };
+    let rep = s3.edit("i", |st| import(st, &aaf, &fold)).unwrap();
+    assert_eq!((rep.bus_levels.as_str(), rep.buses_restored), ("fold", 0));
+    assert!(!s3.state.buses.values().any(|b| b.name == "FX Sub"));
 }
