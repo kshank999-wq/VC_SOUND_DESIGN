@@ -18,6 +18,10 @@ The composition "Reel 1 v3" runs at 25 fps from 10:00:00:00:
 - "PAN": 50 frames of the music in a Mono Audio Pan sweeping (linear) 0 → 1 at
   frame 25 → 0.5 at the end;
 - "STEP": the same, with Constant interpolation: pan 0.25 until frame 25, then 0.75;
+- "CLIPGAIN": filler 10, then 40 frames of the music with a clip gain envelope
+  (Mono Audio Gain on the clip, linear 1 → 0.25 → 1);
+- "LEVEL": 50 frames of the music in a Stereo Audio Gain whose Level steps
+  (Constant interpolation) from 0.5 to 8 (+18 dB) at frame 25;
 - a picture-only track (ignored), a timecode track, and a descriptive
   marker "door knock" at frame 50.
 """
@@ -101,7 +105,15 @@ def defs(f):
     f.dictionary.register_def(dissolve)
     f.dictionary.register_def(f.create.InterpolationDef("5b6c85a4-0ede-11d3-80a9-006008143e6f", "LinearInterp", ""))
     f.dictionary.register_def(f.create.InterpolationDef("5b6c85a5-0ede-11d3-80a9-006008143e6f", "ConstantInterp", ""))
-    return amp, gain, pan, panop, dissolve
+    # Stereo Audio Gain, with its level in "Level" (as some apps write gain)
+    level = f.create.ParameterDef("e4962320-2267-11d3-8a4c-0050040ef7d2", "Level", "", "Rational")
+    f.dictionary.register_def(level)
+    sgain = f.create.OperationDef("9d2ea895-0968-11d3-8a38-0050040ef7d2", "Stereo Audio Gain", "")
+    sgain.media_kind = "sound"
+    sgain["NumberInputs"].value = 1
+    sgain["ParametersDefined"].append(level)
+    f.dictionary.register_def(sgain)
+    return amp, gain, pan, panop, dissolve, level, sgain
 
 
 def build(out):
@@ -124,7 +136,7 @@ def build(out):
     fx_meta = wav(fx_ref, 3, 24, fx_frames, lambda i, c: 0.0)
 
     with aaf2.open(os.path.join(out, "fixture.aaf"), "w") as f:
-        amp, gain, pan, panop, dissolve = defs(f)
+        amp, gain, pan, panop, dissolve, level, sgain = defs(f)
 
         # embedded: the dialog's PCM inside the AAF (master at the video rate)
         dmaster = f.create.MasterMob("dialog")
@@ -216,6 +228,42 @@ def build(out):
                 vv["PointList"].append(cp)
             po["Parameters"].append(vv)
             slot.segment = po
+
+        def varying(param, interp, keys):
+            vv = f.create.VaryingValue(param, interp)
+            for tm, v in keys:
+                cp = f.create.ControlPoint()
+                cp["Time"].value = AAFRational(tm)
+                cp["Value"].value = AAFRational(v)
+                vv["PointList"].append(cp)
+            return vv
+
+        # CLIPGAIN: a clip gain envelope on a clip 10 frames in
+        slot = comp.create_sound_slot(FPS)
+        slot.name = "CLIPGAIN"
+        seq = f.create.Sequence(media_kind="sound")
+        seq.components.append(f.create.Filler("sound", 10))
+        c = mmaster.create_source_clip(1, start=0, length=40 * RATE // FPS)
+        c.length = 40
+        cg = f.create.OperationGroup(gain, 40, "sound")
+        cg["InputSegments"].append(c)
+        cg["Parameters"].append(varying(amp, "LinearInterp", ((0, 1), (0.5, 0.25), (1, 1))))
+        seq.components.append(cg)
+        seq.length = 50
+        slot.segment = seq
+
+        # LEVEL: Stereo Audio Gain, Level stepping from 0.5 to 8 at the midpoint
+        slot = comp.create_sound_slot(FPS)
+        slot.name = "LEVEL"
+        seq = f.create.Sequence(media_kind="sound")
+        c = mmaster.create_source_clip(1, start=0, length=50 * RATE // FPS)
+        c.length = 50
+        seq.components.append(c)
+        seq.length = 50
+        sg = f.create.OperationGroup(sgain, 50, "sound")
+        sg["InputSegments"].append(seq)
+        sg["Parameters"].append(varying(level, "ConstantInterp", ((0, 0.5), (0.5, 8))))
+        slot.segment = sg
 
         ev = f.create.EventMobSlot()
         ev["SlotID"].value = 50

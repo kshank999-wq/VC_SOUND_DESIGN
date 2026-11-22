@@ -141,8 +141,8 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     assert_eq!(rep.composition, "Reel 1 v3");
     assert_eq!(rep.start_tc, "10:00:00:00");
     assert!(rep.missing_media.is_empty(), "{:?}", rep.missing_media);
-    assert_eq!(rep.tracks.len(), 5, "five sound tracks (the picture track is ignored): {rep:?}");
-    assert_eq!(rep.clips, 6);
+    assert_eq!(rep.tracks.len(), 7, "seven sound tracks (the picture track is ignored): {rep:?}");
+    assert_eq!(rep.clips, 8);
     assert_eq!(rep.markers, 1);
     let st = &s.state;
     let f = 1920; // samples per frame at 25 fps
@@ -244,6 +244,38 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     assert!((pan_at(&step, 12 * f) + 0.5).abs() < 1e-6 && (pan_at(&step, 25 * f - 1) + 0.5).abs() < 1e-6, "held: {step:?}");
     assert!((pan_at(&step, 25 * f) - 0.5).abs() < 1e-6 && (pan_at(&step, 40 * f) - 0.5).abs() < 1e-6, "then the jump: {step:?}");
     assert!(!rep.notes.iter().any(|n| n.contains("interpolation")), "{:?}", rep.notes);
+
+    // CLIPGAIN: the clip's gain envelope as the track's volume lane, where the clip plays
+    let vol_lane = |name: &str| {
+        let t = track(name);
+        let mut v: Vec<(i64, f32)> = st
+            .automation
+            .values()
+            .filter(|p| p.owner_id == t.id && p.param == AutomationParam::VolumeDb)
+            .map(|p| (p.sample, p.value))
+            .collect();
+        v.sort_by_key(|p| p.0);
+        v
+    };
+    let env = vol_lane("CLIPGAIN");
+    assert_eq!(clips(&track("CLIPGAIN").id)[0].timeline_start, 10 * f);
+    for k in 0..40 * f {
+        let u = k as f64 / (40 * f) as f64;
+        let amp = if u <= 0.5 { 1.0 - 1.5 * u } else { 0.25 + 1.5 * (u - 0.5) };
+        let want = 20.0 * amp.log10();
+        let got = pan_at(&env, 10 * f + k);
+        assert!((got - want).abs() < 0.11, "clip envelope at {k}: {got:.3} vs {want:.3} dB");
+    }
+    // LEVEL: Stereo Audio Gain's Level, stepped: −6 dB held, then +18 dB clamped to +12
+    let lv = vol_lane("LEVEL");
+    assert!((pan_at(&lv, 10 * f) + 6.0206).abs() < 0.01 && (pan_at(&lv, 25 * f - 1) + 6.0206).abs() < 0.01, "{lv:?}");
+    assert!((pan_at(&lv, 25 * f) - 12.0).abs() < 1e-6 && (pan_at(&lv, 45 * f) - 12.0).abs() < 1e-6, "{lv:?}");
+    assert!(rep.notes.iter().any(|n| n.starts_with("gain above +12 dB clamped")), "{:?}", rep.notes);
+    assert!(
+        !rep.notes.iter().any(|n| n.starts_with("audio effects other than gain and pan")),
+        "Stereo Audio Gain is read: {:?}",
+        rep.notes
+    );
 
     // the marker, in its own lane
     let mk = st.markers.values().next().unwrap();

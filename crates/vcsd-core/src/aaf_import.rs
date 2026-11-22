@@ -158,6 +158,10 @@ fn cls(n: u8) -> Uuid {
     Uuid::parse_str(&format!("0d010101-0101-{n:02x}00-060e-2b3402060101")).unwrap()
 }
 
+/// Stereo Audio Gain, and the Level parameter some apps give gain instead of Amplitude (as stored).
+const OP_STEREO_AUDIO_GAIN: &str = "95a82e9d6809d3118a380050040ef7d2";
+const PARAM_LEVEL: &str = "202396e46722d3118a4c0050040ef7d2";
+
 /// Interpolation definitions (as stored): constant (hold) and none.
 const INTERP_CONSTANT: &str = "a5856c5bde0ed31180a9006008143e6f";
 const INTERP_NONE: &str = "a3856c5bde0ed31180a9006008143e6f";
@@ -709,16 +713,28 @@ impl Content {
             let op = n.weak(0x0b01).map(hexs).unwrap_or_default();
             let inputs = a.children(n, 0x0b02);
             let Some(input) = inputs.first() else { return };
-            let (param_def, is_gain) = match op.as_str() {
-                k if k == key::OP_MONO_AUDIO_GAIN => (key::PARAM_AMPLITUDE, true),
-                k if k == key::OP_MONO_AUDIO_PAN => (key::PARAM_PAN, false),
+            // gain: Mono or Stereo Audio Gain, its level in Amplitude (or Level, as some
+            // apps write it); pan: Mono Audio Pan
+            let (param_defs, is_gain): (&[&str], bool) = match op.as_str() {
+                k if k == key::OP_MONO_AUDIO_GAIN || k == OP_STEREO_AUDIO_GAIN => (&[key::PARAM_AMPLITUDE, PARAM_LEVEL], true),
+                k if k == key::OP_MONO_AUDIO_PAN => (&[key::PARAM_PAN], false),
                 _ => {
                     w.notes.add("audio effects other than gain and pan left out", 1);
                     return self.walk(input, pos, gain, w, depth + 1);
                 }
             };
-            let param = a.children(n, 0x0b03).into_iter().find(|p| p.data(0x4c01).map(hexs).as_deref() == Some(param_def));
+            let params = a.children(n, 0x0b03);
+            let param = param_defs.iter().find_map(|d| params.iter().find(|p| p.data(0x4c01).map(hexs).as_deref() == Some(*d)).cloned());
             let curve = param.and_then(|p| self.curve(&p, pos, len, w));
+            // the project's levels stop at +12 dB (a volume lane, clip gain)
+            let peak = match &curve {
+                Some(Curve::Const(v)) => *v,
+                Some(Curve::Points(p)) => p.iter().map(|x| x.1).fold(0.0, f64::max),
+                None => 0.0,
+            };
+            if is_gain && peak > 3.982 {
+                w.notes.add("gain above +12 dB clamped to +12 dB", 1);
+            }
             let span = |curve| Span { start: w.smp(pos), end: w.smp(pos + len), curve };
             match curve {
                 Some(Curve::Const(v)) if is_gain && self.clip_level(input) => return self.walk(input, pos, gain * v, w, depth + 1),

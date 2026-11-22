@@ -266,7 +266,7 @@ top-level composition (by name, or the one with the most sound clips) is placed 
 | `SourceClip` (through selectors, essence groups, nested scopes and effects) | A clip. Its source is followed through master and file mobs (edit rates and slot origins on the way) to a file and channel |
 | Clip fades; `Transition` | Fades; a transition is a crossfade of its length |
 | Mono Audio Gain on a clip (constant) | Clip gain |
-| Mono Audio Gain around a track (constant or varying), or a varying gain on a clip | Track gain, or a volume lane. AAF interpolates linear amplitude, so the lane is fitted within 0.1 dB, then thinned (collinear breakpoints dropped) |
+| Mono or Stereo Audio Gain around a track (constant or varying; level in `Amplitude`, or `Level` as some apps write it), or a varying gain on a clip (a clip gain envelope) | Track gain, or a volume lane over where the clips play. AAF interpolates linear amplitude, so the lane is fitted within 0.1 dB, then thinned (collinear breakpoints dropped). Gains multiply. Above +12 dB, the top of a volume lane, they are clamped (noted) |
 | Mono Audio Pan (constant or varying) | Track pan or a pan lane (fitted within 0.002, then thinned to its breakpoints) |
 | Interpolation of varying gain and pan | Linear as is. Constant (and None) holds each value until the next point. B-spline, log and power are read as linear (noted) |
 | Parameter values | Rational, or any of AAF's integer types |
@@ -316,7 +316,11 @@ following:
 - channel 3 of a linked two-track OP1a MXF (mono, then stereo), bit-exact;
 - clip gain, the varying track gain against the AAF curve, pan, and the marker;
 - a linear pan sweep (−1 → +1 → 0) within 0.003 as its breakpoints, and a Constant-interpolated
-  pan held, then jumping, at the right sample.
+  pan held, then jumping, at the right sample;
+- a clip gain envelope (1 → 0.25 → 1 on a clip 10 frames in) as the track's volume lane within
+  0.11 dB;
+- a Stereo Audio Gain with its level in `Level`, stepping from −6 dB to +18 dB: held, then clamped
+  to +12 dB, with a note.
 
 Our own AAF's mono pan automation comes back within 0.003 from its Mono Audio Pan with `fold`, and
 as the lane itself when the buses are restored.
