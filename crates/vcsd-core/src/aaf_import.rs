@@ -1636,7 +1636,8 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
             frozen_asset_id: None,
             inserts: vec![],
             automation_mode: AutoMode::Read,
-            color: None,
+            // the description's color (AAF has none of its own)
+            color: meta["color"].as_str().and_then(parse_hex_color),
         };
         order += 1;
         // its inserts and their plugin automation (our description; AAF can't hold them).

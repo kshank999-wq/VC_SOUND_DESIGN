@@ -1283,6 +1283,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                 "solo": t.solo,
                 // where it sits in the project: its folder and position there
                 "folder": t.folder, "order": t.order,
+                "color": t.color,
                 "muted_clips": audio_slots[i].2.iter().filter(|p| p.muted).map(|p| serde_json::json!([p.at - start, p.len])).collect::<Vec<_>>(),
                 "volume_db": lane(AutomationParam::VolumeDb),
                 "pan_automation": lane(AutomationParam::Pan),

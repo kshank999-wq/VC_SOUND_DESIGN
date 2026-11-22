@@ -894,3 +894,42 @@ fn track_folders_and_order_come_back_from_our_aaf() {
     assert_eq!(got.iter().map(|t| t.name.clone()).collect::<Vec<_>>(), want_order, "the project's order");
     assert!(got.iter().all(|t| t.order > before), "after the existing tracks");
 }
+
+#[test]
+fn track_colors_come_back_from_our_aaf() {
+    let (mut s, root) = session("aafcolor", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:06:00", "wind exterior", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let lens: std::collections::HashMap<String, i64> = st.assets.values().map(|a| (a.id.clone(), a.length_samples)).collect();
+    for c in st.clips.values_mut() {
+        c.fill = FillMode::OneShot;
+        c.length = c.length.min(lens[&c.asset_id] - c.source_offset);
+    }
+    // one mono track colored, the stereo bed (two AAF tracks, L and R) colored, any other left alone
+    let mut by_name: Vec<(String, Option<String>)> = vec![];
+    for t in st.tracks.values_mut() {
+        t.color = match t.channels {
+            2 => Some("#2e8b57".into()),
+            _ if t.name.contains("glass") => Some("#c0392b".into()),
+            _ => None,
+        };
+        by_name.push((t.name.clone(), t.color.clone()));
+    }
+    by_name.sort();
+    assert!(by_name.iter().filter(|x| x.1.is_some()).count() == 2, "{by_name:?}");
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.aaf = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+    let (mut s2, root2) = session("aafcolor2", "24", "01:00:00:00");
+    s2.edit("i", |st| import(st, &aaf, &opts(&root2))).unwrap();
+    let mut got: Vec<(String, Option<String>)> = s2.state.tracks.values().map(|t| (t.name.clone(), t.color.clone())).collect();
+    got.sort();
+    assert_eq!(got, by_name, "each track's color (the stereo pair's as one), none where there was none");
+}
