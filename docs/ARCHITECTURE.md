@@ -264,6 +264,8 @@ Buses come back three ways:
 - **`auto` into a project whose bus has its own level:** it folds, keeping that level and automation
   and creating no buses.
 - **`buses` forced:** the file's lanes within its range, the project's beyond it.
+- **AAF at another rate and place:** into a 44.1 kHz project, placed 10 s in, a bus level, its
+  lane and the master balance land at the same moments, lined up with the clip.
 - **Back into the project it came from (OTIO and AAF):** all buses match and are left as they
   were (same plugin slot, nothing added to their lanes, no duplicate buses). The new tracks sit on
   the same buses with their own fader, lanes and clip gain. After a bus has changed, `auto` folds

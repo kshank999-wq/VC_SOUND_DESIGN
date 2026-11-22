@@ -628,3 +628,60 @@ fn importing_our_aaf_back_into_its_project_keeps_the_buses_as_they_are() {
     let c2 = st.clips.values().find(|x| x.track_id == t2.id).unwrap();
     assert!((c2.gain_db + 6.0).abs() < 1e-3, "its own clip gain, not the folded −9 dB: {}", c2.gain_db);
 }
+
+#[test]
+fn bus_levels_from_our_aaf_keep_their_timing_at_another_rate_and_place() {
+    let (mut s, root) = session("aafbusrate", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let c = st.clips.values().find(|c| !c.muted).unwrap().clone();
+    let t0 = c.timeline_start;
+    let bus = st.tracks[&c.track_id].bus_id.clone();
+    let bus_name = st.buses[&bus].name.clone();
+    st.buses.get_mut(&bus).unwrap().gain_db = -2.0;
+    editing::set_automation(st, &bus, AutomationParam::VolumeDb, t0, 0.0).unwrap();
+    editing::set_automation(st, &bus, AutomationParam::VolumeDb, t0 + 24_000, -8.0).unwrap();
+    let master = st.buses.values().find(|b| b.parent_id.is_none()).unwrap().id.clone();
+    editing::set_automation(st, &master, AutomationParam::Pan, t0 + 48_000, 0.3).unwrap();
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.aaf = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+    let (start, _) = export::resolve_range(&s.state, &export::ExportRange::All).unwrap();
+
+    // a 44.1 kHz project, the composition placed 10 s in
+    let root2 = tmp("aafbusrate2");
+    let mut s2 = state::Session::create(
+        &root2,
+        NewProject {
+            name: "44.1".into(),
+            frame_rate: FrameRate::parse("24").unwrap(),
+            sample_rate: 44_100,
+            start_tc: "01:00:00:00".into(),
+        },
+    )
+    .unwrap();
+    let at = 10 * 44_100;
+    let o2 = AafImportOptions { at: Some(at), ..opts(&root2) };
+    let rep = s2.edit("i", |st| import(st, &aaf, &o2)).unwrap();
+    assert_eq!(rep.bus_levels, "buses", "{rep:?}");
+    let st2 = &s2.state;
+    let named = |n: &str| st2.buses.values().find(|b| b.name == n).unwrap();
+    let conv = |x: i64| at + ((x - start) as f64 * 44_100.0 / 48_000.0).round() as i64;
+    let lane = |owner: &str, p: AutomationParam| {
+        let mut v: Vec<(i64, f32)> =
+            st2.automation.values().filter(|a| a.owner_id == owner && a.param == p).map(|a| (a.sample, a.value)).collect();
+        v.sort_by_key(|x| x.0);
+        v
+    };
+    assert_eq!(named(&bus_name).gain_db, -2.0);
+    assert_eq!(lane(&named(&bus_name).id, AutomationParam::VolumeDb), vec![(conv(t0), 0.0), (conv(t0 + 24_000), -8.0)]);
+    assert_eq!(lane(&named("Review Mix").id, AutomationParam::Pan), vec![(conv(t0 + 48_000), 0.3)]);
+    let c2 = st2.clips.values().next().unwrap();
+    assert_eq!(c2.timeline_start, conv(t0), "the clip and its bus's lanes still line up");
+}
