@@ -636,7 +636,7 @@ fn importing_our_aaf_back_into_its_project_keeps_the_buses_as_they_are() {
     assert!(rep.buses_matched >= 2, "{rep:?}");
     let st = &s.state;
     assert_eq!(st.automation.len(), before, "nothing added to the buses (the track has no lanes)");
-    let t2 = st.tracks.values().find(|t| t.folder == "Back").unwrap();
+    let t2 = st.tracks.values().find(|t| vcsd_core::editing::in_folder(&t.folder, "Back")).unwrap();
     assert_eq!((t2.bus_id.as_str(), t2.gain_db), (bus.as_str(), -3.0), "on its bus, with its own fader");
     let c2 = st.clips.values().find(|x| x.track_id == t2.id).unwrap();
     assert!((c2.gain_db + 6.0).abs() < 1e-3, "its own clip gain, not the folded −9 dB: {}", c2.gain_db);
@@ -842,5 +842,55 @@ fn solo_comes_back_from_our_aaf_and_says_when_it_silences_the_project() {
     let rep = s3.edit("b", |st| import(st, &soloed, &opts(&root3))).unwrap();
     assert_eq!(rep.soloed_tracks, 1);
     assert!(rep.notes.iter().any(|n| n.starts_with("solo restored on imported tracks")), "{:?}", rep.notes);
-    assert!(s3.state.tracks.values().filter(|t| t.folder == "Other").all(|t| !t.solo));
+    assert!(s3.state.tracks.values().filter(|t| vcsd_core::editing::in_folder(&t.folder, "Other")).all(|t| !t.solo));
+}
+
+#[test]
+fn track_folders_and_order_come_back_from_our_aaf() {
+    let (mut s, root) = session("aaforder", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:06:00", "wind exterior", None);
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:05:00", "01:00:05:00", "door slam", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let lens: std::collections::HashMap<String, i64> = st.assets.values().map(|a| (a.id.clone(), a.length_samples)).collect();
+    for c in st.clips.values_mut() {
+        c.fill = FillMode::OneShot;
+        c.length = c.length.min(lens[&c.asset_id] - c.source_offset);
+    }
+    // the project's layout: tracks in more than one folder, a custom order
+    let mut ids: Vec<String> = st.tracks.keys().cloned().collect();
+    ids.sort();
+    st.tracks.get_mut(&ids[0]).unwrap().folder = "Reel A/Specials".into();
+    for (k, id) in ids.iter().rev().enumerate() {
+        st.tracks.get_mut(id).unwrap().order = k as u32;
+    }
+    let mut want: Vec<(String, String)> = st.tracks.values().map(|t| (t.folder.clone(), t.name.clone())).collect();
+    want.sort();
+    let mut sorted: Vec<&Track> = st.tracks.values().collect();
+    sorted.sort_by(|a, b| (&a.folder, a.order, &a.name).cmp(&(&b.folder, b.order, &b.name)));
+    let want_order: Vec<String> = sorted.iter().map(|t| t.name.clone()).collect();
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.aaf = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+
+    let (mut s2, root2) = session("aaforder2", "24", "01:00:00:00");
+    s2.edit("a", |st| import(st, &aaf, &AafImportOptions { folder: Some("Earlier".into()), ..opts(&root2) })).unwrap();
+    let before = s2.state.tracks.values().map(|t| t.order).max().unwrap();
+    let rep = s2.edit("b", |st| import(st, &aaf, &opts(&root2))).unwrap();
+    let st2 = &s2.state;
+    let base = format!("AAF/{}", rep.composition.replace('/', " & "));
+    let mut got: Vec<&Track> = rep.tracks.iter().map(|t| &st2.tracks[t]).collect();
+    let mut layout: Vec<(String, String)> =
+        got.iter().map(|t| (t.folder.strip_prefix(&format!("{base}/")).unwrap_or(&t.folder).to_string(), t.name.clone())).collect();
+    layout.sort();
+    assert_eq!(layout, want, "each track in its own folder, under {base}");
+    got.sort_by_key(|t| t.order);
+    assert_eq!(got.iter().map(|t| t.name.clone()).collect::<Vec<_>>(), want_order, "the project's order");
+    assert!(got.iter().all(|t| t.order > before), "after the existing tracks");
 }

@@ -1620,7 +1620,11 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
             bus_id,
             channels: if stereo { 2 } else { 1 },
             order,
-            folder: folder.clone(),
+            // our own export: its folder rebuilt under the import's (slot order kept)
+            folder: match meta["folder"].as_str().map(crate::editing::normalize_folder).filter(|f| !f.is_empty()) {
+                Some(sub) => crate::editing::normalize_folder(&format!("{folder}/{sub}")),
+                None => folder.clone(),
+            },
             gain_db: 0.0,
             pan: 0.0,
             // silenced on export: its own mute when its buses come back (a muted bus is

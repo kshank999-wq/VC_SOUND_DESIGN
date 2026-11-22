@@ -1281,6 +1281,8 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                 "muted": t.mute,
                 // monitoring state: every track is exported audible; this restores the flag
                 "solo": t.solo,
+                // where it sits in the project: its folder and position there
+                "folder": t.folder, "order": t.order,
                 "muted_clips": audio_slots[i].2.iter().filter(|p| p.muted).map(|p| serde_json::json!([p.at - start, p.len])).collect::<Vec<_>>(),
                 "volume_db": lane(AutomationParam::VolumeDb),
                 "pan_automation": lane(AutomationParam::Pan),
