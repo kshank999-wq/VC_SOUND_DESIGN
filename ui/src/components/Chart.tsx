@@ -84,6 +84,7 @@ export function QaExport({ eng }: { eng: EngineHook }) {
   const [aaf, setAaf] = useState(false);
   const [aafPrint, setAafPrint] = useState(false);
   const [otio, setOtio] = useState(false);
+  const [withMuted, setWithMuted] = useState(false);
   const [result, setResult] = useState<{ dir: string; files: number; qa: QaIssue[]; aaf?: string | null; otio?: string | null } | null>(null);
   const interchange = aaf || otio;
   const [busy, setBusy] = useState(false);
@@ -91,7 +92,7 @@ export function QaExport({ eng }: { eng: EngineHook }) {
   const errs = qa?.filter((i) => i.severity === "error").length ?? 0;
   const doExport = async (force: boolean) => {
     setBusy(true);
-    const r = await run<{ dir: string; files: number; qa: QaIssue[]; aaf: string | null; otio: string | null }>("export.run", { profile, scene_id: scene || undefined, handles_ms: handles, float, force, aaf, otio, aaf_print_plugins: interchange && aafPrint }, "Export complete");
+    const r = await run<{ dir: string; files: number; qa: QaIssue[]; aaf: string | null; otio: string | null }>("export.run", { profile, scene_id: scene || undefined, handles_ms: handles, float, force, aaf, otio, aaf_print_plugins: interchange && aafPrint, include_muted: interchange && withMuted }, "Export complete");
     setBusy(false);
     if (r) setResult(r);
   };
@@ -136,6 +137,9 @@ export function QaExport({ eng }: { eng: EngineHook }) {
             </label>
             <label className={"small aaf-opt sub" + (interchange ? "" : " muted")} title="AAF and OTIO can't carry VST3/AU plugins or insert effects. With this on, tracks that use them are rendered with them (and their parameter automation), pre-fader, and placed in the AAF/OTIO as one clip each, so they sound right in the receiving app. Their fader, volume, pan and bus levels stay editable; their clips don't.">
               <input type="checkbox" disabled={!interchange} checked={interchange && aafPrint} onChange={(e) => setAafPrint(e.target.checked)} /> Print tracks with plugins
+            </label>
+            <label className={"small aaf-opt sub" + (interchange ? "" : " muted")} title="Muted tracks, tracks on muted buses and muted clips are normally left out of the AAF/OTIO. With this on they're kept, silent: a zero gain around them in the AAF, disabled in the OTIO. Other apps hear silence (and can turn them up); VC Sound Design's own import brings them back muted, on their muted buses, with their levels.">
+              <input type="checkbox" disabled={!interchange} checked={interchange && withMuted} onChange={(e) => setWithMuted(e.target.checked)} /> Include muted tracks (silent)
             </label>
           </div>
           <div className="btns">

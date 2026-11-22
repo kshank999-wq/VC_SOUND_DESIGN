@@ -100,6 +100,21 @@ inserts with their plugins' parameter automation. Other apps show the comment or
 | Plugins, insert effects and plugin parameter automation (option "print tracks with plugins") | AAF can't carry VST3/AU plugins, so tracks with active inserts are rendered pre-fader (clips → inserts with their automation and delay compensation) to `AAF/Media/*_print.wav` and linked as one clip each. Their fader, volume, pan and bus levels stay editable around the print; their clips don't |
 | Start timecode, frame rate, drop frame | Timecode track |
 
+**Muted material** (option "Include muted tracks (silent)", `include_muted`, `--include-muted`;
+AAF and OTIO). Muted tracks, tracks on muted buses and muted clips are normally left out. With the
+option they're kept, silent:
+- In the AAF, a zero Mono Audio Gain sits around each track or clip, outside its own gain and pan,
+  so its levels survive. The "VCSD" comment records which tracks are silenced, each one's own
+  mute, and its muted clips.
+- In the OTIO they're `enabled: false`, OTIO's own mute, with the track's own mute in its
+  metadata.
+
+Other apps hear silence and can lift it. Our imports bring them back muted with their levels:
+- Restoring buses: a muted bus comes back muted, and the tracks on it keep their own mute.
+- Folding bus levels: every silent track comes in muted.
+- In both cases a silencing zero gain is dropped, not read as −∞. Zero gains in other AAFs are
+  silence as before.
+
 **Not carried** (listed in `AAF/aaf_report.json`, the README and delivery QA; all of it is in the
 rendered audio): plugins and insert effects on buses, and on tracks unless printed, with
 their automation, bus routing and bus gain, loop crossfades, muted tracks and clips (left out), and the right channel of stereo

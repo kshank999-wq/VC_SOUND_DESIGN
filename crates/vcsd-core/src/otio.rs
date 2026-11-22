@@ -38,6 +38,9 @@ pub struct OtioOptions {
     pub exclude_temp_refs: bool,
     /// Tracks rendered with their plugins and insert effects, by track id.
     pub prints: BTreeMap<String, AafMedia>,
+    /// Keep muted tracks, tracks on muted buses and muted clips, disabled
+    /// (`enabled: false`, which editors play as muted).
+    pub include_muted: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -328,24 +331,33 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     tracks.sort_by(|a, b| (&a.folder, a.order, &a.name).cmp(&(&b.folder, b.order, &b.name)));
     let mut children = vec![];
     for t in tracks {
-        if bus_muted(s, &t.bus_id) {
+        let bus_off = bus_muted(s, &t.bus_id);
+        if bus_off && !o.include_muted {
             losses.add("tracks on muted buses left out", 1);
             continue;
         }
-        if t.mute {
+        if t.mute && !o.include_muted {
             losses.add("muted tracks left out", 1);
             continue;
         }
+        // kept on request, silent: disabled (its own mute, or its bus's, in our metadata)
+        let silenced = bus_off || t.mute;
+        if silenced {
+            losses.add("muted tracks and tracks on muted buses included, disabled", 1);
+        }
         let mut pieces: Vec<Piece> = vec![];
         if printed(&t.id) {
-            pieces.push(Piece { at: start, len, source: 0, fade_in: 0, fade_out: 0, gain: 1.0, asset: print_key(&t.id) });
+            pieces.push(Piece { at: start, len, source: 0, fade_in: 0, fade_out: 0, gain: 1.0, asset: print_key(&t.id), muted: false });
         } else {
             let mut clips: Vec<&ClipInstance> = s.clips.values().filter(|c| c.track_id == t.id).collect();
             clips.sort_by(|a, b| (a.timeline_start, &a.id).cmp(&(b.timeline_start, &b.id)));
             for c in clips {
-                if c.muted {
+                if c.muted && !o.include_muted {
                     losses.add("muted clips left out", 1);
                     continue;
+                }
+                if c.muted {
+                    losses.add("muted clips included, disabled", 1);
                 }
                 let Some(a) = s.assets.get(&c.asset_id) else { continue };
                 if o.exclude_temp_refs && a.license.as_ref().is_some_and(|l| l.temp_reference) {
@@ -427,7 +439,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                     } else {
                         json!([])
                     },
-                    "markers": [], "enabled": true,
+                    "markers": [], "enabled": !p.muted,
                     "media_references": { "DEFAULT_MEDIA": {
                         "OTIO_SCHEMA": "ExternalReference.1",
                         "metadata": { "vcsd": { "channels": m.channels } },
@@ -464,13 +476,15 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                     "bus": bus, "gain_db": t.gain_db, "pan": t.pan, "printed": printed(&t.id),
                     // true: the effects carry bus levels too (what the track sounds like), the raw values don't
                     "bus_folded": bus_folded,
+                    // the track's own mute (a disabled track may only be on a muted bus)
+                    "mute": t.mute,
                     "bus_id": t.bus_id,
                     // automation: [offset in samples from the timeline start, value]
                     "volume_db": points(AutomationParam::VolumeDb),
                     "pan_automation": points(AutomationParam::Pan),
                 } },
                 "name": name,
-                "source_range": null, "effects": effects.clone(), "markers": [], "enabled": true,
+                "source_range": null, "effects": effects.clone(), "markers": [], "enabled": !silenced,
                 "children": items,
                 "kind": "Audio",
             }));

@@ -1647,6 +1647,7 @@ impl Engine {
                 // printing on its own (an older client) means the AAF
                 o.aaf = ob(a, "aaf") || (ob(a, "aaf_print_plugins") && !o.otio);
                 o.aaf_print_plugins = ob(a, "aaf_print_plugins");
+                o.include_muted = ob(a, "include_muted");
                 if ob(a, "float") {
                     o.format = wav::SampleFormat::Float32;
                 }

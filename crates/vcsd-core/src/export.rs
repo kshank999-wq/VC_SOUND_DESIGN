@@ -77,6 +77,10 @@ pub struct ExportOptions {
     /// Also write an OpenTimelineIO file of the editable timeline (`OTIO/`).
     /// Shares the linked media (and prints, with `aaf_print_plugins`) with the AAF.
     pub otio: bool,
+    /// In the AAF/OTIO, keep muted tracks, tracks on muted buses and muted clips,
+    /// silent (a zero gain in the AAF, disabled in the OTIO), so VC Sound Design's
+    /// own import brings them back muted. Off: they're left out.
+    pub include_muted: bool,
 }
 
 impl ExportOptions {
@@ -94,6 +98,7 @@ impl ExportOptions {
             aaf: false,
             aaf_print_plugins: false,
             otio: false,
+            include_muted: false,
         }
     }
 }
@@ -307,8 +312,8 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
         let used: Vec<String> = st
             .clips
             .values()
-            .filter(|c| !c.muted && c.timeline_start < end && c.end() > start)
-            .filter(|c| st.tracks.get(&c.track_id).is_some_and(|t| !t.mute))
+            .filter(|c| (o.include_muted || !c.muted) && c.timeline_start < end && c.end() > start)
+            .filter(|c| st.tracks.get(&c.track_id).is_some_and(|t| o.include_muted || !t.mute))
             .map(|c| c.asset_id.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -369,7 +374,14 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
                 st,
                 &dir.join(&rel),
                 &media,
-                &crate::aaf::AafOptions { name: label.clone(), start, end, exclude_temp_refs: o.exclude_temp_refs, prints: prints.clone() },
+                &crate::aaf::AafOptions {
+                    name: label.clone(),
+                    start,
+                    end,
+                    exclude_temp_refs: o.exclude_temp_refs,
+                    prints: prints.clone(),
+                    include_muted: o.include_muted,
+                },
             )?;
             r.file = rel.clone();
             r.losses.extend(notes.clone());
@@ -386,7 +398,14 @@ pub fn export(s: &mut ProjectState, root: Option<&Path>, o: &ExportOptions) -> R
                 st,
                 &dir.join(&rel),
                 &media,
-                &crate::otio::OtioOptions { name: label, start, end, exclude_temp_refs: o.exclude_temp_refs, prints },
+                &crate::otio::OtioOptions {
+                    name: label,
+                    start,
+                    end,
+                    exclude_temp_refs: o.exclude_temp_refs,
+                    prints,
+                    include_muted: o.include_muted,
+                },
             )?;
             r.file = rel.clone();
             r.losses.extend(notes);

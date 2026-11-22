@@ -83,7 +83,14 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
         st,
         &file,
         &media,
-        &AafOptions { name: "Gravel Road — scene 1".into(), start, end, exclude_temp_refs: false, prints: Default::default() },
+        &AafOptions {
+            name: "Gravel Road — scene 1".into(),
+            start,
+            end,
+            exclude_temp_refs: false,
+            prints: Default::default(),
+            include_muted: false,
+        },
     )
     .unwrap();
     assert!(rep.losses.iter().any(|l| l.starts_with("muted tracks left out (1)")), "{:?}", rep.losses);
@@ -380,9 +387,13 @@ fn bus_levels_and_automation_are_folded_into_each_track() {
     let used: Vec<String> = st.clips.values().map(|c| c.asset_id.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     let (media, _) = aaf::prepare_media(st, &used, &root.join("Exports/aafbus/Media")).unwrap();
     let file = root.join("Exports/aafbus/bus.aaf");
-    let rep =
-        aaf::write(st, &file, &media, &AafOptions { name: "bus".into(), start, end, exclude_temp_refs: false, prints: Default::default() })
-            .unwrap();
+    let rep = aaf::write(
+        st,
+        &file,
+        &media,
+        &AafOptions { name: "bus".into(), start, end, exclude_temp_refs: false, prints: Default::default(), include_muted: false },
+    )
+    .unwrap();
     assert!(!rep.losses.iter().any(|l| l.contains("automation not carried")), "{:?}", rep.losses);
     assert!(rep.losses.iter().any(|l| l.starts_with("bus routing not carried: tracks are flat, with bus levels")));
     assert!(rep.losses.iter().any(|l| l.starts_with("bus balance on mono tracks folded") && l.ends_with("(1)")), "{:?}", rep.losses);

@@ -528,6 +528,8 @@ pub(crate) struct Piece {
     pub(crate) fade_out: i64,
     pub(crate) gain: f32,
     pub(crate) asset: String,
+    /// A muted clip kept (silenced) for VC Sound Design's own import.
+    pub(crate) muted: bool,
 }
 
 fn piece_obj(p: &Piece, master: &[u8], channel: u32) -> Obj {
@@ -538,16 +540,17 @@ fn piece_obj(p: &Piece, master: &[u8], channel: u32) -> Obj {
     if p.fade_out > 0 {
         clip = clip.data(0x1204, "FadeOutLength", i64v(p.fade_out)).data(0x1205, "FadeOutType", u8v(1));
     }
-    if (p.gain - 1.0).abs() < 1e-6 {
-        return clip;
-    }
+    let constant =
+        |g: f64| Obj::new(class::CONSTANT_VALUE).data(0x4c01, "Definition", hex(key::PARAM_AMPLITUDE)).data(0x4d01, "Value", amplitude(g));
     // clip gain: Mono Audio Gain with a constant Amplitude
-    let cv = Obj::new(class::CONSTANT_VALUE).data(0x4c01, "Definition", hex(key::PARAM_AMPLITUDE)).data(
-        0x4d01,
-        "Value",
-        amplitude(p.gain as f64),
-    );
-    gain_group(p.len, clip, cv)
+    let clip = if (p.gain - 1.0).abs() < 1e-6 { clip } else { gain_group(p.len, clip, constant(p.gain as f64)) };
+    // a muted clip (kept on request): silenced by a zero gain of its own, outside its
+    // clip gain, so other apps hear silence and the clip gain survives
+    if p.muted {
+        gain_group(p.len, clip, constant(0.0))
+    } else {
+        clip
+    }
 }
 
 /// An indirect Rational amplitude value (linear gain).
@@ -946,6 +949,9 @@ pub struct AafOptions {
     /// Tracks rendered with their plugins and insert effects (pre-fader), by
     /// track id: each goes into the AAF as one clip of this file.
     pub prints: BTreeMap<String, AafMedia>,
+    /// Keep muted tracks, tracks on muted buses and muted clips, silenced (a zero
+    /// gain around them), so VC Sound Design's own import can bring them back muted.
+    pub include_muted: bool,
 }
 
 #[derive(Default)]
@@ -974,6 +980,7 @@ pub(crate) fn clip_pieces(s: &ProjectState, c: &ClipInstance, track_gain_db: f32
         fade_out,
         gain,
         asset: c.asset_id.clone(),
+        muted: c.muted,
     };
     if c.fill == FillMode::OneShot {
         return vec![one(c.timeline_start, c.length, c.source_offset, c.fade_in, c.fade_out)];
@@ -1075,18 +1082,25 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     // (name, source channel, pieces, owning track)
     let mut audio_slots: Vec<(String, u32, Vec<Piece>, String)> = vec![];
     let mut clip_count = 0;
+    // tracks kept silenced (muted, or on a muted bus) when asked to include them
+    let mut silenced: std::collections::BTreeSet<String> = Default::default();
     for t in tracks {
-        if BusChain::of(s, &t.bus_id).muted {
+        let bus_off = BusChain::of(s, &t.bus_id).muted;
+        if bus_off && !o.include_muted {
             losses.add("tracks on muted buses left out", 1);
             continue;
         }
-        if t.mute {
+        if t.mute && !o.include_muted {
             losses.add("muted tracks left out", 1);
             continue;
         }
+        if bus_off || t.mute {
+            losses.add("muted tracks and tracks on muted buses included, silenced by a zero gain around the track", 1);
+            silenced.insert(t.id.clone());
+        }
         if printed(&t.id) {
             // one clip of the track's render, across the range, on one layer
-            let p = Piece { at: start, len, source: 0, fade_in: 0, fade_out: 0, gain: 1.0, asset: print_key(&t.id) };
+            let p = Piece { at: start, len, source: 0, fade_in: 0, fade_out: 0, gain: 1.0, asset: print_key(&t.id), muted: false };
             clip_count += 1;
             let chans = t.channels.clamp(1, 2) as u32;
             for ch in 1..=chans {
@@ -1102,9 +1116,12 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         let mut clips: Vec<&ClipInstance> = s.clips.values().filter(|c| c.track_id == t.id).collect();
         clips.sort_by(|a, b| (a.timeline_start, &a.id).cmp(&(b.timeline_start, &b.id)));
         for c in clips {
-            if c.muted {
+            if c.muted && !o.include_muted {
                 losses.add("muted clips left out", 1);
                 continue;
+            }
+            if c.muted {
+                losses.add("muted clips included, silenced by a zero gain around the clip", 1);
             }
             let Some(a) = s.assets.get(&c.asset_id) else { continue };
             if o.exclude_temp_refs && a.license.as_ref().is_some_and(|l| l.temp_reference) {
@@ -1204,6 +1221,11 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         if let Some(p) = &mix.pan {
             seq = effect(key::OP_MONO_AUDIO_PAN, key::PARAM_PAN, len, seq, p.param(key::PARAM_PAN, len, start));
         }
+        // muted (kept on request): a zero gain outside its own levels, which stay intact
+        if silenced.contains(tid) {
+            seq =
+                effect(key::OP_MONO_AUDIO_GAIN, key::PARAM_AMPLITUDE, len, seq, Curve::Const(0.0).param(key::PARAM_AMPLITUDE, len, start));
+        }
         let mut sl = slot(i as u32 + 2, name, (sr, 1), seq);
         sl.props.push((0x4804, "PhysicalTrackNumber", Val::Data(u32v(i as u32 + 1))));
         slots.push(sl);
@@ -1249,6 +1271,11 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                 "bus_id": t.bus_id, "gain_db": t.gain_db, "pan": t.pan,
                 // unprinted tracks have their fader folded into clip gain; printed ones into the track gain
                 "printed": printed(tid),
+                // kept though silent: the track's own mute (else its bus is muted), and its
+                // muted clips [offset from the range start, length]
+                "silenced": silenced.contains(tid),
+                "muted": t.mute,
+                "muted_clips": audio_slots[i].2.iter().filter(|p| p.muted).map(|p| serde_json::json!([p.at - start, p.len])).collect::<Vec<_>>(),
                 "volume_db": lane(AutomationParam::VolumeDb),
                 "pan_automation": lane(AutomationParam::Pan),
                 // its inserts and their plugins' automation (not applied by other apps; a

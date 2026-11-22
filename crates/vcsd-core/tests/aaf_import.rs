@@ -685,3 +685,109 @@ fn bus_levels_from_our_aaf_keep_their_timing_at_another_rate_and_place() {
     let c2 = st2.clips.values().next().unwrap();
     assert_eq!(c2.timeline_start, conv(t0), "the clip and its bus's lanes still line up");
 }
+
+/// A muted glass track (−3 dB fader, −6 dB clip), the wind on a muted bus, and a muted
+/// door clip on an unmuted track. Returns the session, the AAF (with or without the
+/// muted material) and the three clips' timeline starts.
+fn muted_aaf(name: &str, include_muted: bool) -> (state::Session, std::path::PathBuf, [i64; 3], String) {
+    let (mut s, root) = session(name, "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:06:00", "wind exterior", None);
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:05:00", "01:00:05:00", "door slam", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let lens: std::collections::HashMap<String, i64> = st.assets.values().map(|a| (a.id.clone(), a.length_samples)).collect();
+    for c in st.clips.values_mut() {
+        c.fill = FillMode::OneShot;
+        c.length = c.length.min(lens[&c.asset_id] - c.source_offset);
+    }
+    let clip_of = |st: &ProjectState, what: &str| {
+        let cue = st.cues.values().find(|c| c.description.contains(what)).unwrap().id.clone();
+        st.clips.values().find(|c| c.cue_id.as_deref() == Some(cue.as_str()) && !c.muted).unwrap().id.clone()
+    };
+    let (glass, wind, door) = (clip_of(st, "glass"), clip_of(st, "wind"), clip_of(st, "door"));
+    st.clips.get_mut(&glass).unwrap().gain_db = -6.0;
+    let gt = st.clips[&glass].track_id.clone();
+    let t = st.tracks.get_mut(&gt).unwrap();
+    t.gain_db = -3.0;
+    t.mute = true;
+    let wbus = st.tracks[&st.clips[&wind].track_id].bus_id.clone();
+    let wbus_name = st.buses[&wbus].name.clone();
+    st.buses.get_mut(&wbus).unwrap().mute = true;
+    let d = st.clips.get_mut(&door).unwrap();
+    d.muted = true;
+    d.gain_db = -4.0;
+    let starts = [glass, wind, door].map(|c| st.clips[&c].timeline_start);
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.aaf = true;
+    o.force = true;
+    o.include_muted = include_muted;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+    (s, aaf, starts, wbus_name)
+}
+
+#[test]
+fn muted_tracks_kept_silent_in_our_aaf_come_back_muted() {
+    let (s, aaf, [g0, w0, d0], wbus_name) = muted_aaf("aafmuted", true);
+    let gname = s.state.tracks.values().find(|t| t.mute).unwrap().name.clone();
+
+    // other apps: the muted track and the muted bus's track sit inside a zero gain
+    if let Some(py) = python() {
+        let code = r#"
+import sys, aaf2
+f = aaf2.open(sys.argv[1], 'r')
+m = next(f.content.compositionmobs())
+for sl in m.slots:
+    seg = sl.segment
+    if seg.classdef.class_name == 'OperationGroup':
+        ps = [p for _, p in seg['Parameters'].items()]
+        if ps and hasattr(ps[0], 'value') and float(ps[0].value) == 0.0:
+            print(sl.name)
+"#;
+        let out = std::process::Command::new(&py).args(["-c", code]).arg(&aaf).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let silent = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(silent.lines().any(|l| l == gname), "the muted track silenced: {silent}");
+        assert!(silent.lines().filter(|l| l.contains("wind")).count() == 2, "the muted bus's stereo track (L and R) silenced: {silent}");
+    }
+
+    // our import, restoring the buses: muted as it was, levels intact
+    let (mut s2, root2) = session("aafmuted2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &aaf, &opts(&root2))).unwrap();
+    assert_eq!(rep.bus_levels, "buses", "{rep:?}");
+    let st2 = &s2.state;
+    let clip_at = |t: i64| st2.clips.values().find(|c| c.timeline_start == t).unwrap_or_else(|| panic!("clip at {t}"));
+    let g = clip_at(g0);
+    assert!(st2.tracks[&g.track_id].mute, "the muted track");
+    assert_eq!(st2.tracks[&g.track_id].gain_db, -3.0, "its fader");
+    assert!((g.gain_db + 6.0).abs() < 1e-3, "its clip gain: {}", g.gain_db);
+    let w = clip_at(w0);
+    assert!(!st2.tracks[&w.track_id].mute, "the wind's track itself isn't muted…");
+    let wb = &st2.buses[&st2.tracks[&w.track_id].bus_id];
+    assert!(wb.mute && wb.name == wbus_name, "…its bus is, and comes back muted");
+    let d = clip_at(d0);
+    assert!(d.muted, "the muted clip");
+    assert!((d.gain_db + 4.0).abs() < 1e-3, "with its clip gain: {}", d.gain_db);
+    assert!(!st2.tracks[&d.track_id].mute);
+
+    // folding the bus levels: everything that was silent stays silent, levels intact
+    let (mut s3, root3) = session("aafmuted3", "24", "01:00:00:00");
+    let fold = AafImportOptions { buses: vcsd_core::otio_import::BusLevels::Fold, ..opts(&root3) };
+    s3.edit("i", |st| import(st, &aaf, &fold)).unwrap();
+    let st3 = &s3.state;
+    let at3 = |t: i64| st3.clips.values().find(|c| c.timeline_start == t).unwrap();
+    assert!(st3.tracks[&at3(g0).track_id].mute && st3.tracks[&at3(w0).track_id].mute, "both silent tracks muted");
+    assert!(st3.tracks.values().all(|t| t.gain_db > -90.0), "no −∞ from the silencing gain");
+    assert!(at3(d0).muted);
+
+    // without the option they're left out, as before
+    // (all three are silent here, so the AAF has nothing to import)
+    let (_, plain, _, _) = muted_aaf("aafmuted4", false);
+    let (mut s4, root4) = session("aafmuted5", "24", "01:00:00:00");
+    let err = s4.edit("i", |st| import(st, &plain, &opts(&root4))).unwrap_err().to_string();
+    assert!(err.contains("nothing to import"), "left out: {err}");
+}

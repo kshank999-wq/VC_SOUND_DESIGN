@@ -1083,7 +1083,12 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 folder: folder.clone(),
                 gain_db: if raw { tv["gain_db"].as_f64().unwrap_or(0.0) as f32 } else { 0.0 },
                 pan: if raw { tv["pan"].as_f64().unwrap_or(0.0).clamp(-1.0, 1.0) as f32 } else { 0.0 },
-                mute: lane.muted,
+                // restored onto its buses: its own mute (a disabled track may only have been on a
+                // muted bus, which comes back muted itself); otherwise silent as it was
+                mute: match (&routed, tv["mute"].as_bool()) {
+                    (Some(_), Some(m)) => m,
+                    _ => lane.muted,
+                },
                 solo: false,
                 armed: false,
                 frozen_asset_id: None,

@@ -193,6 +193,10 @@ enum Cmd {
         /// Also write an OpenTimelineIO file of the editable timeline (OTIO/)
         #[arg(long)]
         otio: bool,
+        /// In the AAF/OTIO, keep muted tracks, tracks on muted buses and muted clips,
+        /// silent (for VC Sound Design's own import to bring back muted)
+        #[arg(long)]
+        include_muted: bool,
     },
     /// Relink missing media by content hash
     Relink { dir: PathBuf, search: Vec<PathBuf> },
@@ -606,7 +610,7 @@ fn run(cli: Cli) -> Result<()> {
             let v = qa::run(&s.state, &qa::QaOptions { verify_hashes: hashes, exclude_temp_refs: true });
             print!("{}", qa::to_markdown(&v));
         }
-        Cmd::Export { dir, profile, scene, handles_ms, float, force, date, out, aaf, aaf_print_plugins, otio } => {
+        Cmd::Export { dir, profile, scene, handles_ms, float, force, date, out, aaf, aaf_print_plugins, otio, include_muted } => {
             let mut s = open(&dir)?;
             let mut o = ExportOptions::new(ExportProfile::parse(&profile)?, &date.unwrap_or_else(today));
             o.handle_samples = handles_ms as i64 * s.state.project.sample_rate as i64 / 1000;
@@ -615,6 +619,7 @@ fn run(cli: Cli) -> Result<()> {
             o.otio = otio;
             o.aaf = aaf || (aaf_print_plugins && !otio);
             o.aaf_print_plugins = aaf_print_plugins;
+            o.include_muted = include_muted;
             if float {
                 o.format = wav::SampleFormat::Float32;
             }

@@ -451,6 +451,9 @@ struct RawClip {
     fade_in: i64,
     fade_out: i64,
     gain: f64,
+    /// Inside a zero clip gain: silenced on export (a muted clip) or genuinely at −∞.
+    zeroed: bool,
+    muted: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -461,6 +464,8 @@ struct Lane {
     clips: Vec<RawClip>,
     gains: Vec<Span>,
     pans: Vec<Span>,
+    /// Zero gains around the track: our export silencing it, or genuinely silent.
+    zero_spans: Vec<Span>,
 }
 
 impl Lane {
@@ -494,6 +499,8 @@ struct Walk<'a> {
     rate: Rate,
     sr: Rate,
     pending_in: i64,
+    /// Walking inside a clip's zero gain.
+    zero_clip: bool,
     notes: &'a mut Notes,
 }
 
@@ -709,7 +716,7 @@ impl Content {
             let fade_in = w.smp(n.i64(0x1202).unwrap_or(0)).max(std::mem::take(&mut w.pending_in));
             let fade_out = w.smp(n.i64(0x1204).unwrap_or(0));
             if l > 0 {
-                w.lane.clips.push(RawClip { at, len: l, src, fade_in, fade_out, gain });
+                w.lane.clips.push(RawClip { at, len: l, src, fade_in, fade_out, gain, zeroed: w.zero_clip, muted: false });
             }
         } else if a.is(n, c::OPERATION_GROUP) {
             let op = n.weak(0x0b01).map(hexs).unwrap_or_default();
@@ -739,6 +746,15 @@ impl Content {
             }
             let span = |curve| Span { start: w.smp(pos), end: w.smp(pos + len), curve };
             match curve {
+                // a zero gain: kept apart, since it may be our export silencing a muted clip or
+                // track (the description says which); otherwise it is applied as −∞ later
+                Some(Curve::Const(v)) if is_gain && v == 0.0 && self.clip_level(input) => {
+                    let was = std::mem::replace(&mut w.zero_clip, true);
+                    self.walk(input, pos, gain, w, depth + 1);
+                    w.zero_clip = was;
+                    return;
+                }
+                Some(Curve::Const(v)) if is_gain && v == 0.0 => w.lane.zero_spans.push(span(Curve::Const(0.0))),
                 Some(Curve::Const(v)) if is_gain && self.clip_level(input) => return self.walk(input, pos, gain * v, w, depth + 1),
                 Some(cv) => {
                     let s = span(cv);
@@ -1312,6 +1328,7 @@ fn same_clips(a: &Lane, b: &Lane) -> bool {
                     && x.fade_in == y.fade_in
                     && x.fade_out == y.fade_out
                     && (x.gain - y.gain).abs() < 1e-6
+                    && x.muted == y.muted
                     && sx.file_mob == sy.file_mob
                     && sx.offset == sy.offset
                     && sx.channel == 1
@@ -1373,11 +1390,44 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
         let Some(rate) = Content::slot_rate(sl) else { continue };
         let name = sl.string(0x4802).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("A{}", lanes.len() + 1));
         let slot = sl.u32(0x4801).unwrap_or(0);
-        let mut w = Walk { lane: Lane { name, slot, ..Default::default() }, rate, sr, pending_in: 0, notes: &mut notes };
+        let mut w = Walk { lane: Lane { name, slot, ..Default::default() }, rate, sr, pending_in: 0, zero_clip: false, notes: &mut notes };
         let origin = sl.i64(0x4b02).unwrap_or(0);
         content.walk(&seg, -origin, 1.0, &mut w, 0);
         if !w.lane.clips.is_empty() {
             lanes.push(w.lane);
+        }
+    }
+
+    // VC Sound Design's own description (the composition's "VCSD" comment)
+    let vcsd: serde_json::Value = a
+        .children(&comp, 0x4406)
+        .iter()
+        .find(|t| t.string(0x5001).as_deref() == Some("VCSD"))
+        .and_then(|t| t.data(0x5003).map(<[u8]>::to_vec))
+        .filter(|d| d.len() > 17 && hexs(&d[1..17]) == key::TYPE_STRING)
+        .and_then(|d| serde_json::from_str(&utf16(&d[17..])).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let meta_sr = vcsd["sample_rate"].as_f64().unwrap_or(psr as f64);
+    let from_meta = |v: &serde_json::Value| v.as_f64().map(|x| (x * psr as f64 / meta_sr).round() as i64);
+    let slot_meta = |slot: u32| vcsd["slots"][slot.to_string()].clone();
+    // what our export silenced (kept muted on request) comes back muted, its levels intact;
+    // other zero gains are silence
+    for lane in &mut lanes {
+        let m = slot_meta(lane.slot);
+        if m["silenced"].as_bool() == Some(true) {
+            lane.zero_spans.clear();
+        } else {
+            let z = std::mem::take(&mut lane.zero_spans);
+            lane.gains.extend(z);
+        }
+        let muted: Vec<(i64, i64)> =
+            m["muted_clips"].as_array().into_iter().flatten().filter_map(|c| Some((from_meta(&c[0])?, from_meta(&c[1])?))).collect();
+        for c in lane.clips.iter_mut().filter(|c| c.zeroed) {
+            if muted.iter().any(|&(at, l)| (at - c.at).abs() <= 1 && (l - c.len).abs() <= 1) {
+                c.muted = true;
+            } else {
+                c.gain = 0.0;
+            }
         }
     }
 
@@ -1439,17 +1489,6 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
     let license = License { name: "Editorial media (AAF)".into(), redistributable: true, source: "editorial".into(), ..Default::default() };
     // ---- buses: VC Sound Design's own description (the composition's "VCSD"
     // comment), restored per `o.buses`; otherwise they stay folded into the tracks
-    let vcsd: serde_json::Value = a
-        .children(&comp, 0x4406)
-        .iter()
-        .find(|t| t.string(0x5001).as_deref() == Some("VCSD"))
-        .and_then(|t| t.data(0x5003).map(<[u8]>::to_vec))
-        .filter(|d| d.len() > 17 && hexs(&d[1..17]) == key::TYPE_STRING)
-        .and_then(|d| serde_json::from_str(&utf16(&d[17..])).ok())
-        .unwrap_or(serde_json::Value::Null);
-    let meta_sr = vcsd["sample_rate"].as_f64().unwrap_or(psr as f64);
-    let from_meta = |v: &serde_json::Value| v.as_f64().map(|x| (x * psr as f64 / meta_sr).round() as i64);
-    let slot_meta = |slot: u32| vcsd["slots"][slot.to_string()].clone();
     let exported: Vec<serde_json::Value> = vcsd["buses"].as_array().cloned().unwrap_or_default();
     let track_bus_ids: Vec<String> = planned.iter().filter_map(|p| slot_meta(p.left.slot)["bus_id"].as_str().map(String::from)).collect();
     let track_buses: Vec<&str> = track_bus_ids.iter().map(String::as_str).collect();
@@ -1525,7 +1564,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
                 fade_in: rc.fade_in.min(rc.len),
                 fade_out: rc.fade_out.min(rc.len),
                 fill: FillMode::OneShot,
-                muted: false,
+                muted: rc.muted,
                 take_id: None,
                 performance_event_id: None,
                 sub_index: None,
@@ -1548,7 +1587,9 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
             folder: folder.clone(),
             gain_db: 0.0,
             pan: 0.0,
-            mute: false,
+            // silenced on export: its own mute when its buses come back (a muted bus is
+            // restored muted), else muted as it sounded
+            mute: meta["silenced"].as_bool() == Some(true) && (routed.is_none() || meta["muted"].as_bool() == Some(true)),
             solo: false,
             armed: false,
             frozen_asset_id: None,

@@ -957,3 +957,82 @@ fn importing_back_into_the_project_it_came_from_keeps_its_buses_and_doesnt_doubl
     );
     let _ = parent;
 }
+
+#[test]
+fn muted_tracks_kept_disabled_in_our_otio_come_back_muted() {
+    let (mut s, root) = session("otiomuted", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:06:00", "wind exterior", None);
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:05:00", "01:00:05:00", "door slam", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let st = &mut s.state;
+    let lens: std::collections::HashMap<String, i64> = st.assets.values().map(|a| (a.id.clone(), a.length_samples)).collect();
+    for c in st.clips.values_mut() {
+        c.fill = FillMode::OneShot;
+        c.length = c.length.min(lens[&c.asset_id] - c.source_offset);
+    }
+    let clip_of = |st: &ProjectState, what: &str| {
+        let cue = st.cues.values().find(|c| c.description.contains(what)).unwrap().id.clone();
+        st.clips.values().find(|c| c.cue_id.as_deref() == Some(cue.as_str()) && !c.muted).unwrap().id.clone()
+    };
+    let (glass, wind, door) = (clip_of(st, "glass"), clip_of(st, "wind"), clip_of(st, "door"));
+    let gt = st.clips[&glass].track_id.clone();
+    st.tracks.get_mut(&gt).unwrap().mute = true;
+    st.tracks.get_mut(&gt).unwrap().gain_db = -3.0;
+    let wbus = st.tracks[&st.clips[&wind].track_id].bus_id.clone();
+    st.buses.get_mut(&wbus).unwrap().mute = true;
+    st.clips.get_mut(&door).unwrap().muted = true;
+    let [g0, w0, d0] = [&glass, &wind, &door].map(|c| st.clips[c].timeline_start);
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.otio = true;
+    o.force = true;
+    o.include_muted = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let file = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+
+    // other apps: the tracks and the clip disabled (OTIO's own mute)
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let tracks = raw["tracks"]["children"].as_array().unwrap();
+    let gname = &s.state.tracks[&gt].name;
+    let by_name = |n: &str| tracks.iter().find(|t| t["name"].as_str().unwrap().contains(n)).unwrap_or_else(|| panic!("{n}"));
+    assert_eq!(by_name(gname)["enabled"], false);
+    assert_eq!(by_name("wind")["enabled"], false, "on a muted bus");
+    let disabled_clips = tracks
+        .iter()
+        .flat_map(|t| t["children"].as_array().unwrap())
+        .filter(|c| c["OTIO_SCHEMA"] == "Clip.2" && c["enabled"] == false)
+        .count();
+    assert_eq!(disabled_clips, 1, "the muted clip, disabled (the others play, inside their disabled tracks)");
+    if let Some(py) = python() {
+        let out = std::process::Command::new(&py)
+            .args(["-c", "import sys, opentimelineio as o; t = o.adapters.read_from_file(sys.argv[1]); print(sum(1 for x in t.tracks if not x.enabled))"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "2", "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    // our import, restoring the buses: muted as it was
+    let (mut s2, root2) = session("otiomuted2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root2, &file))).unwrap();
+    assert_eq!(rep.bus_levels, "buses");
+    let st2 = &s2.state;
+    let at = |t: i64| st2.clips.values().find(|c| c.timeline_start == t).unwrap_or_else(|| panic!("clip at {t}"));
+    let g = &st2.tracks[&at(g0).track_id];
+    assert!(g.mute && g.gain_db == -3.0, "the muted track, its fader intact");
+    let w = &st2.tracks[&at(w0).track_id];
+    assert!(!w.mute && st2.buses[&w.bus_id].mute, "the wind's track unmuted, on its muted bus");
+    assert!(at(d0).muted, "the muted clip");
+
+    // folding the buses: both silent tracks muted
+    let (mut s3, root3) = session("otiomuted3", "24", "01:00:00:00");
+    let fold = OtioImportOptions { buses: BusLevels::Fold, ..OtioImportOptions::for_project(&root3, &file) };
+    s3.edit("i", |st| import(st, &file, &fold)).unwrap();
+    let st3 = &s3.state;
+    let at3 = |t: i64| st3.clips.values().find(|c| c.timeline_start == t).unwrap();
+    assert!(st3.tracks[&at3(g0).track_id].mute && st3.tracks[&at3(w0).track_id].mute);
+    assert!(at3(d0).muted);
+}
