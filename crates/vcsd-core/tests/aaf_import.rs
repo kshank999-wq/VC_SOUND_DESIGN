@@ -804,3 +804,43 @@ for sl in m.slots:
     let err = s4.edit("i", |st| import(st, &plain, &opts(&root4))).unwrap_err().to_string();
     assert!(err.contains("nothing to import"), "left out: {err}");
 }
+
+#[test]
+fn solo_comes_back_from_our_aaf_and_says_when_it_silences_the_project() {
+    let (mut s, root) = session("aafsolo", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let tid = s.state.clips.values().find(|c| !c.muted).unwrap().track_id.clone();
+    // one AAF with the track as it is, one with it soloed
+    let export_to = |s: &mut state::Session, dir: &str| {
+        let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+        o.aaf = true;
+        o.force = true;
+        o.out_dir = Some(root.join(dir));
+        let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+        let rep: serde_json::Value = serde_json::from_slice(&std::fs::read(r.dir.join("AAF/aaf_report.json")).unwrap()).unwrap();
+        (r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap()), rep)
+    };
+    let (plain, _) = export_to(&mut s, "plain");
+    s.state.tracks.get_mut(&tid).unwrap().solo = true;
+    let (soloed, rep) = export_to(&mut s, "soloed");
+    assert!(rep["losses"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().starts_with("solo is monitoring state")), "{rep}");
+
+    // into a fresh project: soloed, nothing else to silence
+    let (mut s2, root2) = session("aafsolo2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &soloed, &opts(&root2))).unwrap();
+    assert_eq!(rep.soloed_tracks, 1);
+    assert!(s2.state.tracks.values().all(|t| t.solo));
+    assert!(!rep.notes.iter().any(|n| n.starts_with("solo restored")), "{:?}", rep.notes);
+
+    // into a project with other tracks, none soloed: restored, and the report says what it does
+    let (mut s3, root3) = session("aafsolo3", "24", "01:00:00:00");
+    s3.edit("a", |st| import(st, &plain, &AafImportOptions { folder: Some("Other".into()), ..opts(&root3) })).unwrap();
+    let rep = s3.edit("b", |st| import(st, &soloed, &opts(&root3))).unwrap();
+    assert_eq!(rep.soloed_tracks, 1);
+    assert!(rep.notes.iter().any(|n| n.starts_with("solo restored on imported tracks")), "{:?}", rep.notes);
+    assert!(s3.state.tracks.values().filter(|t| t.folder == "Other").all(|t| !t.solo));
+}

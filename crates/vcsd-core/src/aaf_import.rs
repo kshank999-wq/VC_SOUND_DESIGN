@@ -86,6 +86,8 @@ pub struct AafImportReport {
     pub buses_created: usize,
     /// Project buses that already held the file's levels (left as they were).
     pub buses_matched: usize,
+    /// Tracks whose solo came back (from VC Sound Design's description).
+    pub soloed_tracks: usize,
     /// Track inserts rebuilt from VC Sound Design's description (built-in effects
     /// and plugins), plugins among them, and plugin parameters with automation.
     pub inserts: usize,
@@ -1624,7 +1626,8 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
             // silenced on export: its own mute when its buses come back (a muted bus is
             // restored muted), else muted as it sounded
             mute: lane.muted || meta["silenced"].as_bool() == Some(true) && (routed.is_none() || meta["muted"].as_bool() == Some(true)),
-            solo: false,
+            // the description's solo flag (monitoring state; other apps' AAFs have none)
+            solo: meta["solo"].as_bool().unwrap_or(false),
             armed: false,
             frozen_asset_id: None,
             inserts: vec![],
@@ -1778,6 +1781,14 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
                 report.markers += 1;
             }
         }
+    }
+    report.soloed_tracks = report.tracks.iter().filter(|t| s.tracks[t.as_str()].solo).count();
+    let others: Vec<&Track> = s.tracks.values().filter(|t| !report.tracks.contains(&t.id)).collect();
+    if report.soloed_tracks > 0 && !others.is_empty() && !others.iter().any(|t| t.solo) {
+        notes.add(
+            "solo restored on imported tracks: while it's on, the project's other tracks are silent (unsolo to hear them)",
+            report.soloed_tracks,
+        );
     }
     report.notes = notes.list();
     if report.tracks.is_empty() && report.markers == 0 {

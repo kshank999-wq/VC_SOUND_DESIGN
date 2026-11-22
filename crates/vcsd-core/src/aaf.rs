@@ -1054,6 +1054,10 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         n_auto(&|p| matches!(p.param, AutomationParam::Plugin(_)) && !slot_track(&p.owner_id).is_some_and(|t| printed(&t))),
     );
     losses.add("tracks printed with their plugins and insert effects: one rendered clip each, not editable clip by clip", o.prints.len());
+    losses.add(
+        "solo is monitoring state, not applied: every track exported audible (the solo flags are in VC Sound Design's comment)",
+        s.tracks.values().filter(|t| t.solo).count(),
+    );
     let pans = |t: &Track| t.pan.abs() > 0.001 || s.automation.values().any(|p| p.owner_id == t.id && p.param == AutomationParam::Pan);
     losses.add(
         "mono track pan uses the receiving app's pan law (VC Sound Design: −3 dB constant power)",
@@ -1275,6 +1279,8 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                 // muted clips [offset from the range start, length]
                 "silenced": silenced.contains(tid),
                 "muted": t.mute,
+                // monitoring state: every track is exported audible; this restores the flag
+                "solo": t.solo,
                 "muted_clips": audio_slots[i].2.iter().filter(|p| p.muted).map(|p| serde_json::json!([p.at - start, p.len])).collect::<Vec<_>>(),
                 "volume_db": lane(AutomationParam::VolumeDb),
                 "pan_automation": lane(AutomationParam::Pan),

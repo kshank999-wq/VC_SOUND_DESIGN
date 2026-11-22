@@ -54,3 +54,7 @@ test("OTIO summaries say which tracks came back soloed", () => {
   const { composition: _, ...rest } = base;
   assert.equal(otioSummary({ ...rest, timeline: "R", soloed_tracks: 1 })[2], "Solo: 1 track soloed, as exported");
 });
+
+test("AAF summaries say which tracks came back soloed too", () => {
+  assert.equal(aafSummary({ ...base, soloed_tracks: 2 })[2], "Solo: 2 tracks soloed, as exported");
+});
