@@ -1101,7 +1101,11 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 bus_id,
                 channels,
                 order,
-                folder: folder.clone(),
+                // our own export: its folder rebuilt under the import's (the file's order kept)
+                folder: match tv["folder"].as_str().map(crate::editing::normalize_folder).filter(|f| !f.is_empty()) {
+                    Some(sub) => crate::editing::normalize_folder(&format!("{folder}/{sub}")),
+                    None => folder.clone(),
+                },
                 gain_db: if raw { tv["gain_db"].as_f64().unwrap_or(0.0) as f32 } else { 0.0 },
                 pan: if raw { tv["pan"].as_f64().unwrap_or(0.0).clamp(-1.0, 1.0) as f32 } else { 0.0 },
                 // restored onto its buses: its own mute (a disabled track may only have been on a

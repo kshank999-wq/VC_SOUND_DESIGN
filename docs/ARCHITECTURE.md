@@ -156,6 +156,7 @@ butt-spliced repeats, muted tracks and clips left out). It also shares its media
 | Clip fades, bus, and the raw fader, pan and lanes (offsets from the range start) | `metadata.vcsd` on the clip or track |
 | Cues | Timeline markers, coloured by category, with the description as comment |
 | Solo | Monitoring state, not applied: every track is exported audible. The flag is in the track's `metadata.vcsd.solo` (and listed in the report) |
+| Track order and folders | Tracks in project order (folder, position, name); each track's `metadata.vcsd.folder` and `order` |
 | Buses | `metadata.vcsd.buses` on the timeline: each bus's parent, level, mute, inserts, volume and balance automation, and its plugins' automation (sample offsets from the range start). Each track's `metadata.vcsd.bus_id` names its bus. Other apps get the bus levels folded into the tracks' effects (above) |
 
 OTIO has no audio mix model, so levels follow the one convention OTIO tools share. The
@@ -204,6 +205,7 @@ tracks as new tracks in a folder `OTIO/<timeline>`, placed at `global_start_time
 | Transition between clips | A crossfade: the clip before runs on past the cut by the out offset, the clip after starts before it by the in offset (into their handles, as OTIO defines it). Handles the media doesn't have shorten it |
 | Nested stack (compound clip) | Its audio tracks as extra tracks ("outer / inner"), trimmed to the stack's range |
 | Disabled track, clip or nested stack | Muted (a disabled compound clip mutes everything in it) |
+| Track order; `metadata.vcsd.folder` (our own export) | Tracks numbered in the file's order, after the project's own. Our export's folder tree is rebuilt under the import's folder ("OTIO/<timeline>/Scene 1/Hard FX"); other apps' tracks stay flat in it |
 | `metadata.vcsd.solo` (our own export) | The track's solo. Importing a soloed track into a project with other tracks silences those while it's on, and the report says so; other apps' files have no solo |
 | A constant zero gain effect on a clip or track, without our metadata (how AAF, which has no mute, carries one through the AAF adapter) | A muted clip or track, its other gains kept as its levels, so unmuting brings the sound back (noted) |
 | Markers on the timeline, tracks and clips | Spotting markers in an "OTIO markers" lane (name — comment), for those inside a scene |

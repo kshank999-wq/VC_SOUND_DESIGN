@@ -929,7 +929,7 @@ fn importing_back_into_the_project_it_came_from_keeps_its_buses_and_doesnt_doubl
     assert_eq!(bus_named(st, "FX Sub").inserts[0].as_plugin().unwrap().id, "ins_bus");
     assert_eq!(st.buses.values().filter(|b| b.name == "FX Sub").count(), 1, "no second FX Sub");
     // the new track: on the same sub-bus, with its own levels (not the buses' folded in)
-    let new_track = st.tracks.values().find(|t| t.folder == "Back").unwrap();
+    let new_track = st.tracks.values().find(|t| vcsd_core::editing::in_folder(&t.folder, "Back")).unwrap();
     assert_eq!(new_track.bus_id, sub);
     assert_eq!(new_track.gain_db, -3.0);
     for (p, want) in [AutomationParam::VolumeDb, AutomationParam::Pan].into_iter().zip(&orig_lanes) {
@@ -1172,5 +1172,57 @@ fn solo_comes_back_from_our_otio_and_says_when_it_silences_the_project() {
     let rep = s3.edit("b", |st| import(st, &file, &OtioImportOptions::for_project(&root3, &file))).unwrap();
     assert_eq!(rep.soloed_tracks, 1);
     assert!(rep.notes.iter().any(|n| n.starts_with("solo restored on imported tracks")), "{:?}", rep.notes);
-    assert!(s3.state.tracks.values().filter(|t| t.folder == "Other").all(|t| !t.solo));
+    assert!(s3.state.tracks.values().filter(|t| vcsd_core::editing::in_folder(&t.folder, "Other")).all(|t| !t.solo));
+}
+
+#[test]
+fn track_folders_and_order_come_back_from_our_otio() {
+    let (mut s, root) = session("otioorder", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:06:00", "wind exterior", None);
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:05:00", "01:00:05:00", "door slam", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    // the project's layout: tracks in more than one folder, a custom order
+    let st = &mut s.state;
+    let mut ids: Vec<String> = st.tracks.keys().cloned().collect();
+    ids.sort();
+    st.tracks.get_mut(&ids[0]).unwrap().folder = "Reel A/Specials".into();
+    for (k, id) in ids.iter().rev().enumerate() {
+        st.tracks.get_mut(id).unwrap().order = k as u32;
+    }
+    let mut want: Vec<(String, String)> = st.tracks.values().map(|t| (t.folder.clone(), t.name.clone())).collect();
+    let mut sorted: Vec<&Track> = st.tracks.values().collect();
+    sorted.sort_by(|a, b| (&a.folder, a.order, &a.name).cmp(&(&b.folder, b.order, &b.name)));
+    let want_order: Vec<String> = sorted.iter().map(|t| t.name.clone()).collect();
+    want.sort();
+    assert!(want.iter().map(|w| &w.0).collect::<std::collections::BTreeSet<_>>().len() >= 2, "more than one folder: {want:?}");
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-22");
+    o.otio = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let file = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+
+    // into a project that already has tracks
+    let (mut s2, root2) = session("otioorder2", "24", "01:00:00:00");
+    s2.edit("a", |st| {
+        import(st, &file, &OtioImportOptions { folder: Some("Earlier".into()), ..OtioImportOptions::for_project(&root2, &file) })
+    })
+    .unwrap();
+    let before = s2.state.tracks.values().map(|t| t.order).max().unwrap();
+    let rep = s2.edit("b", |st| import(st, &file, &OtioImportOptions::for_project(&root2, &file))).unwrap();
+    let st2 = &s2.state;
+    let base = format!("OTIO/{}", rep.timeline.replace('/', " & "));
+    let mut got: Vec<&Track> = rep.tracks.iter().map(|t| &st2.tracks[t]).collect();
+    // the folder tree rebuilt under the import's folder
+    let mut layout: Vec<(String, String)> =
+        got.iter().map(|t| (t.folder.strip_prefix(&format!("{base}/")).unwrap_or(&t.folder).to_string(), t.name.clone())).collect();
+    layout.sort();
+    assert_eq!(layout, want, "each track in its own folder, under {base}");
+    // the project's order kept, after the tracks already there
+    got.sort_by_key(|t| t.order);
+    assert_eq!(got.iter().map(|t| t.name.clone()).collect::<Vec<_>>(), want_order);
+    assert!(got.iter().all(|t| t.order > before), "after the existing tracks");
 }

@@ -484,6 +484,8 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                     "mute": t.mute,
                     // monitoring state: every track is exported audible; this restores the flag
                     "solo": t.solo,
+                    // where it sits in the project: its folder and position there
+                    "folder": t.folder, "order": t.order,
                     "bus_id": t.bus_id,
                     // automation: [offset in samples from the timeline start, value]
                     "volume_db": points(AutomationParam::VolumeDb),
