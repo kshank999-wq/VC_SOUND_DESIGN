@@ -559,20 +559,12 @@ fn piece_obj(p: &Piece, master: &[u8], channel: u32) -> Obj {
 /// It's an extension property; the template's meta-dictionary defines it at this pid.
 const PID_COMMENT_MARKER_COLOR: u16 = 0xffb9;
 
-/// A cue marker's color as `CommentMarkerColor`: its category's (the OTIO export's
-/// marker palette), each channel 0–65535 — as Media Composer writes marker colors and
-/// readers such as the OpenTimelineIO AAF adapter read them.
-fn marker_color(c: &Category) -> Vec<u8> {
-    let (r, g, b): (u16, u16, u16) = match crate::otio::colour(c) {
-        "RED" => (255, 0, 0),
-        "GREEN" => (0, 255, 0),
-        "BLUE" => (0, 0, 255),
-        "YELLOW" => (255, 255, 0),
-        "MAGENTA" => (255, 0, 255),
-        "PURPLE" => (127, 0, 127),
-        _ => (0, 255, 255), // CYAN
-    };
-    [r, g, b].iter().flat_map(|v| (v * 257).to_le_bytes()).collect()
+/// A cue marker's color as `CommentMarkerColor`: its marker's own color, else its
+/// category's (the OTIO export's marker palette), each channel 0–65535 — as Media
+/// Composer writes marker colors and readers such as the OpenTimelineIO AAF adapter
+/// read them.
+fn marker_color(s: &ProjectState, c: &Cue) -> Vec<u8> {
+    crate::otio::cue_rgb(s, c).iter().flat_map(|v| (*v as u16 * 257).to_le_bytes()).collect()
 }
 
 /// An indirect Rational amplitude value (linear gain).
@@ -1273,7 +1265,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                     .data(0x0202, "Length", i64v(0))
                     .data(0x0601, "Position", i64v(c.start_sample - start))
                     .data(0x0602, "Comment", utf16z(&text))
-                    .data(PID_COMMENT_MARKER_COLOR, "CommentMarkerColor", marker_color(&c.category))
+                    .data(PID_COMMENT_MARKER_COLOR, "CommentMarkerColor", marker_color(s, c))
                     .data(0x6102, "DescribedSlots", u32v(1))
             })
             .collect();

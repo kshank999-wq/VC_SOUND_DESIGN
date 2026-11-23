@@ -324,6 +324,9 @@ pub struct Marker {
     pub cue_id: Option<String>,
     #[serde(default)]
     pub origin: TimingOrigin,
+    /// The marker's own color ("#rrggbb"), e.g. from an editor's timeline; `None` = its lane's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

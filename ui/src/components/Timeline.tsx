@@ -323,7 +323,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         const w = Math.max(3, X(b) - x0);
         const selected = sel?.kind === "marker" && sel.id === m.id || (sel?.kind === "cue" && m.cue_id === sel.id);
         ctx.globalAlpha = ghost ? 0.5 : m.cue_id ? 1 : 0.75;
-        ctx.fillStyle = lane.color || catColor(lane.category);
+        ctx.fillStyle = m.color || lane.color || catColor(lane.category);
         if (m.kind === "point") {
           ctx.fillRect(x0 - 1, ly + 2, 3, LANE - 5);
           ctx.beginPath();

@@ -167,6 +167,7 @@ pub fn add_marker(s: &mut ProjectState, m: NewMarker) -> Result<String> {
             approved: true,
             cue_id: None,
             origin: m.origin,
+            color: None,
         },
     );
     Ok(id)

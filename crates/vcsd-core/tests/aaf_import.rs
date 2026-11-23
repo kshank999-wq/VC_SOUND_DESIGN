@@ -33,6 +33,8 @@ fn an_exported_aaf_imports_back_to_the_same_mix() {
     s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
     let st = &mut s.state;
     let sr = st.project.sample_rate as i64;
+    // an editor's color on one marker; the others export their categories' colors
+    st.markers.values_mut().find(|m| m.label == "glass smash").unwrap().color = Some("#12a4c8".into());
     // no loops: AAF butt-splices loop repeats where the mixer crossfades them
     let lens: std::collections::HashMap<String, i64> = st.assets.values().map(|a| (a.id.clone(), a.length_samples)).collect();
     for c in st.clips.values_mut() {
@@ -87,6 +89,9 @@ fn an_exported_aaf_imports_back_to_the_same_mix() {
     assert_eq!(rep.markers, s.state.cues.len(), "cue markers → spotting markers");
     assert!(rep.automated_tracks >= 2, "{rep:?}");
     let st2 = &s2.state;
+    let color = |what: &str| st2.markers.values().find(|m| m.label.contains(what)).unwrap().color.clone();
+    assert_eq!(color("glass smash").as_deref(), Some("#12a4c8"), "AAF keeps the exact RGB");
+    assert_eq!(color("wind exterior").as_deref(), Some("#00ff00"), "a background cue: its category's green");
     assert!(st2.tracks.values().all(|t| t.folder.starts_with("AAF/")));
     // the glass clip: same place, fades and source range
     let glass_lane: Vec<(i64, f32)> = {
@@ -294,6 +299,7 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     let mk = st.markers.values().next().unwrap();
     assert_eq!((mk.start_sample, mk.label.as_str(), mk.origin), (50 * f, "door knock", TimingOrigin::Imported));
     assert_eq!(st.lanes[&mk.lane_id].name, "AAF markers");
+    assert_eq!(mk.color.as_deref(), Some("#00ff00"), "Avid's named color, over its RGB");
 
     // the music moved away: its clip is reported, the dialog still comes in
     std::fs::rename(dir.join("music.wav"), dir.join("music.moved")).unwrap();

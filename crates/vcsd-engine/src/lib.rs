@@ -880,6 +880,23 @@ impl Engine {
                 })?;
                 Ok(json!({}))
             }
+            // "#rrggbb" sets the marker's own color (its cue's in OTIO/AAF exports);
+            // null goes back to its lane's
+            "marker.color" => {
+                self.edit(g, "color marker", |st| {
+                    let id = s(a, "id").map_err(Error::Invalid)?;
+                    let color = match a.get("color") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(c)) => {
+                            Some(parse_hex_color(c).ok_or_else(|| Error::Invalid(format!("color: '{c}' isn't #rrggbb")))?)
+                        }
+                        Some(v) => return Err(Error::Invalid(format!("color: {v} isn't #rrggbb or null"))),
+                    };
+                    st.markers.get_mut(id).ok_or_else(|| Error::NotFound(id.into()))?.color = color;
+                    Ok(())
+                })?;
+                Ok(json!({}))
+            }
             "marker.delete" => {
                 self.edit(g, "delete marker", |st| {
                     let id = s(a, "id").map_err(Error::Invalid)?;

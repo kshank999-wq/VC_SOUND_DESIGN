@@ -84,7 +84,8 @@ fn fade(fade_in: i64, fade_out: i64, rate: f64) -> Value {
     })
 }
 
-/// A cue category's marker color (OTIO's named colors; the AAF export uses the same).
+/// A cue category's marker color (OTIO's named colors; the AAF export uses the same),
+/// for cues whose marker has no color of its own.
 pub(crate) fn colour(c: &Category) -> &'static str {
     match c {
         Category::Footsteps | Category::Props => "YELLOW",
@@ -95,6 +96,100 @@ pub(crate) fn colour(c: &Category) -> &'static str {
         Category::Music => "PURPLE",
         Category::Custom(_) => "CYAN",
     }
+}
+
+/// OTIO's named marker colors as RGB (the values OTIO import reads them as).
+const NAMED: &[(&str, [u8; 3])] = &[
+    ("RED", [255, 0, 0]),
+    ("PINK", [255, 128, 128]),
+    ("ORANGE", [255, 127, 0]),
+    ("YELLOW", [255, 255, 0]),
+    ("GREEN", [0, 255, 0]),
+    ("CYAN", [0, 255, 255]),
+    ("BLUE", [0, 0, 255]),
+    ("PURPLE", [127, 0, 127]),
+    ("MAGENTA", [255, 0, 255]),
+    ("BLACK", [0, 0, 0]),
+    ("WHITE", [255, 255, 255]),
+];
+
+fn rgb(hex: &str) -> Option<[u8; 3]> {
+    let h = crate::model::parse_hex_color(hex)?;
+    let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+    Some([c(1)?, c(3)?, c(5)?])
+}
+
+/// The OTIO marker color for "#rrggbb", named as the OpenTimelineIO AAF adapter names
+/// an AAF marker's RGB (by hue, lightness and saturation) — so a cue gets the same
+/// color from our OTIO as from our AAF read through the adapter.
+pub(crate) fn nearest_named(hex: &str) -> Option<&'static str> {
+    let c = rgb(hex)?;
+    // exact matches the adapter knows first
+    if let Some(name) = ["RED", "GREEN", "BLUE", "BLACK", "WHITE"].into_iter().find(|n| NAMED.iter().any(|(k, v)| k == n && *v == c)) {
+        return Some(name);
+    }
+    let [r, g, b] = c.map(|x| x as f64 / 255.0);
+    let (hi, lo) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (hi + lo) / 2.0;
+    if hi == lo {
+        return Some(if l > 0.65 { "WHITE" } else { "BLACK" });
+    }
+    let d = hi - lo;
+    let sat = if l <= 0.5 { d / (hi + lo) } else { d / (2.0 - hi - lo) };
+    if sat < 0.2 {
+        return Some(if l > 0.65 { "WHITE" } else { "BLACK" });
+    }
+    if l < 0.13 {
+        return Some("BLACK");
+    }
+    if l > 0.9 {
+        return Some("WHITE");
+    }
+    let (rc, gc, bc) = ((hi - r) / d, (hi - g) / d, (hi - b) / d);
+    let h = if r == hi {
+        bc - gc
+    } else if g == hi {
+        2.0 + rc - bc
+    } else {
+        4.0 + gc - rc
+    };
+    let h = (h / 6.0).rem_euclid(1.0);
+    Some(match h {
+        h if h <= 0.04 || h > 0.93 => {
+            if l > 0.53 {
+                "PINK"
+            } else {
+                "RED"
+            }
+        }
+        h if h <= 0.13 => "ORANGE",
+        h if h <= 0.2 => "YELLOW",
+        h if h <= 0.43 => "GREEN",
+        h if h <= 0.52 => "CYAN",
+        h if h <= 0.74 => "BLUE",
+        h if h <= 0.82 => "PURPLE",
+        // darker magentas look more like purple
+        h if h < 0.89 && l < 0.42 => "PURPLE",
+        _ => "MAGENTA",
+    })
+}
+
+/// A cue's marker color as RGB: the color of the spotting marker it was made from
+/// (e.g. one an editor colored), else its category's.
+pub(crate) fn cue_rgb(s: &ProjectState, c: &Cue) -> [u8; 3] {
+    own_color(s, c).and_then(|h| rgb(&h)).unwrap_or_else(|| {
+        let name = colour(&c.category);
+        NAMED.iter().find(|(n, _)| *n == name).map(|(_, v)| *v).unwrap_or([0, 255, 255])
+    })
+}
+
+/// A cue's OTIO marker color: its marker's own (nearest name), else its category's.
+fn cue_colour(s: &ProjectState, c: &Cue) -> &'static str {
+    own_color(s, c).and_then(|h| nearest_named(&h)).unwrap_or_else(|| colour(&c.category))
+}
+
+fn own_color(s: &ProjectState, c: &Cue) -> Option<String> {
+    s.markers.values().filter(|m| m.cue_id.as_deref() == Some(c.id.as_str())).find_map(|m| m.color.clone())
 }
 
 fn lane(s: &ProjectState, owner: &str, param: AutomationParam, start: i64) -> Vec<(i64, f32)> {
@@ -525,7 +620,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                 "OTIO_SCHEMA": "Marker.2",
                 "metadata": { "vcsd": { "cue_id": c.id, "code": c.code, "category": c.category.display() } },
                 "name": c.code,
-                "color": colour(&c.category),
+                "color": cue_colour(s, c),
                 "marked_range": range(c.start_sample - start, (c.end_sample.min(end) - c.start_sample).max(0), sr),
                 "comment": c.description,
             })
@@ -568,6 +663,23 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marker_colors_map_to_the_nearest_otio_name() {
+        assert_eq!(nearest_named("#ff0000"), Some("RED"));
+        assert_eq!(nearest_named("#12a4c8"), Some("BLUE"));
+        assert_eq!(nearest_named("#ff8080"), Some("PINK"));
+        assert_eq!(nearest_named("#808080"), Some("BLACK"), "greys: by lightness");
+        assert_eq!(nearest_named("#e07010"), Some("ORANGE"));
+        assert_eq!(nearest_named("#202020"), Some("BLACK"));
+        assert_eq!(nearest_named("#7f007f"), Some("PURPLE"), "our own import's purple comes back as itself");
+        assert_eq!(nearest_named("nope"), None);
+        // every name OTIO import reads comes back as the same name
+        for (name, _) in NAMED {
+            let hex = crate::otio_import::named_color(name).unwrap();
+            assert_eq!(nearest_named(&hex), Some(*name));
+        }
+    }
 
     #[test]
     fn every_channel_value_survives_truncating_and_rounding_readers() {

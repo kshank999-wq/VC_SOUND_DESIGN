@@ -185,6 +185,7 @@ struct OLane {
 
 /// A track color as OTIO tools write it: OTIO 0.18's `Color` (r, g, b in 0–1),
 /// "#rrggbb", or one of OTIO's named colors (as markers use them).
+/// Also reads marker colors.
 fn otio_color(v: &Value) -> Option<String> {
     if schema(v) == "Color" {
         // truncated, as OpenTimelineIO's own Color.to_hex does
@@ -193,22 +194,26 @@ fn otio_color(v: &Value) -> Option<String> {
         return Some(format!("#{:02x}{:02x}{:02x}", c("r"), c("g"), c("b")));
     }
     let s = v.as_str()?.trim();
-    parse_hex_color(s).or_else(|| {
-        let hex = match s.to_ascii_uppercase().as_str() {
-            "BLACK" => "#000000",
-            "BLUE" => "#0000ff",
-            "CYAN" => "#00ffff",
-            "GREEN" => "#00ff00",
-            "MAGENTA" | "PINK" => "#ff00ff",
-            "ORANGE" => "#ff7f00",
-            "PURPLE" => "#7f007f",
-            "RED" => "#ff0000",
-            "WHITE" => "#ffffff",
-            "YELLOW" => "#ffff00",
-            _ => return None,
-        };
-        Some(hex.to_string())
-    })
+    parse_hex_color(s).or_else(|| named_color(s))
+}
+
+/// One of OTIO's (and Avid's) named marker colors as "#rrggbb".
+pub(crate) fn named_color(s: &str) -> Option<String> {
+    let hex = match s.trim().to_ascii_uppercase().as_str() {
+        "BLACK" => "#000000",
+        "BLUE" => "#0000ff",
+        "CYAN" => "#00ffff",
+        "GREEN" => "#00ff00",
+        "MAGENTA" => "#ff00ff",
+        "PINK" => "#ff8080",
+        "ORANGE" => "#ff7f00",
+        "PURPLE" => "#7f007f",
+        "RED" => "#ff0000",
+        "WHITE" => "#ffffff",
+        "YELLOW" => "#ffff00",
+        _ => return None,
+    };
+    Some(hex.to_string())
 }
 
 /// A level parameter over time (seconds from the timeline start).
@@ -642,7 +647,8 @@ fn level_effect(e: &Value, t0: f64, len: f64) -> Option<(bool, Level)> {
 
 struct Reader<'a> {
     notes: &'a mut Notes,
-    markers: Vec<(f64, f64, String)>,
+    /// (start, duration, label, color)
+    markers: Vec<(f64, f64, String, Option<String>)>,
 }
 
 impl Reader<'_> {
@@ -657,7 +663,7 @@ impl Reader<'_> {
                 (true, false) => comment,
                 (true, true) => "OTIO marker".into(),
             };
-            self.markers.push((a + shift, d, label));
+            self.markers.push((a + shift, d, label, otio_color(&m["color"])));
         }
     }
 
@@ -1263,7 +1269,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
     report.missing_media = missing.into_iter().map(|(k, n)| format!("{k} — {n} clip{}", if n == 1 { "" } else { "s" })).collect();
 
     // ---- markers → spotting markers (inside scenes)
-    for (at, dur, label) in markers {
+    for (at, dur, label, color) in markers {
         let a = base + smp(at);
         let len = smp(dur).max(0);
         if s.scene_at(a).is_none() {
@@ -1282,7 +1288,8 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             sub_events: vec![],
             origin: TimingOrigin::Imported,
         };
-        if crate::spotting::add_marker(s, nm).is_ok() {
+        if let Ok(id) = crate::spotting::add_marker(s, nm) {
+            s.markers.get_mut(&id).expect("just added").color = color;
             report.markers += 1;
         }
     }

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { call } from "../api";
 import { allFolders } from "../folders";
 import type { EngineHook } from "../store";
-import { catLabel, type Asset, type Selection } from "../types";
+import { catColor, catLabel, type Asset, type Marker, type Selection } from "../types";
 import { sampleAtTc, secs, tcAt } from "../tc";
 
 const STATUSES = ["spotted", "placeholder", "replaced", "needs_recording", "recorded", "approved", "missing", "omitted"];
@@ -59,10 +59,27 @@ function Edit({ value, onCommit, mono, placeholder }: { value: string; onCommit:
   );
 }
 
+/** A marker's color: its own (sent with its cue in OTIO/AAF exports) or its lane's. */
+function MarkerColor({ m, laneColor, run }: { m: Marker; laneColor: string; run: EngineHook["run"] }) {
+  return (
+    <div className="marker-color small">
+      <label className="swatch track-color" style={{ background: m.color ?? laneColor }} title="Marker color (click to choose)">
+        <input type="color" value={m.color ?? laneColor} onChange={(e) => run("marker.color", { id: m.id, color: e.target.value })} />
+      </label>
+      {m.color ? <>Marker color {m.color} <button className="link" onClick={() => run("marker.color", { id: m.id, color: null })}>use lane's</button></> : <span className="muted">Marker color: its lane's</span>}
+    </div>
+  );
+}
+
 export function Inspector({ eng, sel, setSel, libSel, onPerform }: Props) {
   const { view, rate, run, tx } = eng;
   if (!view?.open || !rate) return null;
   const assetName = (id: string | null | undefined) => (id ? view.assets.find((a) => a.id === id)?.name ?? id.slice(0, 12) : "—");
+
+  const laneColorOf = (m: Marker) => {
+    const l = view.lanes.find((x) => x.id === m.lane_id);
+    return l?.color || catColor(l?.category);
+  };
 
   let body: React.ReactNode = <div className="muted small pad">Select a cue, marker, clip or track.</div>;
 
@@ -104,6 +121,10 @@ export function Inspector({ eng, sel, setSel, libSel, onPerform }: Props) {
           </div>
           <Field label="Owner"><Edit value={c.owner} placeholder="assign…" onCommit={(v) => run("cue.update", { id: c.id, owner: v })} /></Field>
           <Field label="Notes"><Edit value={c.notes} onCommit={(v) => run("cue.update", { id: c.id, notes: v })} /></Field>
+          {(() => {
+            const mk = view.markers.find((x) => x.cue_id === c.id);
+            return mk ? <MarkerColor m={mk} laneColor={laneColorOf(mk)} run={run} /> : null;
+          })()}
           <div className="small muted">Timing: {c.timing_origin} · review {c.review_status}{c.sub_events.length ? ` · ${c.sub_events.length} sub-events` : ""}{c.pending_shift ? ` · reconform shift ${secs(rate, c.pending_shift)}` : ""}</div>
 
           <h4>Sound</h4>
@@ -209,7 +230,8 @@ export function Inspector({ eng, sel, setSel, libSel, onPerform }: Props) {
         <div className="pad">
           <div className="insp-title">Marker <span className="badge">{m.kind}</span></div>
           <div className="small">{view.lanes.find((l) => l.id === m.lane_id)?.name} · {tcAt(rate, m.start_sample)} – {tcAt(rate, m.end_sample)}{m.sub_events.length ? ` · ${m.sub_events.length} taps` : ""}</div>
-          <div className="small muted">Spotted but not yet a cue.</div>
+          <MarkerColor m={m} laneColor={laneColorOf(m)} run={run} />
+          <div className="small muted">{m.cue_id ? "Has a cue (exports carry the marker's color)." : "Spotted but not yet a cue."}</div>
           <div className="btns">
             <button className="primary" onClick={async () => {
               const r = await run<{ created: string[] }>("cues.build", {}, "Cues created");

@@ -26,7 +26,7 @@ The composition "Reel 1 v3" runs at 25 fps from 10:00:00:00:
   gain of 0.5 inside a zero gain; "SILENT", a whole track inside a zero gain;
   "INACTIVE", a selector with filler selected and the clip as its alternate;
 - a picture-only track (ignored), a timecode track, and a descriptive
-  marker "door knock" at frame 50.
+  marker "door knock" at frame 50, colored Green (named) over red (RGB).
 """
 import math
 import os
@@ -320,6 +320,10 @@ def build(out):
         # the tracks it describes, as Media Composer writes them (readers such as the
         # OpenTimelineIO AAF adapter need them)
         mk["DescribedSlots"].value = [a1.slot_id]
+        # its color, both ways Media Composer writes it: an RGB, and Avid's named
+        # attribute (which readers prefer)
+        mk["CommentMarkerColor"].value = {"red": 65535, "green": 0, "blue": 0}
+        mk["CommentMarkerAttributeList"].append(f.create.TaggedValue("_ATN_CRM_COLOR", "Green"))
         eseq.components.append(mk)
         ev.segment = eseq
         comp.slots.append(ev)

@@ -168,3 +168,20 @@ fn track_colors_are_set_validated_and_reset() {
     call(&e, "track.update", json!({"id": t, "color": null}));
     assert!(color(&e).is_null(), "back to the category's");
 }
+
+#[test]
+fn marker_colors_are_set_validated_reset_and_undone() {
+    let (e, _, _) = setup();
+    let marker = |e: &Arc<Engine>| call(e, "state.get", json!({}))["markers"][0].clone();
+    let id = marker(&e)["id"].as_str().unwrap().to_string();
+    assert!(marker(&e)["color"].is_null(), "its lane's by default");
+    call(&e, "marker.color", json!({"id": id, "color": "#12A4C8"}));
+    assert_eq!(marker(&e)["color"], "#12a4c8");
+    assert!(e.call("marker.color", json!({"id": id, "color": "teal"})).unwrap_err().contains("#rrggbb"));
+    assert!(e.call("marker.color", json!({"id": "nope", "color": "#000000"})).is_err());
+    assert_eq!(marker(&e)["color"], "#12a4c8", "a bad color changes nothing");
+    call(&e, "marker.color", json!({"id": id, "color": null}));
+    assert!(marker(&e)["color"].is_null(), "back to its lane's");
+    call(&e, "undo", json!({}));
+    assert_eq!(marker(&e)["color"], "#12a4c8", "undoable");
+}

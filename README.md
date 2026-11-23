@@ -99,6 +99,7 @@ bundles failed to load.
 | Ctrl/⌘ Z, Shift+Z / Y, S | Undo, redo, save |
 | Ctrl/⌘/Alt + wheel, Shift + wheel | Zoom, scroll timeline |
 | Drag in a lane / double-click a lane | New range / point marker |
+| Marker or cue inspector: color swatch | The marker's own color (drawn on the lane, sent with its cue in OTIO/AAF exports); *use lane's* resets it |
 | Drag a clip / its left or right edge | Move / trim (audio stays in place; edits snap to frames) |
 | Drag the square handle at a clip's top corner | Fade in / fade out (double-click the handle to remove the fade) |
 | Track header **A** | Show/hide that track's Volume and Pan automation lanes |

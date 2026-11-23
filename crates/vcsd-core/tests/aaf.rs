@@ -621,7 +621,7 @@ fn printing_bakes_plugins_and_their_automation_into_the_aaf() {
 }
 
 #[test]
-fn cue_markers_carry_their_category_colors() {
+fn cue_markers_carry_their_own_or_category_colors() {
     let Some(py) = python() else {
         eprintln!("SKIPPED: pyaaf2 not installed (python3 -m pip install pyaaf2==1.7.1)");
         return;
@@ -634,6 +634,15 @@ fn cue_markers_carry_their_category_colors() {
     for (k, (lane_cat, what)) in cues.iter().enumerate() {
         let tc = format!("01:00:0{}:00", k + 1);
         marker_tc(&mut s, lane_cat, EventType::Point, &tc, &tc, what, None);
+    }
+    // and markers an editor colored themselves (their cues carry those colors instead)
+    let custom = [("teal", "#12a4c8"), ("amber", "#e07010"), ("rosy", "#ff8080"), ("violet", "#5a2080")];
+    for (k, (what, _)) in custom.iter().enumerate() {
+        let tc = format!("01:00:0{}:12", k + 6);
+        marker_tc(&mut s, "fx", EventType::Point, &tc, &tc, what, None);
+    }
+    for (what, hex) in custom {
+        s.state.markers.values_mut().find(|m| m.label == what).unwrap().color = Some(hex.into());
     }
     s.edit("c", |st| markers_to_cues(st, None)).unwrap();
     s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
@@ -670,6 +679,7 @@ print(json.dumps(out))
     assert_eq!(of("line"), [0, 0, 65535]);
     assert_eq!(of("sting"), [32639, 0, 32639]);
     assert_eq!(of("steps"), [65535, 65535, 0]);
+    assert_eq!(of("teal"), [0x12 * 257, 0xa4 * 257, 0xc8 * 257], "a marker's own color, exactly");
 
     // through the OpenTimelineIO AAF adapter: the same marker colors as our OTIO export
     let adapter =
@@ -696,7 +706,9 @@ print(json.dumps(sorted({((m.name or '') + ' ' + (m.comment or ''), m.color) for
     let color_of = |list: &[(String, String)], what: &str| {
         list.iter().find(|(t, _)| t.contains(what)).map(|x| x.1.clone()).unwrap_or_else(|| panic!("{what}: {list:?}"))
     };
-    for (_, what) in cues {
+    for what in cues.iter().map(|c| c.1).chain(custom.iter().map(|c| c.0)) {
         assert_eq!(color_of(&via_aaf, what), color_of(&ours, what), "{what}: AAF → adapter vs our OTIO");
     }
+    let named: Vec<String> = custom.iter().map(|c| color_of(&ours, c.0)).collect();
+    assert_eq!(named, ["BLUE", "ORANGE", "PINK", "PURPLE"], "own colors named as the adapter names them");
 }

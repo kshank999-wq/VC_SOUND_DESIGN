@@ -17,6 +17,8 @@ export interface Lane { id: string; name: string; category: Category; order: num
 export interface Marker {
   id: string; lane_id: string; scene_id: string; kind: EventType; start_sample: number; end_sample: number;
   label: string; identity_id: string | null; sub_events: number[]; cue_id: string | null;
+  /** The marker's own color ("#rrggbb"), e.g. from an imported timeline; absent = its lane's. */
+  color?: string | null;
 }
 export interface Cue {
   id: string; scene_id: string; code: string; identity_id: string | null; category: Category; event_type: EventType;

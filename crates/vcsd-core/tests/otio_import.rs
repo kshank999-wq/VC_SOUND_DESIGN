@@ -30,6 +30,8 @@ fn an_exported_otio_imports_back_to_the_same_mix() {
     s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
     let st = &mut s.state;
     let sr = st.project.sample_rate as i64;
+    // an editor's color on one marker; the others export their categories' colors
+    st.markers.values_mut().find(|m| m.label == "glass smash").unwrap().color = Some("#12a4c8".into());
     let lens: std::collections::HashMap<String, i64> = st.assets.values().map(|a| (a.id.clone(), a.length_samples)).collect();
     for c in st.clips.values_mut() {
         c.fill = FillMode::OneShot;
@@ -69,6 +71,9 @@ fn an_exported_otio_imports_back_to_the_same_mix() {
     assert_eq!(rep.markers, s.state.cues.len());
     assert!(rep.notes.is_empty(), "our own metadata carries the mix: {:?}", rep.notes);
     let st2 = &s2.state;
+    let color = |what: &str| st2.markers.values().find(|m| m.label.contains(what)).unwrap().color.clone();
+    assert_eq!(color("glass smash").as_deref(), Some("#0000ff"), "OTIO marker colors are names: the nearest one");
+    assert_eq!(color("wind exterior").as_deref(), Some("#00ff00"), "a background cue: its category's green");
     assert_eq!(st2.tracks.len(), s.state.tracks.len());
     let gc = st2.clips.values().find(|c| c.timeline_start == t0 && c.fade_in == 480).expect("glass clip");
     assert_eq!((gc.fade_out, gc.gain_db), (960, -6.0));
@@ -160,6 +165,9 @@ fn an_editors_otio_imports_clips_transitions_nesting_media_and_markers() {
     mk.sort();
     assert_eq!(mk, vec![(35 * f, "line — pickup".to_string()), (50 * f, "door knock".to_string())]);
     assert!(st.markers.values().all(|m| st.lanes[&m.lane_id].name == "OTIO markers"));
+    let mut colors: Vec<(i64, Option<&str>)> = st.markers.values().map(|m| (m.start_sample, m.color.as_deref())).collect();
+    colors.sort();
+    assert_eq!(colors, vec![(35 * f, Some("#00ffff")), (50 * f, Some("#ff0000"))], "marker colors");
 
     // placed elsewhere on request
     let (mut s2, root2) = session("otioimp2", "25", "10:00:00:00");

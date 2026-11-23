@@ -280,19 +280,32 @@ fn indirect(d: &[u8]) -> Option<f64> {
     })
 }
 
+/// Avid's marker color properties (extensions: their ids come from the file).
+const PROP_MARKER_COLOR: &str = "e96e6d44-c383-11d3-a069-006094eb75cb";
+const PROP_MARKER_ATTRIBUTES: &str = "c72cc817-aac5-499b-af34-bc47fec1eaa8";
+
 struct Aaf {
     cf: RefCell<cfb::CompoundFile<std::fs::File>>,
     /// Class → parent class, from the file's meta-dictionary.
     parents: HashMap<Uuid, Uuid>,
+    /// Property definition → its local id (extensions such as Avid's marker
+    /// colors get a different id in each file).
+    pids: HashMap<Uuid, u16>,
 }
 
 impl Aaf {
     fn open(path: &Path) -> Result<Aaf> {
         let cf = cfb::open(path).map_err(|e| invalid(format!("{} is not an AAF file ({e})", path.display())))?;
-        let mut a = Aaf { cf: RefCell::new(cf), parents: HashMap::new() };
+        let mut a = Aaf { cf: RefCell::new(cf), parents: HashMap::new(), pids: HashMap::new() };
         let root = a.node("/")?;
         if let Some(meta) = a.child(&root, 0x0001) {
             for def in a.children(&meta, 0x0003) {
+                for p in a.children(&def, 0x0009) {
+                    let (Some(id), Some(pid)) = (p.data(0x0005), p.u32(0x000d)) else { continue };
+                    if let Ok(id) = <[u8; 16]>::try_from(id) {
+                        a.pids.insert(Uuid::from_bytes_le(id), pid as u16);
+                    }
+                }
                 let (Some(id), Some(parent)) = (def.data(0x0005), def.weak(0x0008)) else { continue };
                 if let (Ok(id), Ok(parent)) = (<[u8; 16]>::try_from(id), <[u8; 16]>::try_from(parent)) {
                     let (id, parent) = (Uuid::from_bytes_le(id), Uuid::from_bytes_le(parent));
@@ -362,6 +375,29 @@ impl Aaf {
         let mut out = vec![];
         self.cf.borrow_mut().open_stream(join(&n.path, &utf16(&d[1..]))).ok()?.read_to_end(&mut out).ok()?;
         Some(out)
+    }
+
+    /// The local id of a property defined in the file's meta-dictionary (by AUID).
+    fn pid(&self, auid: &str) -> Option<u16> {
+        self.pids.get(&Uuid::parse_str(auid).ok()?).copied()
+    }
+
+    /// A marker's color ("#rrggbb"): Avid's named `_ATN_CRM_COLOR` attribute, else
+    /// its `CommentMarkerColor` RGB (as the OTIO AAF adapter reads them).
+    fn marker_color(&self, m: &Node) -> Option<String> {
+        let named = self.pid(PROP_MARKER_ATTRIBUTES).and_then(|pid| {
+            self.children(m, pid)
+                .iter()
+                .find(|t| t.string(0x5001).as_deref() == Some("_ATN_CRM_COLOR"))
+                .and_then(|t| t.data(0x5003).map(<[u8]>::to_vec))
+                .filter(|d| d.len() > 17 && hexs(&d[1..17]) == key::TYPE_STRING)
+                .and_then(|d| crate::otio_import::named_color(&utf16(&d[17..])))
+        });
+        named.or_else(|| {
+            let d = m.data(self.pid(PROP_MARKER_COLOR)?)?;
+            let c = |i: usize| Some((u16::from_le_bytes(d.get(i..i + 2)?.try_into().ok()?) as f64 / 257.0).round() as u8);
+            Some(format!("#{:02x}{:02x}{:02x}", c(0)?, c(2)?, c(4)?))
+        })
     }
 
     fn is(&self, n: &Node, class: u8) -> bool {
@@ -1783,7 +1819,8 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
                 sub_events: vec![],
                 origin: TimingOrigin::Imported,
             };
-            if crate::spotting::add_marker(s, nm).is_ok() {
+            if let Ok(id) = crate::spotting::add_marker(s, nm) {
+                s.markers.get_mut(&id).expect("just added").color = a.marker_color(m);
                 report.markers += 1;
             }
         }

@@ -16,7 +16,7 @@ AIFF, linked from a folder that no longer exists, so found by name).
 - MX: music 25 long, then a nested stack (range 10–30) holding track "inner":
   gap 5, dialog 40 long — so frames 5–25 of the dialog play at 25–45;
 - Missing: a clip with a missing reference;
-- a timeline marker "door knock" at frame 50.
+- a timeline marker "door knock" at frame 50 (RED; the clip's marker is CYAN).
 """
 import math
 import os
@@ -73,7 +73,7 @@ def build(out):
     dia.append(otio.schema.Gap(source_range=TR(f(0), f(25))))
     dia.append(otio.schema.Transition(transition_type="SMPTE_Dissolve", in_offset=f(0), out_offset=f(5)))
     a = otio.schema.Clip("A", media_reference=dialog(), source_range=TR(f(TC + 10), f(50)))
-    a.markers.append(otio.schema.Marker("line", TR(f(TC + 20), f(0)), comment="pickup"))
+    a.markers.append(otio.schema.Marker("line", TR(f(TC + 20), f(0)), color="CYAN", comment="pickup"))
     dia.append(a)
     dia.append(otio.schema.Transition(transition_type="SMPTE_Dissolve", in_offset=f(5), out_offset=f(5)))
     dia.append(otio.schema.Clip("B", media_reference=dialog(), source_range=TR(f(TC + 70), f(25))))
