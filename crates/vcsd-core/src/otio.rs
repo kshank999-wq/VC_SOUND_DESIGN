@@ -760,18 +760,38 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     // ---- cues and spotting markers → timeline markers
     let marks = spotting_marks(s, start, end);
     report.spotting_markers = marks.iter().filter(|m| !m.is_cue).count();
+    // Markers in whole frames at the picture's rate, as editors place them (a point has no
+    // duration; a range at least two frames, since one frame reads as a point). Our
+    // metadata keeps their exact timing.
+    use crate::aaf_import::conv;
+    let fr = s.project.frame_rate;
+    let (frame_rate, audio_rate) = ((fr.num as i64, fr.den as i64), (s.project.sample_rate as i64, 1));
+    let frames = |m: &Mark| {
+        let a = conv(m.at, audio_rate, frame_rate);
+        (a, if m.len > 0 { conv(m.at + m.len, audio_rate, frame_rate) - a } else { 0 })
+    };
+    losses.add(
+        "range markers under a frame and a half written as one-frame (point) markers",
+        marks.iter().filter(|m| m.len > 0 && frames(m).1 <= 1).count(),
+    );
     let markers: Vec<Value> = marks
         .into_iter()
         .map(|m| {
+            let (fa, flen) = frames(&m);
+            let flen = if m.len > 0 { flen.max(1) } else { 0 };
             let mut meta = m.meta;
             // the color as written: an import that finds another was recolored elsewhere
             meta["otio_color"] = json!(m.colour);
+            // as an import reads the frames back (one frame is a point), so frame rounding
+            // isn't taken for a move
+            let at = conv(fa, frame_rate, audio_rate);
+            meta["marked"] = json!([at, if flen <= 1 { 0 } else { conv(fa + flen, frame_rate, audio_rate) - at }]);
             json!({
                 "OTIO_SCHEMA": "Marker.2",
                 "metadata": { "vcsd": meta },
                 "name": m.name,
                 "color": m.colour,
-                "marked_range": range(m.at, m.len, sr),
+                "marked_range": range(fa, flen, fr.as_f64()),
                 "comment": m.comment,
             })
         })

@@ -663,6 +663,11 @@ impl Reader<'_> {
     fn markers_of(&mut self, v: &Value, shift: f64, window: Option<(f64, f64)>) {
         for m in v["markers"].as_array().into_iter().flatten() {
             let Some((a, d)) = range(&m["marked_range"]) else { continue };
+            // exactly one frame long: a point, as Resolve and the AAF adapter (from Media
+            // Composer's markers) write one
+            let dur = &m["marked_range"]["duration"];
+            let one_frame = dur["value"].as_f64() == Some(1.0) && dur["rate"].as_f64().is_some_and(|r| r > 0.0 && r < 1000.0);
+            let d = if one_frame { 0.0 } else { d };
             let (mut a, mut b) = (a + shift, a + shift + d.max(0.0));
             if let Some((w0, w1)) = window {
                 // a hair of slack: frame times in seconds don't compare exactly

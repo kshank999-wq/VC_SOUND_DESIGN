@@ -585,3 +585,35 @@ fn a_partial_export_marks_cue_durations_trimmed_to_its_range() {
     let durs: Vec<f64> = v["markers"].as_array().unwrap().iter().map(|m| m["duration"].as_f64().unwrap()).collect();
     assert_eq!(durs, [5.0 * sr as f64, 0.0, 1.5 * sr as f64], "as OpenTimelineIO reads them (in samples)");
 }
+
+#[test]
+fn otio_markers_are_in_frames_at_23_976() {
+    let (mut s, root) = session("otio2398", "23.976", "01:00:00:00");
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:05", "01:00:02:05", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:13", "01:00:06:07", "wind exterior", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    // spotted between frames (live spotting)
+    let odd = marker_tc(&mut s, "props", EventType::Point, "01:00:04:00", "01:00:04:00", "between frames", None);
+    s.state.markers.get_mut(&odd).unwrap().start_sample += 700;
+    s.state.markers.get_mut(&odd).unwrap().end_sample += 700;
+    let (start, end) = export::resolve_range(&s.state, &export::ExportRange::All).unwrap();
+    let o = otio::OtioOptions { name: "f".into(), start, end, exclude_temp_refs: false, prints: Default::default(), include_muted: false };
+    let file = root.join("f.otio");
+    otio::write(&s.state, &file, &Default::default(), &o).unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let mk = raw["tracks"]["markers"].as_array().unwrap();
+    let rate = 24000.0 / 1001.0;
+    let got: Vec<(String, f64, f64)> = mk
+        .iter()
+        .map(|m| {
+            let r = &m["marked_range"];
+            assert_eq!(r["start_time"]["rate"].as_f64(), Some(rate), "frames at 23.976");
+            (m["name"].as_str().unwrap().to_string(), r["start_time"]["value"].as_f64().unwrap(), r["duration"]["value"].as_f64().unwrap())
+        })
+        .collect();
+    let at = |n: &str| got.iter().find(|g| g.0 == n || mk.iter().any(|m| m["name"] == g.0.as_str() && m["comment"] == n)).unwrap().clone();
+    assert_eq!((at("wind exterior").1, at("wind exterior").2), (13.0, 5.0 * 24.0 + 18.0), "whole frames: 00:13 to 06:07");
+    assert_eq!((at("glass smash").1, at("glass smash").2), (2.0 * 24.0 + 5.0, 0.0), "a point: no duration");
+    assert_eq!(at("between frames").1, 4.0 * 24.0, "snapped to the nearest frame");
+}

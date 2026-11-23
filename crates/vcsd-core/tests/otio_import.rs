@@ -1466,7 +1466,7 @@ fn otio_spotting_keeps_full_timing_unless_moved_elsewhere() {
     for m in raw["tracks"]["markers"].as_array_mut().unwrap() {
         if m["comment"] == "walk to door" {
             let t = m["marked_range"]["start_time"]["value"].as_f64().unwrap();
-            m["marked_range"]["start_time"]["value"] = serde_json::json!(t + sr as f64);
+            m["marked_range"]["start_time"]["value"] = serde_json::json!(t + 24.0); // one second: 24 frames
             m["color"] = serde_json::json!("RED");
         }
     }
