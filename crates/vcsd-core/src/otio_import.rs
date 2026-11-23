@@ -98,6 +98,11 @@ pub struct OtioImportReport {
     pub stereo_tracks: usize,
     pub clips: usize,
     pub markers: usize,
+    /// Cues restored with their markers (from our metadata), scenes added for them, and
+    /// clips linked back to their cues.
+    pub cues: usize,
+    pub scenes_added: usize,
+    pub linked_clips: usize,
     pub automated_tracks: usize,
     /// Inserts rebuilt (built-in effects and plugins), plugins among them, and
     /// plugin parameters that came with automation.
@@ -647,8 +652,8 @@ fn level_effect(e: &Value, t0: f64, len: f64) -> Option<(bool, Level)> {
 
 struct Reader<'a> {
     notes: &'a mut Notes,
-    /// (start, end, label, color), in seconds from the timeline start
-    markers: Vec<(f64, f64, String, Option<String>)>,
+    /// (start, end, label, color, our metadata), in seconds from the timeline start
+    markers: Vec<(f64, f64, String, Option<String>, Value)>,
 }
 
 impl Reader<'_> {
@@ -679,7 +684,12 @@ impl Reader<'_> {
                 (true, false) => comment,
                 (true, true) => "OTIO marker".into(),
             };
-            self.markers.push((a, b, label, otio_color(&m["color"])));
+            // our metadata, and the color name as written (to tell whether it was changed since)
+            let mut meta = m["metadata"]["vcsd"].clone();
+            if meta.is_object() {
+                meta["color_now"] = m["color"].clone();
+            }
+            self.markers.push((a, b, label, otio_color(&m["color"]), meta));
         }
     }
 
@@ -1051,7 +1061,8 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             clips.push(ClipInstance {
                 id: new_id("clp"),
                 track_id: tid.clone(),
-                cue_id: None,
+                // linked to its restored cue below (our metadata's id, remapped)
+                cue_id: v["cue_id"].as_str().map(String::from),
                 asset_id,
                 timeline_start: base + smp(it.at),
                 source_offset: smp(it.source),
@@ -1063,7 +1074,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 muted: it.muted || zero_muted,
                 take_id: None,
                 performance_event_id: None,
-                sub_index: None,
+                sub_index: v["sub_index"].as_u64().map(|x| x as u32),
                 is_placeholder: false,
                 history: vec![],
             });
@@ -1289,30 +1300,190 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
     report.media_written = media.cache.values().filter(|r| matches!(r, Ok((_, true)))).count();
     report.missing_media = missing.into_iter().map(|(k, n)| format!("{k} — {n} clip{}", if n == 1 { "" } else { "s" })).collect();
 
-    // ---- markers → spotting markers (inside scenes)
-    for (at, until, label, color) in markers {
+    // ---- scenes (ours): added where the project has none, so their markers have a home
+    let at_meta = |v: &Value| from_meta(v).map(|x| base + x);
+    for sc in tl["metadata"]["vcsd"]["scenes"].as_array().into_iter().flatten() {
+        let (Some(a), Some(b)) = (at_meta(&sc["start_sample"]), at_meta(&sc["end_sample"])) else { continue };
+        let number = sc["number"].as_str().unwrap_or("OTIO").to_string();
+        let overlapping: Vec<&Scene> = s.scenes.values().filter(|x| x.start_sample < b && x.end_sample > a).collect();
+        if !overlapping.is_empty() {
+            // the same scene (by number) is no news; a different one there wins over ours
+            if !overlapping.iter().any(|x| x.number.eq_ignore_ascii_case(&number)) {
+                notes.add("scenes where the project has its own kept the project's", 1);
+            }
+            continue;
+        }
+        let title = sc["title"].as_str().unwrap_or_default();
+        let taken = |n: &str| s.scenes.values().any(|x| x.number.eq_ignore_ascii_case(n));
+        let mut n = number.clone();
+        let mut k = 2;
+        while taken(&n) {
+            n = format!("{number}.{k}");
+            k += 1;
+        }
+        if n != number {
+            notes.add("scene numbers already in the project given a suffix", 1);
+        }
+        if let Ok(id) = crate::spotting::add_scene(s, &n, title, a, b) {
+            let x = s.scenes.get_mut(&id).expect("just added");
+            x.handle_samples = from_meta(&sc["handle_samples"]).unwrap_or(0);
+            x.external_id = sc["external_id"].as_str().map(String::from);
+            x.next_cue_seq = sc["next_cue_seq"].as_u64().unwrap_or(1) as u32;
+            report.scenes_added += 1;
+        }
+    }
+
+    // ---- markers → spotting markers (inside scenes), cues restored from our metadata
+    let mut cue_map: HashMap<String, String> = HashMap::new();
+    for (at, until, label, color, meta) in markers {
+        let old_cue: Option<Cue> = serde_json::from_value(meta["cue"].clone()).ok();
+        let old_marker: Option<Marker> = serde_json::from_value(meta["marker"].clone()).ok();
+        // imported back into the project it came from: already here
+        if let Some(c) = old_cue.as_ref().filter(|c| s.cues.contains_key(&c.id)) {
+            cue_map.insert(c.id.clone(), c.id.clone());
+            notes.add("cues already in the project left as they are", 1);
+            continue;
+        }
+        if old_cue.is_none() && old_marker.as_ref().is_some_and(|m| s.markers.contains_key(&m.id)) {
+            notes.add("markers already in the project left as they are", 1);
+            continue;
+        }
         // both ends from timeline time, so a range's length doesn't drift by rounding
-        let a = base + smp(at);
+        let mut a = base + smp(at);
         let len = (smp(until) - smp(at)).max(0);
+        let mut end = a + len;
+        // the spotting record: our full timing (beyond a partial export's range, with its
+        // taps), unless the marker was moved or resized since
+        let (src_start, src_end, src_subs, src_kind, src_origin) = match (&old_marker, &old_cue) {
+            (Some(m), _) => (m.start_sample, m.end_sample, m.sub_events.clone(), Some(m.kind), Some(m.origin)),
+            (None, Some(c)) => (c.start_sample, c.end_sample, c.sub_events.clone(), Some(c.event_type), Some(c.timing_origin)),
+            _ => (0, 0, vec![], None, None),
+        };
+        let mut subs = vec![];
+        let mut kind = if len > 0 { EventType::Range } else { EventType::Point };
+        if let Some(k) = src_kind {
+            let marked = meta["marked"].as_array().map(|v| (from_meta(&v[0]), from_meta(&v[1])));
+            let unchanged =
+                marked.is_some_and(|(x, l)| x.is_some_and(|x| (base + x - a).abs() <= 1) && l.is_some_and(|l| (l - len).abs() <= 1));
+            let rebase = |x: i64| base + (x as f64 * psr as f64 / meta_sr).round() as i64;
+            if unchanged {
+                (a, end) = (rebase(src_start), rebase(src_end));
+                subs = src_subs.iter().map(|&x| rebase(x)).collect();
+            } else {
+                notes.add("markers moved or resized since our export keep their new timing", 1);
+                let delta = a - rebase(src_start);
+                subs = src_subs.iter().map(|&x| rebase(x) + delta).filter(|&x| x >= a && x <= end.max(a)).collect();
+            }
+            kind = match k {
+                EventType::Repeated => EventType::Repeated,
+                _ if end > a => EventType::Range,
+                _ => EventType::Point,
+            };
+        }
         if s.scene_at(a).is_none() {
             notes.add("markers outside every scene left out (add scenes, then import again)", 1);
             continue;
         }
-        let lane = marker_lane(s, "OTIO markers", "otio");
+        // its lane: the same name and category, else made; a cue without one goes to
+        // a lane of its category
+        let lane = if let Some(l) = meta["lane"].as_object() {
+            let name = l.get("name").and_then(Value::as_str).unwrap_or("OTIO markers").to_string();
+            let cat: Category =
+                l.get("category").and_then(|c| serde_json::from_value(c.clone()).ok()).unwrap_or(Category::Custom("otio".into()));
+            match s.lanes.values().find(|x| x.name == name && x.category == cat) {
+                Some(x) => x.id.clone(),
+                None => {
+                    let order = s.lanes.values().map(|x| x.order + 1).max().unwrap_or(0);
+                    let color = l.get("color").and_then(Value::as_str).unwrap_or_default().to_string();
+                    notes.add("marker lanes made for the OTIO's markers", 1);
+                    crate::spotting::add_lane(s, &name, cat, &color, order)
+                }
+            }
+        } else if let Some(c) = &old_cue {
+            match s.lanes.values().filter(|x| x.category == c.category).min_by_key(|x| x.order) {
+                Some(x) => x.id.clone(),
+                None => marker_lane(s, "OTIO markers", "otio"),
+            }
+        } else {
+            marker_lane(s, "OTIO markers", "otio")
+        };
+        let identity = meta["identity"].as_str().and_then(|n| s.identities.values().find(|i| i.name == n)).map(|i| i.id.clone());
+        if meta["identity"].is_string() && identity.is_none() {
+            notes.add("sound identities not in this project left off their markers and cues", 1);
+        }
+        let label = old_marker.as_ref().map(|m| m.label.clone()).or(old_cue.as_ref().map(|c| c.description.clone())).unwrap_or(label);
         let nm = crate::spotting::NewMarker {
             lane_id: lane,
             scene_id: None,
-            kind: if len > 0 { EventType::Range } else { EventType::Point },
+            kind,
             start: a,
-            end: a + len,
+            end,
             label,
-            identity_id: None,
-            sub_events: vec![],
-            origin: TimingOrigin::Imported,
+            identity_id: identity.clone(),
+            sub_events: subs,
+            origin: src_origin.unwrap_or(TimingOrigin::Imported),
         };
-        if let Ok(id) = crate::spotting::add_marker(s, nm) {
-            s.markers.get_mut(&id).expect("just added").color = color;
-            report.markers += 1;
+        let Ok(mid) = crate::spotting::add_marker(s, nm) else { continue };
+        report.markers += 1;
+        // its color: ours, unless it was recolored elsewhere since
+        let recolored = meta["otio_color"].is_string() && meta["color_now"] != meta["otio_color"];
+        let m = s.markers.get_mut(&mid).expect("just added");
+        m.color = match &old_marker {
+            Some(om) if !recolored => om.color.clone(),
+            None if old_cue.is_some() && !recolored => None,
+            _ => color,
+        };
+        if let Some(om) = &old_marker {
+            m.approved = om.approved;
+        }
+        // the cue, as it was
+        let Some(oc) = old_cue else { continue };
+        let Ok(cid) = crate::spotting::cue_from_marker(s, &mid) else { continue };
+        cue_map.insert(oc.id.clone(), cid.clone());
+        report.cues += 1;
+        let code_free = !s.cues.values().any(|c| c.id != cid && c.code == oc.code);
+        let scene_id = s.cues[&cid].scene_id.clone();
+        if code_free {
+            // later cues of its scene number on from it
+            if let (Some(seq), Some(sc)) = (oc.code.rsplit('-').next().and_then(|n| n.parse::<u32>().ok()), s.scenes.get_mut(&scene_id)) {
+                if oc.code.starts_with(&format!("{}-", sc.number)) {
+                    sc.next_cue_seq = sc.next_cue_seq.max(seq + 1);
+                }
+            }
+        } else {
+            notes.add("cue codes already in the project renumbered", 1);
+        }
+        let assets_have = |id: &Option<String>| id.clone().filter(|i| s.assets.contains_key(i));
+        let (placeholder, over) = (assets_have(&oc.placeholder_asset_id), assets_have(&oc.asset_override_id));
+        let script = oc.script_ref_id.clone().filter(|i| s.script_refs.contains_key(i));
+        let c = s.cues.get_mut(&cid).expect("just made");
+        if code_free {
+            c.code = oc.code;
+        }
+        c.category = oc.category;
+        c.description = oc.description;
+        c.intent = oc.intent;
+        c.character = oc.character;
+        c.surface = oc.surface;
+        c.prop = oc.prop;
+        c.review_status = oc.review_status;
+        c.status = oc.status;
+        c.priority = oc.priority;
+        c.owner = oc.owner;
+        c.notes = oc.notes;
+        c.external_id = oc.external_id;
+        c.pending_shift = oc.pending_shift.map(|x| (x as f64 * psr as f64 / meta_sr).round() as i64);
+        c.placeholder_asset_id = placeholder;
+        c.asset_override_id = over;
+        c.script_ref_id = script;
+    }
+    // clips back on their cues
+    for c in s.clips.values_mut().filter(|c| report.tracks.contains(&c.track_id)) {
+        c.cue_id = c.cue_id.as_ref().and_then(|old| cue_map.get(old)).cloned();
+        if c.cue_id.is_some() {
+            report.linked_clips += 1;
+        } else {
+            c.sub_index = None;
         }
     }
     report.soloed_tracks = report.tracks.iter().filter(|t| s.tracks[t.as_str()].solo).count();

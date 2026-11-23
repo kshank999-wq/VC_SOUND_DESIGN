@@ -52,6 +52,8 @@ pub struct OtioReport {
     /// Fades written as transitions to or from silence.
     pub fade_transitions: usize,
     pub markers: usize,
+    /// Of the markers, spotting markers not made into cues yet.
+    pub spotting_markers: usize,
     pub media_files: usize,
     pub printed_tracks: usize,
     pub losses: Vec<String>,
@@ -103,23 +105,114 @@ pub(crate) fn colour(c: &Category) -> &'static str {
 /// trimmed to it — a range cue that began earlier is marked from the range's start,
 /// as its audio is.
 pub(crate) fn cue_marks(s: &ProjectState, start: i64, end: i64) -> Vec<(&Cue, i64, i64)> {
-    let mut v: Vec<(&Cue, i64, i64)> = s
-        .cues
-        .values()
-        .filter(|c| {
-            if c.end_sample > c.start_sample {
-                c.start_sample < end && c.end_sample > start
-            } else {
-                c.start_sample >= start && c.start_sample < end
-            }
-        })
-        .map(|c| {
-            let a = c.start_sample.max(start);
-            (c, a - start, (c.end_sample.min(end) - a).max(0))
-        })
-        .collect();
+    let mut v: Vec<(&Cue, i64, i64)> =
+        s.cues.values().filter_map(|c| mark_span(c.start_sample, c.end_sample, start, end).map(|(at, len)| (c, at, len))).collect();
     v.sort_by(|a, b| (a.1, &a.0.code).cmp(&(b.1, &b.0.code)));
     v
+}
+
+/// `a..b` (a point when equal) as an export of `start..end` marks it: its start and
+/// length relative to `start`, trimmed to the range; `None` when outside it.
+fn mark_span(a: i64, b: i64, start: i64, end: i64) -> Option<(i64, i64)> {
+    let inside = if b > a { a < end && b > start } else { a >= start && a < end };
+    inside.then(|| {
+        let x = a.max(start);
+        (x - start, (b.min(end) - x).max(0))
+    })
+}
+
+/// A record as our metadata carries it: every field, its timeline positions (`keys`,
+/// and `lists` of them) made relative to the export's start.
+fn relative<T: serde::Serialize>(v: &T, start: i64, keys: &[&str], lists: &[&str]) -> Value {
+    let mut v = serde_json::to_value(v).unwrap_or(Value::Null);
+    for k in keys {
+        if let Some(x) = v[*k].as_i64() {
+            v[*k] = json!(x - start);
+        }
+    }
+    for k in lists {
+        if let Some(a) = v[*k].as_array() {
+            v[*k] = a.iter().filter_map(Value::as_i64).map(|x| x - start).collect();
+        }
+    }
+    v
+}
+
+/// A marker lane as our metadata carries it (matched by name and category on import).
+fn lane_meta(s: &ProjectState, lane_id: &str) -> Value {
+    s.lanes.get(lane_id).map(|l| json!({ "name": l.name, "category": l.category, "color": l.color })).unwrap_or(Value::Null)
+}
+
+fn identity_name(s: &ProjectState, id: Option<&String>) -> Value {
+    id.and_then(|i| s.identities.get(i)).map(|i| json!(i.name)).unwrap_or(Value::Null)
+}
+
+/// Every marker the export carries: cues (with their spotting markers) and spotting
+/// markers not made into cues yet, each with the whole record in `metadata.vcsd`
+/// so VC Sound Design's import restores it. Sorted by position.
+fn timeline_markers(s: &ProjectState, start: i64, end: i64, sr: f64) -> (Vec<Value>, usize) {
+    let marker_meta = |m: &Marker| relative(m, start, &["start_sample", "end_sample"], &["sub_events"]);
+    let mut out: Vec<(i64, String, Value)> = vec![];
+    for (c, at, len) in cue_marks(s, start, end) {
+        let mk = c
+            .marker_id
+            .as_ref()
+            .and_then(|m| s.markers.get(m))
+            .or_else(|| s.markers.values().find(|m| m.cue_id.as_deref() == Some(c.id.as_str())));
+        let colour = cue_colour(s, c);
+        let lane = mk.map(|m| m.lane_id.clone()).or(c.lane_id.clone()).unwrap_or_default();
+        out.push((
+            at,
+            c.code.clone(),
+            json!({
+                "OTIO_SCHEMA": "Marker.2",
+                "metadata": { "vcsd": {
+                    "cue_id": c.id, "code": c.code, "category": c.category.display(),
+                    "cue": relative(c, start, &["start_sample", "end_sample"], &["sub_events"]),
+                    "marker": mk.map(marker_meta),
+                    "lane": lane_meta(s, &lane),
+                    "identity": identity_name(s, c.identity_id.as_ref()),
+                    // as written: an import that finds the marker moved or recolored elsewhere keeps that
+                    "marked": [at, len], "otio_color": colour,
+                } },
+                "name": c.code,
+                "color": colour,
+                "marked_range": range(at, len, sr),
+                "comment": c.description,
+            }),
+        ));
+    }
+    let mut spotting = 0;
+    for m in s.markers.values().filter(|m| m.cue_id.as_ref().is_none_or(|c| !s.cues.contains_key(c))) {
+        let Some((at, len)) = mark_span(m.start_sample, m.end_sample, start, end) else { continue };
+        let lane = s.lanes.get(&m.lane_id);
+        let colour = m
+            .color
+            .as_deref()
+            .or(lane.map(|l| l.color.as_str()))
+            .and_then(nearest_named)
+            .unwrap_or_else(|| lane.map(|l| colour(&l.category)).unwrap_or("CYAN"));
+        spotting += 1;
+        out.push((
+            at,
+            m.label.clone(),
+            json!({
+                "OTIO_SCHEMA": "Marker.2",
+                "metadata": { "vcsd": {
+                    "marker": marker_meta(m),
+                    "lane": lane_meta(s, &m.lane_id),
+                    "identity": identity_name(s, m.identity_id.as_ref()),
+                    "marked": [at, len], "otio_color": colour,
+                } },
+                "name": m.label,
+                "color": colour,
+                "marked_range": range(at, len, sr),
+                "comment": "",
+            }),
+        ));
+    }
+    out.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    (out.into_iter().map(|x| x.2).collect(), spotting)
 }
 
 /// OTIO's named marker colors as RGB (the values OTIO import reads them as).
@@ -480,7 +573,18 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         }
         let mut pieces: Vec<Piece> = vec![];
         if printed(&t.id) {
-            pieces.push(Piece { at: start, len, source: 0, fade_in: 0, fade_out: 0, gain: 1.0, asset: print_key(&t.id), muted: false });
+            pieces.push(Piece {
+                at: start,
+                len,
+                source: 0,
+                fade_in: 0,
+                fade_out: 0,
+                gain: 1.0,
+                asset: print_key(&t.id),
+                muted: false,
+                cue: None,
+                sub: None,
+            });
         } else {
             let mut clips: Vec<&ClipInstance> = s.clips.values().filter(|c| c.track_id == t.id).collect();
             clips.sort_by(|a, b| (a.timeline_start, &a.id).cmp(&(b.timeline_start, &b.id)));
@@ -564,6 +668,9 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                         "gain_db": (gain_db * 1000.0).round() / 1000.0,
                         "fade_in": p.fade_in, "fade_out": p.fade_out,
                         "asset_id": if printed(&t.id) { Value::Null } else { json!(p.asset) },
+                        // the cue it realises (a printed track's audio is the whole track's)
+                        "cue_id": if printed(&t.id) { None } else { p.cue.clone() },
+                        "sub_index": if printed(&t.id) { None } else { p.sub },
                     } },
                     "name": name,
                     "source_range": range(p.source, p.len, sr),
@@ -634,21 +741,14 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         }
     }
 
-    // ---- cues → timeline markers
-    let markers: Vec<Value> = cue_marks(s, start, end)
-        .into_iter()
-        .map(|(c, at, len)| {
-            json!({
-                "OTIO_SCHEMA": "Marker.2",
-                "metadata": { "vcsd": { "cue_id": c.id, "code": c.code, "category": c.category.display() } },
-                "name": c.code,
-                "color": cue_colour(s, c),
-                "marked_range": range(at, len, sr),
-                "comment": c.description,
-            })
-        })
-        .collect();
+    // ---- cues and spotting markers → timeline markers
+    let (markers, spotting) = timeline_markers(s, start, end, sr);
     report.markers = markers.len();
+    report.spotting_markers = spotting;
+    // the scenes the range touches (whole, relative to its start)
+    let mut scenes: Vec<&Scene> = s.scenes.values().filter(|sc| sc.start_sample < end && sc.end_sample > start).collect();
+    scenes.sort_by_key(|sc| sc.start_sample);
+    let scenes: Vec<Value> = scenes.into_iter().map(|sc| relative(sc, start, &["start_sample", "end_sample"], &[])).collect();
     report.tracks = children.len();
     report.media_files = children
         .iter()
@@ -665,6 +765,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
             "project": s.project.name, "sample_rate": s.project.sample_rate, "frame_rate": fr.label(),
             "start_tc": tb.tc_at(start), "drop_frame": fr.drop_frame,
             "buses": bus_tree(s, start),
+            "scenes": scenes,
         } },
         "name": o.name,
         "global_start_time": rt(tb.frame_at(start) as f64, fr.as_f64()),

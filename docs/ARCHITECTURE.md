@@ -88,6 +88,10 @@ content.
 | Stereo tracks | Two mono tracks hard-panned L/R; stereo media is linked per channel |
 | Pan on mono tracks, static or automated | Mono Audio Pan (Pan = (pan + 1) / 2) around the track; the breakpoints map exactly because both sides interpolate pan linearly. The receiving app's pan law applies (the app uses −3 dB constant power) |
 | Balance on stereo tracks, static or automated | Folded into each side's gain curve (with any volume automation), fitted within 0.1 dB, including the corner where the balance crosses centre |
+| Spotting markers not made into cues yet | Timeline markers too (name = label, no comment), in their own color (nearest OTIO name), else their lane's, as points or ranges trimmed to the range like cues |
+| The whole spotting record | Each marker's `metadata.vcsd`: the cue (every field: code, category, kind, taps, description, intent, status, priority, owner, notes, review state, …), its spotting marker (label, kind, taps, timing origin, color, approval), its lane (name, category, color) and sound identity (by name). Times are sample offsets from the range start, untrimmed: a partial export keeps each cue's whole timing. `marked` and `otio_color` record the marker as written, so the import can tell whether it was edited elsewhere |
+| Scenes | `metadata.vcsd.scenes` on the timeline: the scenes the range touches, whole (number, title, extent, handles, cue numbering) |
+| A clip's cue | `metadata.vcsd.cue_id` and `sub_index` on the clip (not on printed tracks, whose audio is the whole track's) |
 | Solo | Monitoring state, not applied: every track is exported audible. The flag is in the "VCSD" comment (below) and listed in the report |
 | Track order and folders | AAF tracks in project order (folder, position, name); each one's folder and position in the "VCSD" comment |
 | Track color | In the "VCSD" comment ("#rrggbb"; absent when the track uses its category's): AAF has no track color |
@@ -214,6 +218,9 @@ tracks as new tracks in a folder `OTIO/<timeline>`, placed at `global_start_time
 | A constant zero gain effect on a clip or track, without our metadata (how AAF, which has no mute, carries one through the AAF adapter) | A muted clip or track, its other gains kept as its levels, so unmuting brings the sound back (noted) |
 | Markers on the timeline, tracks, clips, gaps and compound clips | Spotting markers in an "OTIO markers" lane (name — comment), for those inside a scene: a marker with a duration becomes a range marker of that length (both ends taken from timeline time, so the length doesn't drift by rounding), one without a point. An item's markers are in its own time; on a clip, gap or compound clip a range is trimmed to the part the timeline uses, and a marker wholly in unused media is left out (both noted). Each comes with its color: OTIO's names (RED #ff0000, PINK #ff8080, ORANGE #ff7f00, PURPLE #7f007f, …), or a `Color`/"#rrggbb" where a writer puts one |
 | `metadata.vcsd` (our own export) | Clip gain and fades, track fader, pan, channels, volume and pan automation |
+| `metadata.vcsd.scenes` (our own export) | Scenes added where the project has none, so the markers have a home (an overlapping scene of the same number is the same scene; another one there is kept and noted). A number already used elsewhere gets a suffix ("1.2") |
+| Markers with `metadata.vcsd` (our own export) | The spotting record as it was: each marker in its lane (matched by name and category, else made), with its label, kind, taps, timing origin, color, approval and sound identity (by name, when the project has it). A cue comes back as a cue with every field and its code (renumbered only when the project already uses it; the scene numbers on from it). Its timing is our metadata's, whole, unless the marker was moved or resized elsewhere: then its new place and length win and the taps move with it. A color changed elsewhere wins too. Markers and cues the project already has (importing back into the project the file came from) are left as they are, not doubled |
+| A clip's `metadata.vcsd.cue_id` | The clip back on its restored cue (or on the project's own, when the cue was already there), with its sub-event |
 | Effects with `metadata.vcsd.insert` (our own export) | The track's inserts, in order: built-in effects with their settings, plugins with their id, format, saved state and values under new slot ids. A disabled effect (`enabled: false`) comes in bypassed |
 | `metadata.vcsd.buses` (our own export) | The buses the imported tracks feed, with every bus above them. They are matched by name under the same parent (the root is the project's master) or created. Their level, mute, inserts (plugins under new slot ids) and plugin automation are set, and their volume and balance lanes are replaced within the imported range. The tracks then keep their own levels and are routed to them. See below for when |
 | A plugin effect's `metadata.vcsd.automation` | Its parameter lanes. These come from the raw `points` (sample offsets, rescaled from the exporting project's rate), or, when a tool kept only the `keyframe_values`, from those (fractions of the track's range). "Constant" interpolation becomes holds; curved interpolation is read as linear |
@@ -255,6 +262,17 @@ library in an editor's layout (`scripts/otio/make_fixture.py`) and checks the fo
 - a moved AIFF found by name and byte-swapped correctly;
 - a nested stack trimmed to its range;
 - a missing reference reported, and the timeline and clip markers.
+
+A spotted, cued and populated project exported and imported into an empty one comes back with:
+- both scenes; three cues with every field (code, kind, taps, status, priority, owner, notes,
+  intent, sound identity), each in its lane on its spotting marker;
+- every clip linked back to its cue with its sub-event (a loop's repeats on the loop's cue);
+- two spotting markers not made into cues: still not, in their lanes, with their color and length;
+- the next cue code numbering on from the restored ones.
+
+Imported back into the original project nothing is doubled, and its clips link to the cues
+already there. A partial export restores a trimmed cue's whole timing. A marker moved and
+recolored in the file keeps its new place and color, and its taps move with it.
 
 The AAF import's editor-style fixture (pyaaf2), converted to OTIO by the AAF adapter, brings in:
 - its clip gain envelope as the track's volume lane, within 0.11 dB;

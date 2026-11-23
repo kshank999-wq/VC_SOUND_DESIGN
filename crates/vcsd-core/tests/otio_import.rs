@@ -72,8 +72,8 @@ fn an_exported_otio_imports_back_to_the_same_mix() {
     assert!(rep.notes.is_empty(), "our own metadata carries the mix: {:?}", rep.notes);
     let st2 = &s2.state;
     let color = |what: &str| st2.markers.values().find(|m| m.label.contains(what)).unwrap().color.clone();
-    assert_eq!(color("glass smash").as_deref(), Some("#0000ff"), "OTIO marker colors are names: the nearest one");
-    assert_eq!(color("wind exterior").as_deref(), Some("#00ff00"), "a background cue: its category's green");
+    assert_eq!(color("glass smash").as_deref(), Some("#12a4c8"), "OTIO marker colors are names, but our metadata keeps the exact one");
+    assert_eq!(color("wind exterior"), None, "no color of its own, as before: its lane's");
     let wind = st2.markers.values().find(|m| m.label.contains("wind exterior")).unwrap();
     assert_eq!((wind.kind, wind.end_sample - wind.start_sample), (EventType::Range, 6 * sr), "the range cue's duration");
     assert_eq!(st2.tracks.len(), s.state.tracks.len());
@@ -1302,4 +1302,186 @@ fn track_colors_come_back_from_otio() {
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "#ff7f00", "{}", String::from_utf8_lossy(&out.stderr));
     }
+}
+
+/// A spotted, cued and populated project for the spotting round trips.
+fn spotted_project(name: &str) -> (state::Session, std::path::PathBuf) {
+    let (mut s, root) = session(name, "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    scene(&mut s, "2", "01:00:10:00", "01:00:20:00");
+    let steps = s
+        .edit("i", |st| {
+            add_identity(
+                st,
+                NewIdentity { name: "Gravel steps".into(), category: Category::Footsteps, character: None, surface: None, prop: None },
+            )
+        })
+        .unwrap();
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:08:00", "wind exterior", None);
+    let walk = marker_tc(&mut s, "footsteps", EventType::Repeated, "01:00:03:00", "01:00:05:00", "walk to door", Some(&steps));
+    let sr = s.state.project.sample_rate as i64;
+    let w0 = s.state.markers[&walk].start_sample;
+    s.state.markers.get_mut(&walk).unwrap().sub_events = vec![w0, w0 + sr / 2, w0 + sr, w0 + 3 * sr / 2];
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    // spotted after the cues were made: markers that aren't cues yet
+    let creak = marker_tc(&mut s, "props", EventType::Point, "01:00:06:00", "01:00:06:00", "maybe a creak", None);
+    s.state.markers.get_mut(&creak).unwrap().color = Some("#12a4c8".into());
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:12:00", "01:00:15:00", "traffic, scene 2", None);
+    // a cue's own details
+    let glass = s.state.cues.values_mut().find(|c| c.description == "glass smash").unwrap();
+    glass.status = CueStatus::NeedsRecording;
+    glass.priority = Priority::High;
+    glass.owner = "sam".into();
+    glass.notes = "bigger shards".into();
+    glass.intent = "startle".into();
+    (s, root)
+}
+
+fn otio_export(s: &mut state::Session, root: &Path) -> std::path::PathBuf {
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-23");
+    o.otio = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(root), &o)).unwrap();
+    r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap())
+}
+
+#[test]
+fn spotting_markers_cues_scenes_and_clip_links_come_back_from_otio() {
+    let (mut s, root) = spotted_project("otiospot");
+    let file = otio_export(&mut s, &root);
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let mk = raw["tracks"]["markers"].as_array().unwrap();
+    assert_eq!(mk.len(), 5, "three cues and two spotting markers");
+    let creak = mk.iter().find(|m| m["name"] == "maybe a creak").unwrap();
+    assert_eq!((creak["color"].as_str(), creak["metadata"]["vcsd"]["marker"]["color"].as_str()), (Some("BLUE"), Some("#12a4c8")));
+    assert_eq!(raw["metadata"]["vcsd"]["scenes"].as_array().unwrap().len(), 2);
+
+    // into a fresh project: no scenes, the identity there by name
+    let (mut s2, root2) = session("otiospot2", "24", "01:00:00:00");
+    s2.edit("i", |st| {
+        add_identity(
+            st,
+            NewIdentity { name: "Gravel steps".into(), category: Category::Footsteps, character: None, surface: None, prop: None },
+        )
+    })
+    .unwrap();
+    let rep = s2.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root2, &file))).unwrap();
+    assert_eq!((rep.scenes_added, rep.markers, rep.cues), (2, 5, 3), "{rep:?}");
+    assert_eq!(rep.linked_clips, rep.clips, "every clip back on its cue");
+    assert!(rep.notes.is_empty(), "{:?}", rep.notes);
+    let (st, st2) = (&s.state, &s2.state);
+    let mut scenes: Vec<(String, i64, i64)> = st2.scenes.values().map(|x| (x.number.clone(), x.start_sample, x.end_sample)).collect();
+    scenes.sort();
+    let mut want: Vec<(String, i64, i64)> = st.scenes.values().map(|x| (x.number.clone(), x.start_sample, x.end_sample)).collect();
+    want.sort();
+    assert_eq!(scenes, want, "scenes as they were");
+
+    // cues: every detail, by code
+    for c in st.cues.values() {
+        let c2 = st2.cues.values().find(|x| x.code == c.code).unwrap_or_else(|| panic!("cue {}", c.code));
+        assert_eq!(
+            (&c2.description, &c2.category, &c2.event_type, c2.start_sample, c2.end_sample, &c2.sub_events),
+            (&c.description, &c.category, &c.event_type, c.start_sample, c.end_sample, &c.sub_events),
+            "{}",
+            c.code
+        );
+        assert_eq!((c2.status, c2.priority, &c2.owner, &c2.notes, &c2.intent), (c.status, c.priority, &c.owner, &c.notes, &c.intent));
+        assert_eq!(
+            st2.identities.get(c2.identity_id.as_deref().unwrap_or("")).map(|i| &i.name),
+            st.identities.get(c.identity_id.as_deref().unwrap_or("")).map(|i| &i.name)
+        );
+        let (m, m2) = (&st.markers[c.marker_id.as_ref().unwrap()], &st2.markers[c2.marker_id.as_ref().unwrap()]);
+        assert_eq!(st2.lanes[&m2.lane_id].name, st.lanes[&m.lane_id].name, "{}: its lane", c.code);
+        assert_eq!(m2.cue_id.as_deref(), Some(c2.id.as_str()));
+        // its clips, linked back (a looped clip comes back as its repeats): the same span and sub-events
+        let span = |v: Vec<&ClipInstance>| {
+            let a = v.iter().map(|x| x.timeline_start).min();
+            let z = v.iter().map(|x| x.end()).max();
+            let mut subs: Vec<Option<u32>> = v.iter().map(|x| x.sub_index).collect();
+            subs.sort();
+            subs.dedup();
+            (a, z, subs)
+        };
+        let clips = span(st.clips.values().filter(|x| x.cue_id.as_deref() == Some(c.id.as_str()) && !x.muted).collect());
+        let clips2 = span(st2.clips.values().filter(|x| x.cue_id.as_deref() == Some(c2.id.as_str())).collect());
+        assert_eq!(clips2, clips, "{}: its clips", c.code);
+    }
+    assert_eq!(st2.cues.values().find(|c| c.description == "walk to door").unwrap().sub_events.len(), 4, "the taps");
+    // later cues number on from the restored ones
+    let next = s2.edit("n", |st| {
+        let sc = st.scenes.values().find(|x| x.number == "1").unwrap().id.clone();
+        next_cue_code(st, &sc, &Category::HardFx)
+    });
+    assert!(!s2.state.cues.values().any(|c| Some(&c.code) == next.as_ref().ok()), "{next:?}");
+
+    // the markers that aren't cues yet: still not, in their lanes, with their colors
+    let st2 = &s2.state;
+    let creak2 = st2.markers.values().find(|m| m.label == "maybe a creak").unwrap();
+    assert!(creak2.cue_id.is_none());
+    assert_eq!((st2.lanes[&creak2.lane_id].name.as_str(), creak2.color.as_deref()), ("Foley • Props", Some("#12a4c8")));
+    let traffic = st2.markers.values().find(|m| m.label == "traffic, scene 2").unwrap();
+    assert_eq!((traffic.kind, traffic.end_sample - traffic.start_sample), (EventType::Range, 3 * st2.project.sample_rate as i64));
+    assert_eq!(st2.scenes[&traffic.scene_id].number, "2");
+
+    // back into the project it came from: nothing doubled
+    let n = (s.state.markers.len(), s.state.cues.len());
+    let rep = s.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root, &file))).unwrap();
+    assert_eq!((rep.markers, rep.cues, rep.scenes_added), (0, 0, 0));
+    assert_eq!((s.state.markers.len(), s.state.cues.len()), n);
+    assert!(rep.linked_clips > 0, "its clips on the cues already there");
+    assert!(rep.notes.iter().any(|x| x.starts_with("cues already in the project left as they are (3)")), "{:?}", rep.notes);
+    assert!(rep.notes.iter().any(|x| x.starts_with("markers already in the project left as they are (2)")), "{:?}", rep.notes);
+}
+
+#[test]
+fn otio_spotting_keeps_full_timing_unless_moved_elsewhere() {
+    let (mut s, root) = spotted_project("otiospotpart");
+    let st = &s.state;
+    let sr = st.project.sample_rate as i64;
+    // 01:00:01:00 – 01:00:06:00: the wind (0–8 s) is marked trimmed
+    let o = otio::OtioOptions {
+        name: "part".into(),
+        start: sr,
+        end: 6 * sr,
+        exclude_temp_refs: false,
+        prints: Default::default(),
+        include_muted: false,
+    };
+    let file = root.join("part.otio");
+    let media = s.state.assets.values().map(|a| a.id.clone()).collect::<Vec<_>>();
+    let (media, _) = aaf::prepare_media(&s.state, &media, &root.join("media")).unwrap();
+    otio::write(&s.state, &file, &media, &o).unwrap();
+    let mut raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+
+    let (mut s2, root2) = session("otiospotpart2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &file, &OtioImportOptions::for_project(&root2, &file))).unwrap();
+    let wind = s2.state.cues.values().find(|c| c.description == "wind exterior").unwrap();
+    assert_eq!((wind.start_sample, wind.end_sample), (0, 8 * sr), "the whole cue, not the trimmed mark: {:?}", rep.notes);
+    let _ = &mut s;
+
+    // moved a second later (and recolored) in an editor: its new place and color win, its taps follow
+    for m in raw["tracks"]["markers"].as_array_mut().unwrap() {
+        if m["comment"] == "walk to door" {
+            let t = m["marked_range"]["start_time"]["value"].as_f64().unwrap();
+            m["marked_range"]["start_time"]["value"] = serde_json::json!(t + sr as f64);
+            m["color"] = serde_json::json!("RED");
+        }
+    }
+    let moved = root.join("moved.otio");
+    std::fs::write(&moved, serde_json::to_string(&raw).unwrap()).unwrap();
+    let (mut s3, root3) = session("otiospotpart3", "24", "01:00:00:00");
+    let rep = s3.edit("i", |st| import(st, &moved, &OtioImportOptions::for_project(&root3, &moved))).unwrap();
+    assert!(
+        rep.notes.iter().any(|n| n.starts_with("markers moved or resized since our export keep their new timing (1)")),
+        "{:?}",
+        rep.notes
+    );
+    let walk = s3.state.cues.values().find(|c| c.description == "walk to door").unwrap();
+    assert_eq!((walk.start_sample, walk.end_sample, walk.event_type), (4 * sr, 6 * sr, EventType::Repeated));
+    assert_eq!(walk.sub_events, vec![4 * sr, 4 * sr + sr / 2, 5 * sr, 5 * sr + sr / 2], "taps moved with it");
+    let m = &s3.state.markers[walk.marker_id.as_ref().unwrap()];
+    assert_eq!(m.color.as_deref(), Some("#ff0000"), "recolored elsewhere");
 }

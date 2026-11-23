@@ -58,3 +58,10 @@ test("OTIO summaries say which tracks came back soloed", () => {
 test("AAF summaries say which tracks came back soloed too", () => {
   assert.equal(aafSummary({ ...base, soloed_tracks: 2 })[2], "Solo: 2 tracks soloed, as exported");
 });
+
+test("OTIO summaries report restored cues, linked clips and added scenes", () => {
+  const { composition: _, ...rest } = base;
+  const l = otioSummary({ ...rest, timeline: "R", cues: 3, linked_clips: 2, scenes_added: 1 });
+  assert.equal(l[2], "Spotting: 3 cues restored with their markers (2 clips linked back); 1 scene added");
+  assert.equal(otioSummary({ ...rest, timeline: "R", cues: 0, scenes_added: 0 }).length, 2);
+});

@@ -217,9 +217,13 @@ pub fn markers_to_cues(s: &mut ProjectState, scene_id: Option<&str>) -> Result<V
         .map(|m| (m.start_sample, m.id.clone()))
         .collect();
     ids.sort();
-    let mut out = vec![];
-    for (_, mid) in ids {
-        let m = s.markers[&mid].clone();
+    ids.into_iter().map(|(_, mid)| cue_from_marker(s, &mid)).collect()
+}
+
+/// Make one marker's cue (as `markers_to_cues` does for each). Returns its id.
+pub fn cue_from_marker(s: &mut ProjectState, mid: &str) -> Result<String> {
+    {
+        let m = s.markers.get(mid).ok_or_else(|| not_found("marker", mid))?.clone();
         let lane = s.lanes.get(&m.lane_id).ok_or_else(|| not_found("lane", &m.lane_id))?.clone();
         let ident = m.identity_id.as_ref().and_then(|i| s.identities.get(i)).cloned();
         let category = ident.as_ref().map(|i| i.category.clone()).unwrap_or(lane.category.clone());
@@ -258,10 +262,9 @@ pub fn markers_to_cues(s: &mut ProjectState, scene_id: Option<&str>) -> Result<V
                 pending_shift: None,
             },
         );
-        s.markers.get_mut(&mid).unwrap().cue_id = Some(id.clone());
-        out.push(id);
+        s.markers.get_mut(mid).unwrap().cue_id = Some(id.clone());
+        Ok(id)
     }
-    Ok(out)
 }
 
 /// Give a script-only (conceptual) cue its picture timing after spotting.

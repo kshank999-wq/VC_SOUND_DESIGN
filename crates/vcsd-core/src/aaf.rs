@@ -532,6 +532,9 @@ pub(crate) struct Piece {
     pub(crate) asset: String,
     /// A muted clip kept (silenced) for VC Sound Design's own import.
     pub(crate) muted: bool,
+    /// The cue the clip realises (and which of its sub-events), for VC Sound Design's own import.
+    pub(crate) cue: Option<String>,
+    pub(crate) sub: Option<u32>,
 }
 
 fn piece_obj(p: &Piece, master: &[u8], channel: u32) -> Obj {
@@ -995,6 +998,8 @@ pub(crate) fn clip_pieces(s: &ProjectState, c: &ClipInstance, track_gain_db: f32
         gain,
         asset: c.asset_id.clone(),
         muted: c.muted,
+        cue: c.cue_id.clone(),
+        sub: c.sub_index,
     };
     if c.fill == FillMode::OneShot {
         return vec![one(c.timeline_start, c.length, c.source_offset, c.fade_in, c.fade_out)];
@@ -1118,7 +1123,18 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         }
         if printed(&t.id) {
             // one clip of the track's render, across the range, on one layer
-            let p = Piece { at: start, len, source: 0, fade_in: 0, fade_out: 0, gain: 1.0, asset: print_key(&t.id), muted: false };
+            let p = Piece {
+                at: start,
+                len,
+                source: 0,
+                fade_in: 0,
+                fade_out: 0,
+                gain: 1.0,
+                asset: print_key(&t.id),
+                muted: false,
+                cue: None,
+                sub: None,
+            };
             clip_count += 1;
             let chans = t.channels.clamp(1, 2) as u32;
             for ch in 1..=chans {
