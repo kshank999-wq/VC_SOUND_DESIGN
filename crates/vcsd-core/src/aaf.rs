@@ -562,12 +562,12 @@ fn piece_obj(p: &Piece, master: &[u8], channel: u32) -> Obj {
 /// It's an extension property; the template's meta-dictionary defines it at this pid.
 const PID_COMMENT_MARKER_COLOR: u16 = 0xffb9;
 
-/// A cue marker's color as `CommentMarkerColor`: its marker's own color, else its
-/// category's (the OTIO export's marker palette), each channel 0–65535 — as Media
-/// Composer writes marker colors and readers such as the OpenTimelineIO AAF adapter
-/// read them.
-fn marker_color(s: &ProjectState, c: &Cue) -> Vec<u8> {
-    crate::otio::cue_rgb(s, c).iter().flat_map(|v| (*v as u16 * 257).to_le_bytes()).collect()
+/// A marker's color as `CommentMarkerColor`: a cue's marker's own color, else its
+/// category's (the OTIO export's marker palette); a spotting marker's own, else its
+/// lane's. Each channel 0–65535 — as Media Composer writes marker colors and readers
+/// such as the OpenTimelineIO AAF adapter read them.
+fn marker_color(rgb: [u8; 3]) -> Vec<u8> {
+    rgb.iter().flat_map(|v| (*v as u16 * 257).to_le_bytes()).collect()
 }
 
 /// An indirect Rational amplitude value (linear gain).
@@ -1264,14 +1264,26 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         sl.props.push((0x4804, "PhysicalTrackNumber", Val::Data(u32v(i as u32 + 1))));
         slots.push(sl);
     }
-    // cue markers
-    let cues = crate::otio::cue_marks(s, start, end);
-    let markers = cues.len();
-    if !cues.is_empty() {
-        let items = cues
+    // cue markers, and spotting markers not made into cues yet
+    let marks = crate::otio::spotting_marks(s, start, end);
+    let markers = marks.len();
+    // what each marker was written as (its Comment and color), with its whole spotting
+    // record, for the "VCSD" comment
+    let text = |m: &crate::otio::Mark| if m.comment.is_empty() { m.name.clone() } else { format!("{} {}", m.name, m.comment) };
+    let marker_meta: Vec<serde_json::Value> = marks
+        .iter()
+        .map(|m| {
+            let mut v = m.meta.clone();
+            v["comment"] = serde_json::json!(text(m));
+            v["aaf_color"] = serde_json::json!(format!("#{:02x}{:02x}{:02x}", m.rgb[0], m.rgb[1], m.rgb[2]));
+            v
+        })
+        .collect();
+    if !marks.is_empty() {
+        let items = marks
             .iter()
-            .map(|&(c, at, len)| {
-                let text = if c.description.is_empty() { c.code.clone() } else { format!("{} {}", c.code, c.description) };
+            .map(|m| {
+                let (at, len) = (m.at, m.len);
                 // as Media Composer writes markers (readers such as the OpenTimelineIO AAF adapter
                 // read only these): a descriptive marker describing a track — here the timecode
                 // track, so readers that find no audio track to hang it on keep it on the timeline
@@ -1280,8 +1292,8 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                     // a range cue's duration (trimmed to the exported range); a point: none
                     .data(0x0202, "Length", i64v(len))
                     .data(0x0601, "Position", i64v(at))
-                    .data(0x0602, "Comment", utf16z(&text))
-                    .data(PID_COMMENT_MARKER_COLOR, "CommentMarkerColor", marker_color(s, c))
+                    .data(0x0602, "Comment", utf16z(&text(m)))
+                    .data(PID_COMMENT_MARKER_COLOR, "CommentMarkerColor", marker_color(m.rgb))
                     .data(0x6102, "DescribedSlots", u32v(1))
             })
             .collect();
@@ -1321,6 +1333,8 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                 "folder": t.folder, "order": t.order,
                 "color": t.color,
                 "muted_clips": audio_slots[i].2.iter().filter(|p| p.muted).map(|p| serde_json::json!([p.at - start, p.len])).collect::<Vec<_>>(),
+                // the cue each clip realises: [offset from the range start, cue id, sub-event]
+                "clip_cues": audio_slots[i].2.iter().filter_map(|p| p.cue.as_ref().map(|c| serde_json::json!([p.at - start, c, p.sub]))).collect::<Vec<_>>(),
                 "volume_db": lane(AutomationParam::VolumeDb),
                 "pan_automation": lane(AutomationParam::Pan),
                 // its inserts and their plugins' automation (not applied by other apps; a
@@ -1335,6 +1349,9 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         "sample_rate": s.project.sample_rate,
         "buses": crate::otio::bus_tree(s, start),
         "slots": slot_meta,
+        // the spotting: every marker's record (in the order written), and the scenes
+        "markers": marker_meta,
+        "scenes": crate::otio::scenes_meta(s, start, end),
     });
     let mut value = vec![0x4c];
     value.extend(hex(key::TYPE_STRING));

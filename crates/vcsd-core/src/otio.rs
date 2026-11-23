@@ -147,72 +147,88 @@ fn identity_name(s: &ProjectState, id: Option<&String>) -> Value {
     id.and_then(|i| s.identities.get(i)).map(|i| json!(i.name)).unwrap_or(Value::Null)
 }
 
-/// Every marker the export carries: cues (with their spotting markers) and spotting
-/// markers not made into cues yet, each with the whole record in `metadata.vcsd`
-/// so VC Sound Design's import restores it. Sorted by position.
-fn timeline_markers(s: &ProjectState, start: i64, end: i64, sr: f64) -> (Vec<Value>, usize) {
+/// A marker an export writes: a cue (with its spotting marker) or a spotting marker not
+/// made into a cue yet, positioned relative to the export's start.
+pub(crate) struct Mark {
+    pub(crate) at: i64,
+    pub(crate) len: i64,
+    /// The cue's code, or the marker's label.
+    pub(crate) name: String,
+    /// The cue's description; empty for a spotting marker.
+    pub(crate) comment: String,
+    /// Its OTIO color name, and its exact color (for AAF's RGB).
+    pub(crate) colour: &'static str,
+    pub(crate) rgb: [u8; 3],
+    /// The whole spotting record (`metadata.vcsd` in OTIO; the "VCSD" comment's
+    /// `markers` in AAF), so VC Sound Design's import restores it.
+    pub(crate) meta: Value,
+    pub(crate) is_cue: bool,
+}
+
+/// Every marker an export of `start..end` carries, sorted by position: cues and
+/// spotting markers not made into cues yet, each with the whole record — the cue (every
+/// field), its spotting marker, its lane and sound identity, untrimmed — and `marked`,
+/// the marker as written, so an import can tell whether it was moved elsewhere.
+pub(crate) fn spotting_marks(s: &ProjectState, start: i64, end: i64) -> Vec<Mark> {
     let marker_meta = |m: &Marker| relative(m, start, &["start_sample", "end_sample"], &["sub_events"]);
-    let mut out: Vec<(i64, String, Value)> = vec![];
+    let mut out: Vec<Mark> = vec![];
     for (c, at, len) in cue_marks(s, start, end) {
         let mk = c
             .marker_id
             .as_ref()
             .and_then(|m| s.markers.get(m))
             .or_else(|| s.markers.values().find(|m| m.cue_id.as_deref() == Some(c.id.as_str())));
-        let colour = cue_colour(s, c);
         let lane = mk.map(|m| m.lane_id.clone()).or(c.lane_id.clone()).unwrap_or_default();
-        out.push((
+        out.push(Mark {
             at,
-            c.code.clone(),
-            json!({
-                "OTIO_SCHEMA": "Marker.2",
-                "metadata": { "vcsd": {
-                    "cue_id": c.id, "code": c.code, "category": c.category.display(),
-                    "cue": relative(c, start, &["start_sample", "end_sample"], &["sub_events"]),
-                    "marker": mk.map(marker_meta),
-                    "lane": lane_meta(s, &lane),
-                    "identity": identity_name(s, c.identity_id.as_ref()),
-                    // as written: an import that finds the marker moved or recolored elsewhere keeps that
-                    "marked": [at, len], "otio_color": colour,
-                } },
-                "name": c.code,
-                "color": colour,
-                "marked_range": range(at, len, sr),
-                "comment": c.description,
+            len,
+            name: c.code.clone(),
+            comment: c.description.clone(),
+            colour: cue_colour(s, c),
+            rgb: cue_rgb(s, c),
+            meta: json!({
+                "cue_id": c.id, "code": c.code, "category": c.category.display(),
+                "cue": relative(c, start, &["start_sample", "end_sample"], &["sub_events"]),
+                "marker": mk.map(marker_meta),
+                "lane": lane_meta(s, &lane),
+                "identity": identity_name(s, c.identity_id.as_ref()),
+                "marked": [at, len],
             }),
-        ));
+            is_cue: true,
+        });
     }
-    let mut spotting = 0;
     for m in s.markers.values().filter(|m| m.cue_id.as_ref().is_none_or(|c| !s.cues.contains_key(c))) {
         let Some((at, len)) = mark_span(m.start_sample, m.end_sample, start, end) else { continue };
         let lane = s.lanes.get(&m.lane_id);
-        let colour = m
-            .color
-            .as_deref()
-            .or(lane.map(|l| l.color.as_str()))
-            .and_then(nearest_named)
-            .unwrap_or_else(|| lane.map(|l| colour(&l.category)).unwrap_or("CYAN"));
-        spotting += 1;
-        out.push((
+        let own = m.color.as_deref().or(lane.map(|l| l.color.as_str())).filter(|h| rgb(h).is_some());
+        let fallback = lane.map(|l| colour(&l.category)).unwrap_or("CYAN");
+        let colour = own.and_then(nearest_named).unwrap_or(fallback);
+        let named = NAMED.iter().find(|(n, _)| *n == fallback).map(|(_, v)| *v).unwrap_or([0, 255, 255]);
+        out.push(Mark {
             at,
-            m.label.clone(),
-            json!({
-                "OTIO_SCHEMA": "Marker.2",
-                "metadata": { "vcsd": {
-                    "marker": marker_meta(m),
-                    "lane": lane_meta(s, &m.lane_id),
-                    "identity": identity_name(s, m.identity_id.as_ref()),
-                    "marked": [at, len], "otio_color": colour,
-                } },
-                "name": m.label,
-                "color": colour,
-                "marked_range": range(at, len, sr),
-                "comment": "",
+            len,
+            name: m.label.clone(),
+            comment: String::new(),
+            colour,
+            rgb: own.and_then(rgb).unwrap_or(named),
+            meta: json!({
+                "marker": marker_meta(m),
+                "lane": lane_meta(s, &m.lane_id),
+                "identity": identity_name(s, m.identity_id.as_ref()),
+                "marked": [at, len],
             }),
-        ));
+            is_cue: false,
+        });
     }
-    out.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-    (out.into_iter().map(|x| x.2).collect(), spotting)
+    out.sort_by(|a, b| (a.at, &a.name).cmp(&(b.at, &b.name)));
+    out
+}
+
+/// The scenes an export of `start..end` touches, whole, relative to its start.
+pub(crate) fn scenes_meta(s: &ProjectState, start: i64, end: i64) -> Vec<Value> {
+    let mut scenes: Vec<&Scene> = s.scenes.values().filter(|sc| sc.start_sample < end && sc.end_sample > start).collect();
+    scenes.sort_by_key(|sc| sc.start_sample);
+    scenes.into_iter().map(|sc| relative(sc, start, &["start_sample", "end_sample"], &[])).collect()
 }
 
 /// OTIO's named marker colors as RGB (the values OTIO import reads them as).
@@ -742,13 +758,26 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     }
 
     // ---- cues and spotting markers → timeline markers
-    let (markers, spotting) = timeline_markers(s, start, end, sr);
+    let marks = spotting_marks(s, start, end);
+    report.spotting_markers = marks.iter().filter(|m| !m.is_cue).count();
+    let markers: Vec<Value> = marks
+        .into_iter()
+        .map(|m| {
+            let mut meta = m.meta;
+            // the color as written: an import that finds another was recolored elsewhere
+            meta["otio_color"] = json!(m.colour);
+            json!({
+                "OTIO_SCHEMA": "Marker.2",
+                "metadata": { "vcsd": meta },
+                "name": m.name,
+                "color": m.colour,
+                "marked_range": range(m.at, m.len, sr),
+                "comment": m.comment,
+            })
+        })
+        .collect();
     report.markers = markers.len();
-    report.spotting_markers = spotting;
-    // the scenes the range touches (whole, relative to its start)
-    let mut scenes: Vec<&Scene> = s.scenes.values().filter(|sc| sc.start_sample < end && sc.end_sample > start).collect();
-    scenes.sort_by_key(|sc| sc.start_sample);
-    let scenes: Vec<Value> = scenes.into_iter().map(|sc| relative(sc, start, &["start_sample", "end_sample"], &[])).collect();
+    let scenes = scenes_meta(s, start, end);
     report.tracks = children.len();
     report.media_files = children
         .iter()

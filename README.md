@@ -36,8 +36,8 @@ How the code maps onto them is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
   OpenTimelineIO (`.otio`), with clip gain, volume and pan automation and bus levels as AAF-style gain and pan effects,
   and track plugins (state and parameter automation) as effects VC Sound Design can rebuild,
   checked with the OpenTimelineIO library; see
-  [OTIO export](docs/ARCHITECTURE.md#otio-export-tier-2). The OTIO also carries the spotting: scenes, every cue with its details, spotting
-  markers not made into cues yet, and which clips realise which cue, all restored on import.
+  [OTIO export](docs/ARCHITECTURE.md#otio-export-tier-2). The OTIO and the AAF also carry the spotting: scenes, every cue with its details,
+  spotting markers not made into cues yet, and which clips realise which cue, all restored on import.
   OTIO timelines can be imported too
   (`vcsd import-otio`, or the menu); see [OTIO import](docs/ARCHITECTURE.md#otio-import). An editor's AAF can be imported
   (File menu, or `vcsd import-aaf`) as new tracks. It brings in clips, fades and crossfades,

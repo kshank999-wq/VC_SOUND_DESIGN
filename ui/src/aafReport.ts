@@ -5,12 +5,11 @@ export type AafReport = {
   media_linked: number; media_written: number; missing_media: string[]; notes: string[];
   bus_levels?: string; buses_restored?: number; buses_created?: number; buses_matched?: number;
   inserts?: number; plugins?: number; automated_parameters?: number; soloed_tracks?: number;
+  cues?: number; scenes_added?: number; linked_clips?: number;
 };
 
 /** OTIO import results: the same, with the timeline's name. */
-export type OtioReport = Omit<AafReport, "composition"> & {
-  timeline: string; stereo_pairs?: number; cues?: number; scenes_added?: number; linked_clips?: number;
-};
+export type OtioReport = Omit<AafReport, "composition"> & { timeline: string; stereo_pairs?: number };
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -20,6 +19,12 @@ export function aafSummary(r: AafReport, mediaDir = "Audio/Imported/AAF"): strin
     `"${r.composition}" at ${r.start_tc}: ${plural(r.tracks.length, "track")}${r.stereo_tracks ? ` (${r.stereo_tracks} stereo)` : ""}, ${plural(r.clips, "clip")}, ${plural(r.markers, "marker")}`,
     `Media: ${r.media_linked} linked in place, ${r.media_written} written to ${mediaDir}`,
   ];
+  if (r.cues || r.scenes_added) {
+    const parts = [];
+    if (r.cues) parts.push(`${plural(r.cues, "cue")} restored with their markers${r.linked_clips ? ` (${plural(r.linked_clips, "clip")} linked back)` : ""}`);
+    if (r.scenes_added) parts.push(`${plural(r.scenes_added, "scene")} added`);
+    lines.push(`Spotting: ${parts.join("; ")}`);
+  }
   if (r.soloed_tracks) lines.push(`Solo: ${plural(r.soloed_tracks, "track")} soloed, as exported`);
   if (r.inserts) {
     const auto = r.automated_parameters ? `, ${plural(r.automated_parameters, "automated parameter")}` : "";
@@ -39,11 +44,5 @@ export function aafSummary(r: AafReport, mediaDir = "Audio/Imported/AAF"): strin
 export function otioSummary(r: OtioReport): string[] {
   const lines = aafSummary({ ...r, composition: r.timeline }, "Audio/Imported/OTIO");
   if (r.stereo_pairs) lines.splice(2, 0, `Stereo: ${plural(r.stereo_pairs, "left/right pair")} merged into one track each`);
-  if (r.cues || r.scenes_added) {
-    const parts = [];
-    if (r.cues) parts.push(`${plural(r.cues, "cue")} restored with their markers${r.linked_clips ? ` (${plural(r.linked_clips, "clip")} linked back)` : ""}`);
-    if (r.scenes_added) parts.push(`${plural(r.scenes_added, "scene")} added`);
-    lines.splice(2, 0, `Spotting: ${parts.join("; ")}`);
-  }
   return lines;
 }

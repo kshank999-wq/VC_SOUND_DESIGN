@@ -65,3 +65,8 @@ test("OTIO summaries report restored cues, linked clips and added scenes", () =>
   assert.equal(l[2], "Spotting: 3 cues restored with their markers (2 clips linked back); 1 scene added");
   assert.equal(otioSummary({ ...rest, timeline: "R", cues: 0, scenes_added: 0 }).length, 2);
 });
+
+test("AAF summaries report restored cues and added scenes before solo", () => {
+  const l = aafSummary({ ...base, cues: 1, scenes_added: 2, soloed_tracks: 1 });
+  assert.deepEqual(l.slice(2), ["Spotting: 1 cue restored with their markers; 2 scenes added", "Solo: 1 track soloed, as exported"]);
+});

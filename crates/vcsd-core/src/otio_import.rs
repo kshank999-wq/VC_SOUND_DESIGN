@@ -1300,16 +1300,97 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
     report.media_written = media.cache.values().filter(|r| matches!(r, Ok((_, true)))).count();
     report.missing_media = missing.into_iter().map(|(k, n)| format!("{k} — {n} clip{}", if n == 1 { "" } else { "s" })).collect();
 
+    // ---- spotting: scenes, markers and cues (ours restored), clips back on their cues
+    let found = markers
+        .into_iter()
+        .map(|(at, until, label, color, meta)| FoundMarker {
+            // both ends from timeline time, so a range's length doesn't drift by rounding
+            start: base + smp(at),
+            len: (smp(until) - smp(at)).max(0),
+            label,
+            color,
+            recolored: meta["otio_color"].is_string() && meta["color_now"] != meta["otio_color"],
+            meta,
+        })
+        .collect();
+    let sp = restore_spotting(s, &tl["metadata"]["vcsd"]["scenes"], found, &report.tracks, base, meta_sr, "OTIO markers", "otio");
+    (report.markers, report.cues, report.scenes_added, report.linked_clips) = (sp.markers, sp.cues, sp.scenes_added, sp.linked_clips);
+    for (what, n) in sp.notes {
+        notes.add(what, n);
+    }
+    report.soloed_tracks = report.tracks.iter().filter(|t| s.tracks[t.as_str()].solo).count();
+    let others = s.tracks.values().filter(|t| !report.tracks.contains(&t.id)).collect::<Vec<_>>();
+    if report.soloed_tracks > 0 && !others.is_empty() && !others.iter().any(|t| t.solo) {
+        notes.add(
+            "solo restored on imported tracks: while it's on, the project's other tracks are silent (unsolo to hear them)",
+            report.soloed_tracks,
+        );
+    }
+    report.notes = notes.0.iter().map(|(k, n)| format!("{k} ({n})")).collect();
+    if report.tracks.is_empty() && report.markers == 0 {
+        let why = if report.missing_media.is_empty() { String::new() } else { format!(": {}", report.missing_media.join("; ")) };
+        return Err(invalid(format!("nothing to import from '{name}'{why}")));
+    }
+    Ok(report)
+}
+
+/// A marker as an importer found it (OTIO or AAF), in project samples, with our
+/// metadata when the file is our own export.
+pub(crate) struct FoundMarker {
+    pub(crate) start: i64,
+    pub(crate) len: i64,
+    pub(crate) label: String,
+    pub(crate) color: Option<String>,
+    /// Its color in the file differs from the one our export wrote.
+    pub(crate) recolored: bool,
+    pub(crate) meta: Value,
+}
+
+/// What restoring the spotting brought in.
+#[derive(Default)]
+pub(crate) struct Spotting {
+    pub(crate) markers: usize,
+    pub(crate) cues: usize,
+    pub(crate) scenes_added: usize,
+    pub(crate) linked_clips: usize,
+    pub(crate) notes: Vec<(&'static str, usize)>,
+}
+
+impl Spotting {
+    fn note(&mut self, what: &'static str, n: usize) {
+        self.notes.push((what, n));
+    }
+}
+
+/// Restore the spotting an import found: our export's scenes (where the project has
+/// none), then each marker — with our metadata, the spotting record as it was (its lane,
+/// kind, taps, color, identity, and its cue with every field), else a plain marker in
+/// the `lane_name` lane — and finally the imported clips (on `tracks`) back on their
+/// cues. `base` places the file's time 0; our metadata's samples are at `meta_sr`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn restore_spotting(
+    s: &mut ProjectState,
+    scenes: &Value,
+    found: Vec<FoundMarker>,
+    tracks: &[String],
+    base: i64,
+    meta_sr: f64,
+    lane_name: &str,
+    lane_tag: &str,
+) -> Spotting {
+    let psr = s.project.sample_rate;
+    let from_meta = |v: &Value| v.as_f64().map(|x| (x * psr as f64 / meta_sr).round() as i64);
+    let mut r = Spotting::default();
     // ---- scenes (ours): added where the project has none, so their markers have a home
     let at_meta = |v: &Value| from_meta(v).map(|x| base + x);
-    for sc in tl["metadata"]["vcsd"]["scenes"].as_array().into_iter().flatten() {
+    for sc in scenes.as_array().into_iter().flatten() {
         let (Some(a), Some(b)) = (at_meta(&sc["start_sample"]), at_meta(&sc["end_sample"])) else { continue };
         let number = sc["number"].as_str().unwrap_or("OTIO").to_string();
         let overlapping: Vec<&Scene> = s.scenes.values().filter(|x| x.start_sample < b && x.end_sample > a).collect();
         if !overlapping.is_empty() {
             // the same scene (by number) is no news; a different one there wins over ours
             if !overlapping.iter().any(|x| x.number.eq_ignore_ascii_case(&number)) {
-                notes.add("scenes where the project has its own kept the project's", 1);
+                r.note("scenes where the project has its own kept the project's", 1);
             }
             continue;
         }
@@ -1322,35 +1403,34 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             k += 1;
         }
         if n != number {
-            notes.add("scene numbers already in the project given a suffix", 1);
+            r.note("scene numbers already in the project given a suffix", 1);
         }
         if let Ok(id) = crate::spotting::add_scene(s, &n, title, a, b) {
             let x = s.scenes.get_mut(&id).expect("just added");
             x.handle_samples = from_meta(&sc["handle_samples"]).unwrap_or(0);
             x.external_id = sc["external_id"].as_str().map(String::from);
             x.next_cue_seq = sc["next_cue_seq"].as_u64().unwrap_or(1) as u32;
-            report.scenes_added += 1;
+            r.scenes_added += 1;
         }
     }
 
     // ---- markers → spotting markers (inside scenes), cues restored from our metadata
     let mut cue_map: HashMap<String, String> = HashMap::new();
-    for (at, until, label, color, meta) in markers {
+    for f in found {
+        let FoundMarker { start: at, len, label, color, recolored, meta } = f;
         let old_cue: Option<Cue> = serde_json::from_value(meta["cue"].clone()).ok();
         let old_marker: Option<Marker> = serde_json::from_value(meta["marker"].clone()).ok();
         // imported back into the project it came from: already here
         if let Some(c) = old_cue.as_ref().filter(|c| s.cues.contains_key(&c.id)) {
             cue_map.insert(c.id.clone(), c.id.clone());
-            notes.add("cues already in the project left as they are", 1);
+            r.note("cues already in the project left as they are", 1);
             continue;
         }
         if old_cue.is_none() && old_marker.as_ref().is_some_and(|m| s.markers.contains_key(&m.id)) {
-            notes.add("markers already in the project left as they are", 1);
+            r.note("markers already in the project left as they are", 1);
             continue;
         }
-        // both ends from timeline time, so a range's length doesn't drift by rounding
-        let mut a = base + smp(at);
-        let len = (smp(until) - smp(at)).max(0);
+        let mut a = at;
         let mut end = a + len;
         // the spotting record: our full timing (beyond a partial export's range, with its
         // taps), unless the marker was moved or resized since
@@ -1370,7 +1450,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 (a, end) = (rebase(src_start), rebase(src_end));
                 subs = src_subs.iter().map(|&x| rebase(x)).collect();
             } else {
-                notes.add("markers moved or resized since our export keep their new timing", 1);
+                r.note("markers moved or resized since our export keep their new timing", 1);
                 let delta = a - rebase(src_start);
                 subs = src_subs.iter().map(|&x| rebase(x) + delta).filter(|&x| x >= a && x <= end.max(a)).collect();
             }
@@ -1381,7 +1461,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             };
         }
         if s.scene_at(a).is_none() {
-            notes.add("markers outside every scene left out (add scenes, then import again)", 1);
+            r.note("markers outside every scene left out (add scenes, then import again)", 1);
             continue;
         }
         // its lane: the same name and category, else made; a cue without one goes to
@@ -1395,21 +1475,21 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 None => {
                     let order = s.lanes.values().map(|x| x.order + 1).max().unwrap_or(0);
                     let color = l.get("color").and_then(Value::as_str).unwrap_or_default().to_string();
-                    notes.add("marker lanes made for the OTIO's markers", 1);
+                    r.note("marker lanes made for the OTIO's markers", 1);
                     crate::spotting::add_lane(s, &name, cat, &color, order)
                 }
             }
         } else if let Some(c) = &old_cue {
             match s.lanes.values().filter(|x| x.category == c.category).min_by_key(|x| x.order) {
                 Some(x) => x.id.clone(),
-                None => marker_lane(s, "OTIO markers", "otio"),
+                None => marker_lane(s, lane_name, lane_tag),
             }
         } else {
-            marker_lane(s, "OTIO markers", "otio")
+            marker_lane(s, lane_name, lane_tag)
         };
         let identity = meta["identity"].as_str().and_then(|n| s.identities.values().find(|i| i.name == n)).map(|i| i.id.clone());
         if meta["identity"].is_string() && identity.is_none() {
-            notes.add("sound identities not in this project left off their markers and cues", 1);
+            r.note("sound identities not in this project left off their markers and cues", 1);
         }
         let label = old_marker.as_ref().map(|m| m.label.clone()).or(old_cue.as_ref().map(|c| c.description.clone())).unwrap_or(label);
         let nm = crate::spotting::NewMarker {
@@ -1424,9 +1504,8 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
             origin: src_origin.unwrap_or(TimingOrigin::Imported),
         };
         let Ok(mid) = crate::spotting::add_marker(s, nm) else { continue };
-        report.markers += 1;
+        r.markers += 1;
         // its color: ours, unless it was recolored elsewhere since
-        let recolored = meta["otio_color"].is_string() && meta["color_now"] != meta["otio_color"];
         let m = s.markers.get_mut(&mid).expect("just added");
         m.color = match &old_marker {
             Some(om) if !recolored => om.color.clone(),
@@ -1440,7 +1519,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
         let Some(oc) = old_cue else { continue };
         let Ok(cid) = crate::spotting::cue_from_marker(s, &mid) else { continue };
         cue_map.insert(oc.id.clone(), cid.clone());
-        report.cues += 1;
+        r.cues += 1;
         let code_free = !s.cues.values().any(|c| c.id != cid && c.code == oc.code);
         let scene_id = s.cues[&cid].scene_id.clone();
         if code_free {
@@ -1451,7 +1530,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
                 }
             }
         } else {
-            notes.add("cue codes already in the project renumbered", 1);
+            r.note("cue codes already in the project renumbered", 1);
         }
         let assets_have = |id: &Option<String>| id.clone().filter(|i| s.assets.contains_key(i));
         let (placeholder, over) = (assets_have(&oc.placeholder_asset_id), assets_have(&oc.asset_override_id));
@@ -1478,26 +1557,13 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
         c.script_ref_id = script;
     }
     // clips back on their cues
-    for c in s.clips.values_mut().filter(|c| report.tracks.contains(&c.track_id)) {
+    for c in s.clips.values_mut().filter(|c| tracks.contains(&c.track_id)) {
         c.cue_id = c.cue_id.as_ref().and_then(|old| cue_map.get(old)).cloned();
         if c.cue_id.is_some() {
-            report.linked_clips += 1;
+            r.linked_clips += 1;
         } else {
             c.sub_index = None;
         }
     }
-    report.soloed_tracks = report.tracks.iter().filter(|t| s.tracks[t.as_str()].solo).count();
-    let others = s.tracks.values().filter(|t| !report.tracks.contains(&t.id)).collect::<Vec<_>>();
-    if report.soloed_tracks > 0 && !others.is_empty() && !others.iter().any(|t| t.solo) {
-        notes.add(
-            "solo restored on imported tracks: while it's on, the project's other tracks are silent (unsolo to hear them)",
-            report.soloed_tracks,
-        );
-    }
-    report.notes = notes.0.iter().map(|(k, n)| format!("{k} ({n})")).collect();
-    if report.tracks.is_empty() && report.markers == 0 {
-        let why = if report.missing_media.is_empty() { String::new() } else { format!(": {}", report.missing_media.join("; ")) };
-        return Err(invalid(format!("nothing to import from '{name}'{why}")));
-    }
-    Ok(report)
+    r
 }

@@ -77,6 +77,11 @@ pub struct AafImportReport {
     pub stereo_tracks: usize,
     pub clips: usize,
     pub markers: usize,
+    /// Cues restored with their markers (from our "VCSD" comment), scenes added for
+    /// them, and clips linked back to their cues.
+    pub cues: usize,
+    pub scenes_added: usize,
+    pub linked_clips: usize,
     pub automated_tracks: usize,
     pub panned_tracks: usize,
     /// How bus levels came in: "buses" (restored from VC Sound Design's
@@ -1592,7 +1597,15 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
         };
         let tid = new_id("trk");
         let mut clips = vec![];
+        // the cue each clip realises (our comment): [offset, cue id, sub-event]
+        let clip_cues: Vec<(i64, String, Option<u32>)> = slot_meta(lane.slot)["clip_cues"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| Some((from_meta(&c[0])?, c[1].as_str()?.to_string(), c[2].as_u64().map(|x| x as u32))))
+            .collect();
         for rc in &lane.clips {
+            let cue = clip_cues.iter().find(|c| (c.0 - rc.at).abs() <= 1);
             let src = match &rc.src {
                 Ok(x) => x,
                 Err(e) => {
@@ -1627,7 +1640,8 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
             clips.push(ClipInstance {
                 id: new_id("clp"),
                 track_id: tid.clone(),
-                cue_id: None,
+                // linked to its restored cue below (our comment's id, remapped)
+                cue_id: cue.map(|c| c.1.clone()),
                 asset_id,
                 timeline_start: base + rc.at,
                 source_offset: offset,
@@ -1639,7 +1653,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
                 muted: rc.muted,
                 take_id: None,
                 performance_event_id: None,
-                sub_index: None,
+                sub_index: cue.and_then(|c| c.2),
                 is_placeholder: false,
                 history: vec![],
             });
@@ -1795,7 +1809,11 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
     report.media_written = media.written;
     report.missing_media = missing.into_iter().map(|(k, n)| format!("{k} — {n} clip{}", if n == 1 { "" } else { "s" })).collect();
 
-    // ---- markers → spotting markers (inside scenes)
+    // ---- spotting: scenes, markers and cues (ours restored from the comment), clips
+    // back on their cues
+    let mut records: Vec<Option<serde_json::Value>> =
+        vcsd["markers"].as_array().cloned().unwrap_or_default().into_iter().map(Some).collect();
+    let mut found = vec![];
     for (sl, seg) in events {
         let rate = Content::slot_rate(&sl).unwrap_or(sr);
         let items = if a.is(&seg, c::SEQUENCE) { a.children(&seg, 0x1001) } else { vec![seg] };
@@ -1806,30 +1824,29 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
             // doesn't drift by rounding.
             let units = m.len();
             let units = if units == 1 && rate.0 < 1000 * rate.1.max(1) { 0 } else { units.max(0) };
-            let at = base + conv(pos, rate, sr);
-            let len = conv(pos + units, rate, sr) - conv(pos, rate, sr);
             let label = m.string(0x0602).unwrap_or_default();
-            if s.scene_at(at).is_none() {
-                notes.add("markers outside every scene left out (add scenes, then import again)", 1);
-                continue;
-            }
-            let lane = marker_lane(s, "AAF markers", "aaf");
-            let nm = crate::spotting::NewMarker {
-                lane_id: lane,
-                scene_id: None,
-                kind: if len > 0 { EventType::Range } else { EventType::Point },
-                start: at,
-                end: at + len,
+            let color = a.marker_color(m);
+            // its record: the first unused one written with the same Comment
+            let meta = records
+                .iter_mut()
+                .find(|r| r.as_ref().is_some_and(|r| r["comment"].as_str() == Some(label.as_str())))
+                .and_then(Option::take)
+                .unwrap_or(serde_json::Value::Null);
+            let recolored = meta["aaf_color"].as_str().is_some_and(|c| Some(c) != color.as_deref());
+            found.push(crate::otio_import::FoundMarker {
+                start: base + conv(pos, rate, sr),
+                len: conv(pos + units, rate, sr) - conv(pos, rate, sr),
                 label: if label.trim().is_empty() { "AAF marker".into() } else { label },
-                identity_id: None,
-                sub_events: vec![],
-                origin: TimingOrigin::Imported,
-            };
-            if let Ok(id) = crate::spotting::add_marker(s, nm) {
-                s.markers.get_mut(&id).expect("just added").color = a.marker_color(m);
-                report.markers += 1;
-            }
+                color,
+                recolored,
+                meta,
+            });
         }
+    }
+    let sp = crate::otio_import::restore_spotting(s, &vcsd["scenes"], found, &report.tracks, base, meta_sr, "AAF markers", "aaf");
+    (report.markers, report.cues, report.scenes_added, report.linked_clips) = (sp.markers, sp.cues, sp.scenes_added, sp.linked_clips);
+    for (what, n) in sp.notes {
+        notes.add(what, n);
     }
     report.soloed_tracks = report.tracks.iter().filter(|t| s.tracks[t.as_str()].solo).count();
     let others: Vec<&Track> = s.tracks.values().filter(|t| !report.tracks.contains(&t.id)).collect();

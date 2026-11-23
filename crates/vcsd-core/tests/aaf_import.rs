@@ -100,7 +100,7 @@ fn an_exported_aaf_imports_back_to_the_same_mix() {
     let st2 = &s2.state;
     let color = |what: &str| st2.markers.values().find(|m| m.label.contains(what)).unwrap().color.clone();
     assert_eq!(color("glass smash").as_deref(), Some("#12a4c8"), "AAF keeps the exact RGB");
-    assert_eq!(color("wind exterior").as_deref(), Some("#00ff00"), "a background cue: its category's green");
+    assert_eq!(color("wind exterior"), None, "no color of its own, as before: its lane's");
     assert!(st2.tracks.values().all(|t| t.folder.starts_with("AAF/")));
     // the glass clip: same place, fades and source range
     let glass_lane: Vec<(i64, f32)> = {
@@ -814,12 +814,12 @@ for sl in m.slots:
     assert!(st3.tracks.values().all(|t| t.gain_db > -90.0), "no −∞ from the silencing gain");
     assert!(at3(d0).muted);
 
-    // without the option they're left out, as before
-    // (all three are silent here, so the AAF has nothing to import)
+    // without the option they're left out, as before (all three are silent here): no
+    // tracks, but the spotting still comes back with its scene
     let (_, plain, _, _) = muted_aaf("aafmuted4", false);
     let (mut s4, root4) = session("aafmuted5", "24", "01:00:00:00");
-    let err = s4.edit("i", |st| import(st, &plain, &opts(&root4))).unwrap_err().to_string();
-    assert!(err.contains("nothing to import"), "left out: {err}");
+    let rep = s4.edit("i", |st| import(st, &plain, &opts(&root4))).unwrap();
+    assert!(rep.tracks.is_empty() && rep.cues > 0 && rep.scenes_added == 1, "{rep:?}");
 }
 
 #[test]
@@ -949,4 +949,159 @@ fn track_colors_come_back_from_our_aaf() {
     let mut got: Vec<(String, Option<String>)> = s2.state.tracks.values().map(|t| (t.name.clone(), t.color.clone())).collect();
     got.sort();
     assert_eq!(got, by_name, "each track's color (the stereo pair's as one), none where there was none");
+}
+
+/// A spotted, cued and populated project for the spotting round trips.
+fn spotted_project(name: &str) -> (state::Session, std::path::PathBuf) {
+    let (mut s, root) = session(name, "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    scene(&mut s, "2", "01:00:10:00", "01:00:20:00");
+    let steps = s
+        .edit("i", |st| {
+            add_identity(
+                st,
+                NewIdentity { name: "Gravel steps".into(), category: Category::Footsteps, character: None, surface: None, prop: None },
+            )
+        })
+        .unwrap();
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:08:00", "wind exterior", None);
+    let walk = marker_tc(&mut s, "footsteps", EventType::Repeated, "01:00:03:00", "01:00:05:00", "walk to door", Some(&steps));
+    let sr = s.state.project.sample_rate as i64;
+    let w0 = s.state.markers[&walk].start_sample;
+    s.state.markers.get_mut(&walk).unwrap().sub_events = vec![w0, w0 + sr / 2, w0 + sr, w0 + 3 * sr / 2];
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let creak = marker_tc(&mut s, "props", EventType::Point, "01:00:06:00", "01:00:06:00", "maybe a creak", None);
+    s.state.markers.get_mut(&creak).unwrap().color = Some("#12a4c8".into());
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:12:00", "01:00:15:00", "traffic, scene 2", None);
+    let glass = s.state.cues.values_mut().find(|c| c.description == "glass smash").unwrap();
+    glass.status = CueStatus::NeedsRecording;
+    glass.priority = Priority::High;
+    glass.owner = "sam".into();
+    glass.notes = "bigger shards".into();
+    glass.intent = "startle".into();
+    (s, root)
+}
+
+fn aaf_export(s: &mut state::Session, root: &Path) -> std::path::PathBuf {
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-23");
+    o.aaf = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(root), &o)).unwrap();
+    r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap())
+}
+
+#[test]
+fn spotting_markers_cues_scenes_and_clip_links_come_back_from_aaf() {
+    let (mut s, root) = spotted_project("aafspot");
+    let file = aaf_export(&mut s, &root);
+
+    let (mut s2, root2) = session("aafspot2", "24", "01:00:00:00");
+    s2.edit("i", |st| {
+        add_identity(
+            st,
+            NewIdentity { name: "Gravel steps".into(), category: Category::Footsteps, character: None, surface: None, prop: None },
+        )
+    })
+    .unwrap();
+    let rep = s2.edit("i", |st| import(st, &file, &opts(&root2))).unwrap();
+    assert_eq!((rep.scenes_added, rep.markers, rep.cues), (2, 5, 3), "{rep:?}");
+    assert!(rep.linked_clips > 0 && rep.linked_clips <= rep.clips, "{rep:?}");
+    let (st, st2) = (&s.state, &s2.state);
+    let mut scenes: Vec<(String, i64, i64)> = st2.scenes.values().map(|x| (x.number.clone(), x.start_sample, x.end_sample)).collect();
+    scenes.sort();
+    let mut want: Vec<(String, i64, i64)> = st.scenes.values().map(|x| (x.number.clone(), x.start_sample, x.end_sample)).collect();
+    want.sort();
+    assert_eq!(scenes, want, "scenes as they were");
+    for c in st.cues.values() {
+        let c2 = st2.cues.values().find(|x| x.code == c.code).unwrap_or_else(|| panic!("cue {}", c.code));
+        assert_eq!(
+            (&c2.description, &c2.category, &c2.event_type, c2.start_sample, c2.end_sample, &c2.sub_events),
+            (&c.description, &c.category, &c.event_type, c.start_sample, c.end_sample, &c.sub_events),
+            "{}",
+            c.code
+        );
+        assert_eq!((c2.status, c2.priority, &c2.owner, &c2.notes, &c2.intent), (c.status, c.priority, &c.owner, &c.notes, &c.intent));
+        assert_eq!(c2.identity_id.is_some(), c.identity_id.is_some(), "{}: its identity", c.code);
+        let (m, m2) = (&st.markers[c.marker_id.as_ref().unwrap()], &st2.markers[c2.marker_id.as_ref().unwrap()]);
+        assert_eq!(st2.lanes[&m2.lane_id].name, st.lanes[&m.lane_id].name, "{}: its lane", c.code);
+        // its clips back on it, covering what they did (stereo tracks come back as one; loops as repeats)
+        let span = |v: Vec<&ClipInstance>| (v.iter().map(|x| x.timeline_start).min(), v.iter().map(|x| x.end()).max());
+        let clips = span(st.clips.values().filter(|x| x.cue_id.as_deref() == Some(c.id.as_str()) && !x.muted).collect());
+        let clips2 = span(st2.clips.values().filter(|x| x.cue_id.as_deref() == Some(c2.id.as_str())).collect());
+        assert_eq!(clips2, clips, "{}: its clips", c.code);
+    }
+    let creak2 = st2.markers.values().find(|m| m.label == "maybe a creak").unwrap();
+    assert!(creak2.cue_id.is_none());
+    assert_eq!((st2.lanes[&creak2.lane_id].name.as_str(), creak2.color.as_deref()), ("Foley • Props", Some("#12a4c8")));
+    let traffic = st2.markers.values().find(|m| m.label == "traffic, scene 2").unwrap();
+    assert_eq!((traffic.kind, traffic.end_sample - traffic.start_sample), (EventType::Range, 3 * st2.project.sample_rate as i64));
+    assert_eq!(st2.scenes[&traffic.scene_id].number, "2");
+
+    // back into the project it came from: nothing doubled
+    let n = (s.state.markers.len(), s.state.cues.len());
+    let rep = s.edit("i", |st| import(st, &file, &opts(&root))).unwrap();
+    assert_eq!((rep.markers, rep.cues, rep.scenes_added), (0, 0, 0));
+    assert_eq!((s.state.markers.len(), s.state.cues.len()), n);
+    assert!(rep.linked_clips > 0, "its clips on the cues already there");
+    assert!(rep.notes.iter().any(|x| x.starts_with("cues already in the project left as they are (3)")), "{:?}", rep.notes);
+}
+
+#[test]
+fn aaf_spotting_keeps_full_timing_unless_moved_elsewhere() {
+    let (mut s, root) = spotted_project("aafspotpart");
+    let sr = s.state.project.sample_rate as i64;
+    // 01:00:01:00 – 01:00:06:00: the wind (0–8 s) is marked trimmed
+    let used: Vec<String> =
+        s.state.clips.values().map(|c| c.asset_id.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let (media, _) = aaf::prepare_media(&s.state, &used, &root.join("Exports/aaf/Media")).unwrap();
+    let file = root.join("part.aaf");
+    let o = aaf::AafOptions {
+        name: "part".into(),
+        start: sr,
+        end: 6 * sr,
+        exclude_temp_refs: false,
+        prints: Default::default(),
+        include_muted: false,
+    };
+    aaf::write(&s.state, &file, &media, &o).unwrap();
+    let (mut s2, root2) = session("aafspotpart2", "24", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &file, &opts(&root2))).unwrap();
+    let wind = s2.state.cues.values().find(|c| c.description == "wind exterior").unwrap();
+    assert_eq!((wind.start_sample, wind.end_sample), (0, 8 * sr), "the whole cue, not the trimmed mark: {:?}", rep.notes);
+    let _ = &mut s;
+
+    // moved a second later and recolored in an editor (pyaaf2): its new place and color win
+    let Some(py) = python() else {
+        eprintln!("SKIPPED (moved marker part): pyaaf2 not installed");
+        return;
+    };
+    let code = r#"
+import sys, aaf2
+with aaf2.open(sys.argv[1], 'rw') as f:
+    m = next(f.content.compositionmobs())
+    for sl in m.slots:
+        seg = sl.segment
+        if seg.classdef.class_name != 'Sequence' or seg.media_kind != 'DescriptiveMetadata':
+            continue
+        for c in seg.components:
+            if 'walk to door' in c['Comment'].value:
+                c['Position'].value = c['Position'].value + int(sys.argv[2])
+                c['CommentMarkerColor'].value = {'red': 65535, 'green': 0, 'blue': 0}
+"#;
+    let out = std::process::Command::new(&py).args(["-c", code]).arg(&file).arg(sr.to_string()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let (mut s3, root3) = session("aafspotpart3", "24", "01:00:00:00");
+    let rep = s3.edit("i", |st| import(st, &file, &opts(&root3))).unwrap();
+    assert!(
+        rep.notes.iter().any(|n| n.starts_with("markers moved or resized since our export keep their new timing (1)")),
+        "{:?}",
+        rep.notes
+    );
+    let walk = s3.state.cues.values().find(|c| c.description == "walk to door").unwrap();
+    assert_eq!((walk.start_sample, walk.end_sample, walk.event_type), (4 * sr, 6 * sr, EventType::Repeated));
+    assert_eq!(walk.sub_events, vec![4 * sr, 4 * sr + sr / 2, 5 * sr, 5 * sr + sr / 2], "taps moved with it");
+    assert_eq!(s3.state.markers[walk.marker_id.as_ref().unwrap()].color.as_deref(), Some("#ff0000"), "recolored elsewhere");
 }

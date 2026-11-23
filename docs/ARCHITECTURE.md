@@ -104,6 +104,8 @@ inserts with their plugins' parameter automation. Other apps show the comment or
 | Overlapping clips | Extra tracks ("Name (2)") |
 | Looped clips | Butt-spliced repeats of the loop span |
 | Cue markers | Markers ("code description") as Media Composer writes them: `DescriptiveMarker`s on an event track with a `PhysicalTrackNumber`, each describing the timecode track (`DescribedSlots`). A range cue's duration is the marker's `Length` (trimmed to the exported range at either end, as in the OTIO export; points have none), which the OpenTimelineIO AAF adapter reads as the marker's duration. Readers such as the OpenTimelineIO AAF adapter read only these; plain `CommentMarker`s were invisible to it. Each carries a color as `CommentMarkerColor` (16-bit RGB): its spotting marker's own color exactly (one set in the app, or imported from an editor's timeline), else its cue category's from the OTIO export's marker palette: FX red, backgrounds green, design magenta, dialogue blue, music purple, Foley yellow, custom cyan. Checked: pyaaf2 reads the exact values, and through the adapter every marker has the same color as in our OTIO export, own colors included |
+| Spotting markers not made into cues yet | `DescriptiveMarker`s too (Comment = the label), in their own color, else their lane's (exact RGB) |
+| The whole spotting record, scenes, and clips' cues | In the "VCSD" comment, as in the OTIO export's metadata: `markers` (per marker, in the order written, with the Comment and RGB it was written with: the cue with every field, its spotting marker, lane and sound identity, untrimmed), `scenes` (whole), and per track `clip_cues` ([offset, cue id, sub-event] per clip) |
 | Plugins, insert effects and plugin parameter automation (option "print tracks with plugins") | AAF can't carry VST3/AU plugins, so tracks with active inserts are rendered pre-fader (clips → inserts with their automation and delay compensation) to `AAF/Media/*_print.wav` and linked as one clip each. Their fader, volume, pan and bus levels stay editable around the print; their clips don't |
 | Start timecode, frame rate, drop frame | Timecode track |
 
@@ -342,6 +344,7 @@ top-level composition (by name, or the one with the most sound clips) is placed 
 | Interpolation of varying gain and pan | Linear as is. Constant (and None) holds each value until the next point. B-spline, log and power are read as linear (noted) |
 | Parameter values | Rational, or any of AAF's integer types |
 | Comment and descriptive markers | Spotting markers in an "AAF markers" lane, for those inside a scene: a marker with a `Length` becomes a range marker of that length (both ends converted from the event track's edit units, so it doesn't drift by rounding); none, or one frame (how Media Composer writes an ordinary marker, on frame-rate event tracks), a point. Each comes with its color: Avid's named `_ATN_CRM_COLOR` attribute (in `CommentMarkerAttributeList`), else its `CommentMarkerColor` RGB — the order the OpenTimelineIO AAF adapter reads them in. Both are extension properties whose ids differ per file, so the reader looks them up by AUID in the file's meta-dictionary |
+| The "VCSD" comment's `markers`, `scenes` and `clip_cues` (our own export) | The spotting restored exactly as from our OTIO (the same code): scenes added where the project has none; each marker (matched to its record by the Comment it was written with) back in its lane with kind, taps, color and identity, its cue with every field and code; whole timing unless moved or resized elsewhere, a color changed elsewhere winning; clips back on their cues; nothing doubled when importing into the project the file came from |
 | Mutes as other apps carry them (AAF has no mute): a constant zero gain around a clip or track; a selector with filler selected and a clip among its alternates (a switched-off clip) | A muted clip or track, its other gains kept as its levels, so unmuting brings the sound back (noted). In our own AAFs the "VCSD" comment says which zero gains are mutes; any others there are genuine silence |
 | The "VCSD" comment (our own export) | The buses restored, as in the OTIO import, and the same `buses` option (auto / buses / fold, default auto): matched by name under the same parent or created, with their level, mute, inserts and automation. Each track is routed to its bus with its own fader, pan and lanes, and the fader that was folded into clip gain is taken back out |
 | Track order; folders in the "VCSD" comment | Tracks numbered in the composition's track order, after the project's own. Our export's folder tree is rebuilt under the import's folder ("AAF/<composition>/Scene 1/Hard FX"); other apps' tracks stay flat in it |
@@ -389,6 +392,11 @@ following:
   embedded PCM;
 - moved linked media found by name or in a search folder;
 - channel 3 of a linked two-track OP1a MXF (mono, then stereo), bit-exact;
+- the spotting, as the OTIO import's tests check it: an export into an empty project brings back
+  both scenes, three cues with every field on their markers in their lanes, the clips on their
+  cues, and two markers not made into cues; nothing doubles back in the original project; a partial
+  export restores a trimmed cue whole; a marker moved and recolored with pyaaf2 keeps its new
+  place and color, its taps following;
 - clip gain, the varying track gain against the AAF curve, pan, and the markers: one with its color (named Green over a red RGB: the name wins) one frame long, read as a point, and a 24-frame range;
 - a linear pan sweep (−1 → +1 → 0) within 0.003 as its breakpoints, and a Constant-interpolated
   pan held, then jumping, at the right sample;
