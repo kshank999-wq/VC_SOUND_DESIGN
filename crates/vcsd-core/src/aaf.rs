@@ -1267,6 +1267,20 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     // cue markers, and spotting markers not made into cues yet
     let marks = crate::otio::spotting_marks(s, start, end);
     let markers = marks.len();
+    // Markers sit on a track at the picture's frame rate, as Media Composer keeps them:
+    // positions and lengths in whole frames, an ordinary (point) marker one frame long.
+    // Our comment keeps their exact timing.
+    use crate::aaf_import::conv;
+    let fr = s.project.frame_rate;
+    let frame_rate = (fr.num as i64, fr.den as i64);
+    let audio_rate = (sr as i64, 1);
+    let frames = |m: &crate::otio::Mark| {
+        let a = conv(m.at, audio_rate, frame_rate);
+        let len = if m.len > 0 { conv(m.at + m.len, audio_rate, frame_rate) - a } else { 1 };
+        (a, len)
+    };
+    let short = marks.iter().filter(|m| m.len > 0 && frames(m).1 <= 1).count();
+    losses.add("range markers under a frame and a half written as one-frame (point) markers", short);
     // what each marker was written as (its Comment and color), with its whole spotting
     // record, for the "VCSD" comment
     let text = |m: &crate::otio::Mark| if m.comment.is_empty() { m.name.clone() } else { format!("{} {}", m.name, m.comment) };
@@ -1275,6 +1289,12 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         .map(|m| {
             let mut v = m.meta.clone();
             v["comment"] = serde_json::json!(text(m));
+            // as an import reads the frames back (a one-frame marker is a point), so it can
+            // tell a marker moved elsewhere from frame rounding
+            let (a, len) = frames(m);
+            let at = conv(a, frame_rate, audio_rate);
+            let len = if len <= 1 { 0 } else { conv(a + len, frame_rate, audio_rate) - at };
+            v["marked"] = serde_json::json!([at, len]);
             v["aaf_color"] = serde_json::json!(format!("#{:02x}{:02x}{:02x}", m.rgb[0], m.rgb[1], m.rgb[2]));
             v
         })
@@ -1283,13 +1303,13 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         let items = marks
             .iter()
             .map(|m| {
-                let (at, len) = (m.at, m.len);
+                let (at, len) = frames(m);
                 // as Media Composer writes markers (readers such as the OpenTimelineIO AAF adapter
                 // read only these): a descriptive marker describing a track — here the timecode
                 // track, so readers that find no audio track to hang it on keep it on the timeline
                 Obj::new(class::DESCRIPTIVE_MARKER)
                     .weak(0x0201, "DataDefinition", Defs::Data, key::DESCRIPTIVE)
-                    // a range cue's duration (trimmed to the exported range); a point: none
+                    // a range's duration (trimmed to the exported range); a point: one frame
                     .data(0x0202, "Length", i64v(len))
                     .data(0x0601, "Position", i64v(at))
                     .data(0x0602, "Comment", utf16z(&text(m)))
@@ -1300,7 +1320,7 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         let ev = Obj::new(class::EVENT_SLOT)
             .data(0x4802, "SlotName", utf16z("Cues"))
             .data(0x4801, "SlotID", u32v(audio_slots.len() as u32 + 2))
-            .data(0x4901, "EditRate", rational(sr, 1))
+            .data(0x4901, "EditRate", rational(fr.num as i32, fr.den as i32))
             .data(0x4804, "PhysicalTrackNumber", u32v(1))
             .strong(0x4803, "Segment", sequence(key::DESCRIPTIVE, 0, items));
         slots.push(ev);

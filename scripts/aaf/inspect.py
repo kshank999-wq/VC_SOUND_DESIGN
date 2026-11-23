@@ -91,7 +91,7 @@ def main(path):
             out["timecode"] = {"start": seg.start, "fps": seg.fps, "drop": seg.drop, "edit_rate": rational(slot.edit_rate), "length": seg.length}
         elif slot.classdef.class_name == "EventMobSlot":
             for m in seg.components:
-                out["markers"].append({"position": m["Position"].value, "length": m["Length"].value, "comment": m["Comment"].value, "kind": m.classdef.class_name})
+                out["markers"].append({"position": m["Position"].value, "length": m["Length"].value, "comment": m["Comment"].value, "kind": m.classdef.class_name, "edit_rate": rational(slot.edit_rate)})
         else:
             effects = {}
             # track-level effects (gain, pan) around the track's sequence, outermost first

@@ -291,11 +291,12 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
     let wind = tracks.iter().find(|t| t["name"].as_str().unwrap().starts_with(wind_name.as_str())).unwrap();
     assert_eq!(wind["components"][0]["kind"], "SourceClip", "no leading filler: the clip starts before the range");
 
-    // markers: the cues the range marks, at their positions relative to it, with their
-    // durations — the wind's range (from before the range) trimmed to its start
+    // markers: the cues the range marks, at their positions relative to it, in frames as
+    // Media Composer keeps them (24 fps), with their durations — the wind's range (from before
+    // the range) trimmed to its start, points one frame long
     let mk = v["markers"].as_array().unwrap();
     let code = |what: &str| s.state.cues.values().find(|c| c.description.contains(what)).unwrap().code.clone();
-    let mut want: Vec<(i64, i64, String)> = vec![(0, 7 * sr, code("wind")), (sr, 0, code("glass")), (4 * sr, 0, code("door"))];
+    let mut want: Vec<(i64, i64, String)> = vec![(0, 7 * 24, code("wind")), (24, 1, code("glass")), (4 * 24, 1, code("door"))];
     want.sort();
     let mut got: Vec<(i64, i64, String)> = mk
         .iter()
@@ -307,6 +308,7 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
     got.sort();
     assert_eq!(got, want);
     assert!(mk.iter().all(|m| m["kind"] == "DescriptiveMarker"), "Media Composer's kind of marker");
+    assert!(mk.iter().all(|m| m["edit_rate"] == serde_json::json!([24, 1])), "on a track at the frame rate: {mk:?}");
 }
 
 #[test]
@@ -707,12 +709,16 @@ print(json.dumps(sorted({((m.name or '') + ' ' + (m.comment or ''), m.color + ' 
     let color_of = |list: &[(String, String)], what: &str| {
         list.iter().find(|(t, _)| t.contains(what)).map(|x| x.1.clone()).unwrap_or_else(|| panic!("{what}: {list:?}"))
     };
-    // colors and durations alike
+    // colors alike; durations alike for ranges, and points one frame long from the AAF
+    // (as the adapter reads Media Composer's own markers)
     for what in cues.iter().map(|c| c.1).chain(custom.iter().map(|c| c.0)).chain(["rain"]) {
-        assert_eq!(color_of(&via_aaf, what), color_of(&ours, what), "{what}: AAF → adapter vs our OTIO");
+        let (a, o) = (color_of(&via_aaf, what), color_of(&ours, what));
+        let o = if o.ends_with(" 0.0") { o.replace(" 0.0", " 0.041667") } else { o };
+        assert_eq!(a, o, "{what}: AAF → adapter vs our OTIO");
     }
     assert_eq!(color_of(&ours, "rain"), "GREEN 0.833333", "the range: 20 frames at 24 fps");
     assert!(color_of(&ours, "glass").ends_with(" 0.0"), "a point");
+    assert!(color_of(&via_aaf, "glass").ends_with(" 0.041667"), "a point: one frame in the AAF");
     let named: Vec<String> = custom.iter().map(|c| color_of(&ours, c.0).split(' ').next().unwrap().to_string()).collect();
     assert_eq!(named, ["BLUE", "ORANGE", "PINK", "PURPLE"], "own colors named as the adapter names them");
 }

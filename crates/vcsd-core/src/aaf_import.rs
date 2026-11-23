@@ -426,10 +426,10 @@ impl Aaf {
 
 // ---------------------------------------------------------------- timeline model
 
-type Rate = (i64, i64);
+pub(crate) type Rate = (i64, i64);
 
 /// `v` edit units at `from` → edit units at `to` (rounded).
-fn conv(v: i64, from: Rate, to: Rate) -> i64 {
+pub(crate) fn conv(v: i64, from: Rate, to: Rate) -> i64 {
     let mut n = v as i128 * from.1 as i128 * to.0 as i128;
     let mut d = from.0 as i128 * to.1 as i128;
     if d == 0 {

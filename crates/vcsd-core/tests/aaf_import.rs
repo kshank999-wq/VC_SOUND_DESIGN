@@ -1091,7 +1091,7 @@ with aaf2.open(sys.argv[1], 'rw') as f:
                 c['Position'].value = c['Position'].value + int(sys.argv[2])
                 c['CommentMarkerColor'].value = {'red': 65535, 'green': 0, 'blue': 0}
 "#;
-    let out = std::process::Command::new(&py).args(["-c", code]).arg(&file).arg(sr.to_string()).output().unwrap();
+    let out = std::process::Command::new(&py).args(["-c", code]).arg(&file).arg("24").output().unwrap(); // one second: 24 frames
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let (mut s3, root3) = session("aafspotpart3", "24", "01:00:00:00");
     let rep = s3.edit("i", |st| import(st, &file, &opts(&root3))).unwrap();
@@ -1104,4 +1104,53 @@ with aaf2.open(sys.argv[1], 'rw') as f:
     assert_eq!((walk.start_sample, walk.end_sample, walk.event_type), (4 * sr, 6 * sr, EventType::Repeated));
     assert_eq!(walk.sub_events, vec![4 * sr, 4 * sr + sr / 2, 5 * sr, 5 * sr + sr / 2], "taps moved with it");
     assert_eq!(s3.state.markers[walk.marker_id.as_ref().unwrap()].color.as_deref(), Some("#ff0000"), "recolored elsewhere");
+}
+
+#[test]
+fn markers_in_frames_at_23_976_come_back_exact() {
+    let (mut s, root) = session("aaf2398", "23.976", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:05", "01:00:02:05", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:13", "01:00:06:07", "wind exterior", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    // spotted off the frame grid (live spotting lands between frames)
+    let odd = marker_tc(&mut s, "props", EventType::Point, "01:00:04:00", "01:00:04:00", "between frames", None);
+    s.state.markers.get_mut(&odd).unwrap().start_sample += 700;
+    s.state.markers.get_mut(&odd).unwrap().end_sample += 700;
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let file = aaf_export(&mut s, &root);
+    let (mut s2, root2) = session("aaf2398b", "23.976", "01:00:00:00");
+    let rep = s2.edit("i", |st| import(st, &file, &opts(&root2))).unwrap();
+    assert_eq!(rep.markers, 3);
+    assert!(!rep.notes.iter().any(|n| n.contains("moved or resized")), "frame rounding isn't a move: {:?}", rep.notes);
+    for m in s.state.markers.values() {
+        let m2 = s2.state.markers.values().find(|x| x.label == m.label).unwrap();
+        assert_eq!((m2.start_sample, m2.end_sample, m2.kind), (m.start_sample, m.end_sample, m.kind), "{}: exact", m.label);
+    }
+
+    // as another app reads it (frames only): within half a frame, points as points
+    let Some(py) = python() else {
+        eprintln!("SKIPPED (frames part): pyaaf2 not installed");
+        return;
+    };
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/aaf/inspect.py");
+    let out = std::process::Command::new(&py).arg(script).arg(&file).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mk = v["markers"].as_array().unwrap();
+    assert!(mk.iter().all(|m| m["edit_rate"] == serde_json::json!([24000, 1001])), "{mk:?}");
+    let start = s.state.tb().sample_at_tc("01:00:00:00").unwrap();
+    let half = 48_000.0 * 1001.0 / 24000.0 / 2.0;
+    for m in s.state.markers.values() {
+        let w = mk.iter().find(|x| x["comment"].as_str().unwrap().contains(&m.label)).unwrap();
+        let at = w["position"].as_f64().unwrap() * 1001.0 / 24000.0 * 48_000.0;
+        assert!((at - (m.start_sample - start) as f64).abs() <= half + 1.0, "{}: {at}", m.label);
+        let len = w["length"].as_i64().unwrap();
+        if m.kind == EventType::Point {
+            assert_eq!(len, 1, "{}: a point, one frame", m.label);
+        } else {
+            assert!(len > 1);
+        }
+    }
 }
