@@ -74,6 +74,8 @@ fn an_exported_otio_imports_back_to_the_same_mix() {
     let color = |what: &str| st2.markers.values().find(|m| m.label.contains(what)).unwrap().color.clone();
     assert_eq!(color("glass smash").as_deref(), Some("#0000ff"), "OTIO marker colors are names: the nearest one");
     assert_eq!(color("wind exterior").as_deref(), Some("#00ff00"), "a background cue: its category's green");
+    let wind = st2.markers.values().find(|m| m.label.contains("wind exterior")).unwrap();
+    assert_eq!((wind.kind, wind.end_sample - wind.start_sample), (EventType::Range, 6 * sr), "the range cue's duration");
     assert_eq!(st2.tracks.len(), s.state.tracks.len());
     let gc = st2.clips.values().find(|c| c.timeline_start == t0 && c.fade_in == 480).expect("glass clip");
     assert_eq!((gc.fade_out, gc.gain_db), (960, -6.0));
@@ -122,7 +124,9 @@ fn an_editors_otio_imports_clips_transitions_nesting_media_and_markers() {
     assert_eq!(rep.missing_media.len(), 1, "{:?}", rep.missing_media);
     assert!(rep.missing_media[0].contains("missing reference"), "{:?}", rep.missing_media);
     assert!(rep.notes.iter().any(|n| n.starts_with("no levels or pan in the OTIO")), "{:?}", rep.notes);
-    assert_eq!(rep.markers, 2, "the timeline marker and the clip marker");
+    assert_eq!(rep.markers, 6, "timeline, clip, gap and compound-clip markers; the one on unused media left out");
+    assert!(rep.notes.iter().any(|n| n.starts_with("markers outside the part of their clip in use left out (1)")), "{:?}", rep.notes);
+    assert!(rep.notes.iter().any(|n| n.starts_with("range markers trimmed to the part of their clip in use (1)")), "{:?}", rep.notes);
     let st = &s.state;
     let f = 1920; // samples per frame at 25 fps
     let names: Vec<&str> = st.tracks.values().map(|t| t.name.as_str()).collect();
@@ -160,14 +164,27 @@ fn an_editors_otio_imports_clips_transitions_nesting_media_and_markers() {
     let n = clips(&inner.id);
     assert_eq!((n.len(), n[0].timeline_start, n[0].source_offset, n[0].length), (1, 25 * f, 5 * f, 20 * f));
 
-    // markers: the timeline's, and clip A's (media frame 20 → timeline frame 35)
-    let mut mk: Vec<(i64, String)> = st.markers.values().map(|m| (m.start_sample, m.label.clone())).collect();
-    mk.sort();
-    assert_eq!(mk, vec![(35 * f, "line — pickup".to_string()), (50 * f, "door knock".to_string())]);
+    // markers, with their durations: the timeline's, clip A's (media frame 20 → timeline
+    // frame 35), clip B's range trimmed to B's head, the gap's and the compound clip's
+    let mut mk: Vec<(i64, i64, EventType, &str)> =
+        st.markers.values().map(|m| (m.start_sample, m.end_sample, m.kind, m.label.as_str())).collect();
+    mk.sort_by_key(|m| m.0);
+    assert_eq!(
+        mk,
+        vec![
+            (30 * f, 35 * f, EventType::Range, "swell"),
+            (35 * f, 35 * f, EventType::Point, "line — pickup"),
+            (50 * f, 50 * f, EventType::Point, "door knock"),
+            (60 * f, 84 * f, EventType::Range, "ambience"),
+            (75 * f, 85 * f, EventType::Range, "breath"),
+            (102 * f, 106 * f, EventType::Range, "room tone"),
+        ]
+    );
     assert!(st.markers.values().all(|m| st.lanes[&m.lane_id].name == "OTIO markers"));
     let mut colors: Vec<(i64, Option<&str>)> = st.markers.values().map(|m| (m.start_sample, m.color.as_deref())).collect();
     colors.sort();
-    assert_eq!(colors, vec![(35 * f, Some("#00ffff")), (50 * f, Some("#ff0000"))], "marker colors");
+    assert_eq!(colors[1..3], [(35 * f, Some("#00ffff")), (50 * f, Some("#ff0000"))], "marker colors");
+    assert_eq!(colors[4], (75 * f, Some("#ffff00")));
 
     // placed elsewhere on request
     let (mut s2, root2) = session("otioimp2", "25", "10:00:00:00");

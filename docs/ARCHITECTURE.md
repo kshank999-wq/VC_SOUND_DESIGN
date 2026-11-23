@@ -189,7 +189,7 @@ library (`scripts/otio/otio_summary.py`) and checks the following:
   left and right levels a host plays from the effects (constant-power pan on the mono track,
   balance on the stereo one) against the mixer's, within 0.15 dB at 401 points. A side more than
   30 dB under the other is checked within 0.1 % of the louder side instead;
-- the markers and their colors (RED, and CYAN on the clip's);
+- the markers with their durations and colors: points, the timeline's range, a clip's range trimmed to the clip's head, one on unused media left out, a gap's and a compound clip's ranges;
 - sharing the media and prints with the AAF.
 
 It has not been opened in an editor yet.
@@ -212,7 +212,7 @@ tracks as new tracks in a folder `OTIO/<timeline>`, placed at `global_start_time
 | Track color: our `metadata.vcsd.color`, else OTIO 0.18's own `Color` (r, g, b in 0–1, converted as OpenTimelineIO does), "#rrggbb", or an OTIO color name ("ORANGE") | The track's color, shown on its header swatch (which is also its picker; Alt-click goes back to the category's). None: the category's |
 | `metadata.vcsd.solo` (our own export) | The track's solo. Importing a soloed track into a project with other tracks silences those while it's on, and the report says so; other apps' files have no solo |
 | A constant zero gain effect on a clip or track, without our metadata (how AAF, which has no mute, carries one through the AAF adapter) | A muted clip or track, its other gains kept as its levels, so unmuting brings the sound back (noted) |
-| Markers on the timeline, tracks and clips | Spotting markers in an "OTIO markers" lane (name — comment), for those inside a scene, each with its color: OTIO's names (RED #ff0000, PINK #ff8080, ORANGE #ff7f00, PURPLE #7f007f, …), or a `Color`/"#rrggbb" where a writer puts one |
+| Markers on the timeline, tracks, clips, gaps and compound clips | Spotting markers in an "OTIO markers" lane (name — comment), for those inside a scene: a marker with a duration becomes a range marker of that length (both ends taken from timeline time, so the length doesn't drift by rounding), one without a point. An item's markers are in its own time; on a clip, gap or compound clip a range is trimmed to the part the timeline uses, and a marker wholly in unused media is left out (both noted). Each comes with its color: OTIO's names (RED #ff0000, PINK #ff8080, ORANGE #ff7f00, PURPLE #7f007f, …), or a `Color`/"#rrggbb" where a writer puts one |
 | `metadata.vcsd` (our own export) | Clip gain and fades, track fader, pan, channels, volume and pan automation |
 | Effects with `metadata.vcsd.insert` (our own export) | The track's inserts, in order: built-in effects with their settings, plugins with their id, format, saved state and values under new slot ids. A disabled effect (`enabled: false`) comes in bypassed |
 | `metadata.vcsd.buses` (our own export) | The buses the imported tracks feed, with every bus above them. They are matched by name under the same parent (the root is the project's master) or created. Their level, mute, inserts (plugins under new slot ids) and plugin automation are set, and their volume and balance lanes are replaced within the imported range. The tracks then keep their own levels and are routed to them. See below for when |

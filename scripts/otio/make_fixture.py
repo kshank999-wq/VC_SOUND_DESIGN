@@ -12,11 +12,15 @@ AIFF, linked from a folder that no longer exists, so found by name).
 - V1: a video track (ignored);
 - DIA 1: gap 25, fade in 5, clip A (dialog from 10, 50 long), dissolve 5/5,
   clip B (dialog from 70, 25 long), gap 10, clip C (disabled, 10 long); a
-  marker on clip A at media frame 20 (timeline frame 35);
+  marker on clip A at media frame 20 (timeline frame 35); on clip B a range
+  from media frame 60, 20 long (B uses 70–95: trimmed to timeline 75–85) and
+  one at 30 (unused media: left out); on the gap a range at 2, 4 long (102–106);
 - MX: music 25 long, then a nested stack (range 10–30) holding track "inner":
-  gap 5, dialog 40 long — so frames 5–25 of the dialog play at 25–45;
+  gap 5, dialog 40 long — so frames 5–25 of the dialog play at 25–45; a range
+  marker on the stack at its frame 15, 5 long (timeline 30–35);
 - Missing: a clip with a missing reference;
-- a timeline marker "door knock" at frame 50 (RED; the clip's marker is CYAN).
+- timeline markers "door knock" at frame 50 (RED; the clip's marker is CYAN)
+  and "ambience" from 60, 24 long.
 """
 import math
 import os
@@ -76,8 +80,14 @@ def build(out):
     a.markers.append(otio.schema.Marker("line", TR(f(TC + 20), f(0)), color="CYAN", comment="pickup"))
     dia.append(a)
     dia.append(otio.schema.Transition(transition_type="SMPTE_Dissolve", in_offset=f(5), out_offset=f(5)))
-    dia.append(otio.schema.Clip("B", media_reference=dialog(), source_range=TR(f(TC + 70), f(25))))
-    dia.append(otio.schema.Gap(source_range=TR(f(0), f(10))))
+    b = otio.schema.Clip("B", media_reference=dialog(), source_range=TR(f(TC + 70), f(25)))
+    # a range starting before B's trimmed head (trimmed to it), and one in media B doesn't use
+    b.markers.append(otio.schema.Marker("breath", TR(f(TC + 60), f(20)), color="YELLOW"))
+    b.markers.append(otio.schema.Marker("unused take", TR(f(TC + 30), f(5))))
+    dia.append(b)
+    gap = otio.schema.Gap(source_range=TR(f(0), f(10)))
+    gap.markers.append(otio.schema.Marker("room tone", TR(f(2), f(4)), color="GREEN"))
+    dia.append(gap)
     c = otio.schema.Clip("C", media_reference=dialog(), source_range=TR(f(TC), f(10)))
     c.enabled = False
     dia.append(c)
@@ -90,6 +100,7 @@ def build(out):
     inner.append(otio.schema.Gap(source_range=TR(f(0), f(5))))
     inner.append(otio.schema.Clip("D", media_reference=dialog(), source_range=TR(f(TC), f(40))))
     nested.append(inner)
+    nested.markers.append(otio.schema.Marker("swell", TR(f(15), f(5)), color="PURPLE"))
     mx.append(nested)
     tl.tracks.append(mx)
 
@@ -98,6 +109,7 @@ def build(out):
     tl.tracks.append(miss)
 
     tl.tracks.markers.append(otio.schema.Marker("door knock", TR(f(50), f(0)), color="RED"))
+    tl.tracks.markers.append(otio.schema.Marker("ambience", TR(f(60), f(24)), color="BLUE"))
     otio.adapters.write_to_file(tl, os.path.join(out, "fixture.otio"))
 
 

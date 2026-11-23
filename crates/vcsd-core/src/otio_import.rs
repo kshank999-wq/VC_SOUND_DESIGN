@@ -647,14 +647,30 @@ fn level_effect(e: &Value, t0: f64, len: f64) -> Option<(bool, Level)> {
 
 struct Reader<'a> {
     notes: &'a mut Notes,
-    /// (start, duration, label, color)
+    /// (start, end, label, color), in seconds from the timeline start
     markers: Vec<(f64, f64, String, Option<String>)>,
 }
 
 impl Reader<'_> {
-    fn markers_of(&mut self, v: &Value, shift: f64) {
+    /// An item's markers: `shift` takes its own time to the timeline's; with a `window`
+    /// (the part of the item the timeline uses), ranges are trimmed to it and markers
+    /// wholly outside it left out, as they mark media nobody hears.
+    fn markers_of(&mut self, v: &Value, shift: f64, window: Option<(f64, f64)>) {
         for m in v["markers"].as_array().into_iter().flatten() {
             let Some((a, d)) = range(&m["marked_range"]) else { continue };
+            let (mut a, mut b) = (a + shift, a + shift + d.max(0.0));
+            if let Some((w0, w1)) = window {
+                // a hair of slack: frame times in seconds don't compare exactly
+                const EPS: f64 = 1e-9;
+                if b < w0 - EPS || a > w1 + EPS || (d > 0.0 && b <= w0 + EPS) || (d > 0.0 && a >= w1 - EPS) {
+                    self.notes.add("markers outside the part of their clip in use left out", 1);
+                    continue;
+                }
+                if d > 0.0 && (a < w0 - EPS || b > w1 + EPS) {
+                    self.notes.add("range markers trimmed to the part of their clip in use", 1);
+                    (a, b) = (a.max(w0), b.min(w1));
+                }
+            }
             let name = m["name"].as_str().unwrap_or("").trim().to_string();
             let comment = m["comment"].as_str().unwrap_or("").trim().to_string();
             let label = match (name.is_empty(), comment.is_empty()) {
@@ -663,7 +679,7 @@ impl Reader<'_> {
                 (true, false) => comment,
                 (true, true) => "OTIO marker".into(),
             };
-            self.markers.push((a + shift, d, label, otio_color(&m["color"])));
+            self.markers.push((a, b, label, otio_color(&m["color"])));
         }
     }
 
@@ -671,7 +687,7 @@ impl Reader<'_> {
     fn track(&mut self, t: &Value, name: String, offset: f64, window: Option<(f64, f64)>, lanes: &mut Vec<OLane>) {
         // track time starts at its source range, when it has one
         let offset = offset - range(&t["source_range"]).map(|r| r.0).unwrap_or(0.0);
-        self.markers_of(t, offset);
+        self.markers_of(t, offset, window);
         let children: Vec<&Value> = t["children"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
         let mut items: Vec<Option<Item>> = vec![];
         let mut transitions: Vec<(usize, f64, f64)> = vec![];
@@ -720,13 +736,15 @@ impl Reader<'_> {
                         vcsd: c["metadata"]["vcsd"].clone(),
                         effects: c["effects"].as_array().cloned().unwrap_or_default(),
                     };
-                    self.markers_of(c, pos - src);
+                    self.markers_of(c, pos - src, Some((pos, pos + len)));
                     items.push(Some(item));
                     pos += len;
                 }
                 "Stack" => {
                     // a nested stack (compound clip): its audio tracks as extra lanes
                     let (s0, len) = range(&c["source_range"]).unwrap_or((0.0, 0.0));
+                    // the compound clip's own markers, in its own time
+                    self.markers_of(c, pos - s0, Some((pos, pos + len)));
                     let mut inner = vec![];
                     for (k, sub) in c["children"].as_array().into_iter().flatten().enumerate() {
                         if schema(sub) == "Track" && is_audio(sub) {
@@ -749,7 +767,10 @@ impl Reader<'_> {
                     if schema(c) != "Gap" {
                         self.notes.add(format!("{} items left out", schema(c)), 1);
                     }
-                    pos += range(&c["source_range"]).map(|r| r.1).unwrap_or(0.0);
+                    let (g0, len) = range(&c["source_range"]).unwrap_or((0.0, 0.0));
+                    // markers on a gap (editors drop notes on empty stretches)
+                    self.markers_of(c, pos - g0, Some((pos, pos + len)));
+                    pos += len;
                     items.push(None);
                 }
             }
@@ -927,7 +948,7 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
     // ---- tracks
     let stack = &tl["tracks"];
     let mut reader = Reader { notes: &mut notes, markers: vec![] };
-    reader.markers_of(stack, 0.0);
+    reader.markers_of(stack, 0.0, None);
     let mut lanes = vec![];
     for (k, t) in stack["children"].as_array().into_iter().flatten().enumerate() {
         if schema(t) != "Track" {
@@ -1269,9 +1290,10 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &OtioImportOptions) -> Resul
     report.missing_media = missing.into_iter().map(|(k, n)| format!("{k} — {n} clip{}", if n == 1 { "" } else { "s" })).collect();
 
     // ---- markers → spotting markers (inside scenes)
-    for (at, dur, label, color) in markers {
+    for (at, until, label, color) in markers {
+        // both ends from timeline time, so a range's length doesn't drift by rounding
         let a = base + smp(at);
-        let len = smp(dur).max(0);
+        let len = (smp(until) - smp(at)).max(0);
         if s.scene_at(a).is_none() {
             notes.add("markers outside every scene left out (add scenes, then import again)", 1);
             continue;
