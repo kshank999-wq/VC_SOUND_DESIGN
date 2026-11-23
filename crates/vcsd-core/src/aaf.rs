@@ -1249,22 +1249,21 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
         slots.push(sl);
     }
     // cue markers
-    let mut cues: Vec<&Cue> = s.cues.values().filter(|c| c.start_sample >= start && c.start_sample < end).collect();
-    cues.sort_by(|a, b| (a.start_sample, &a.code).cmp(&(b.start_sample, &b.code)));
+    let cues = crate::otio::cue_marks(s, start, end);
     let markers = cues.len();
     if !cues.is_empty() {
         let items = cues
             .iter()
-            .map(|c| {
+            .map(|&(c, at, len)| {
                 let text = if c.description.is_empty() { c.code.clone() } else { format!("{} {}", c.code, c.description) };
                 // as Media Composer writes markers (readers such as the OpenTimelineIO AAF adapter
                 // read only these): a descriptive marker describing a track — here the timecode
                 // track, so readers that find no audio track to hang it on keep it on the timeline
                 Obj::new(class::DESCRIPTIVE_MARKER)
                     .weak(0x0201, "DataDefinition", Defs::Data, key::DESCRIPTIVE)
-                    // a range cue's duration (kept to the exported range); a point: none
-                    .data(0x0202, "Length", i64v((c.end_sample.min(end) - c.start_sample).max(0)))
-                    .data(0x0601, "Position", i64v(c.start_sample - start))
+                    // a range cue's duration (trimmed to the exported range); a point: none
+                    .data(0x0202, "Length", i64v(len))
+                    .data(0x0601, "Position", i64v(at))
                     .data(0x0602, "Comment", utf16z(&text))
                     .data(PID_COMMENT_MARKER_COLOR, "CommentMarkerColor", marker_color(s, c))
                     .data(0x6102, "DescribedSlots", u32v(1))

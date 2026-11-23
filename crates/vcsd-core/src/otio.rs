@@ -98,6 +98,30 @@ pub(crate) fn colour(c: &Category) -> &'static str {
     }
 }
 
+/// The cues an export of `start..end` marks, sorted, each with its marker's start and
+/// duration relative to `start`: points inside the range, and ranges overlapping it,
+/// trimmed to it — a range cue that began earlier is marked from the range's start,
+/// as its audio is.
+pub(crate) fn cue_marks(s: &ProjectState, start: i64, end: i64) -> Vec<(&Cue, i64, i64)> {
+    let mut v: Vec<(&Cue, i64, i64)> = s
+        .cues
+        .values()
+        .filter(|c| {
+            if c.end_sample > c.start_sample {
+                c.start_sample < end && c.end_sample > start
+            } else {
+                c.start_sample >= start && c.start_sample < end
+            }
+        })
+        .map(|c| {
+            let a = c.start_sample.max(start);
+            (c, a - start, (c.end_sample.min(end) - a).max(0))
+        })
+        .collect();
+    v.sort_by(|a, b| (a.1, &a.0.code).cmp(&(b.1, &b.0.code)));
+    v
+}
+
 /// OTIO's named marker colors as RGB (the values OTIO import reads them as).
 const NAMED: &[(&str, [u8; 3])] = &[
     ("RED", [255, 0, 0]),
@@ -611,17 +635,15 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
     }
 
     // ---- cues → timeline markers
-    let mut cues: Vec<&Cue> = s.cues.values().filter(|c| c.start_sample >= start && c.start_sample < end).collect();
-    cues.sort_by(|a, b| (a.start_sample, &a.code).cmp(&(b.start_sample, &b.code)));
-    let markers: Vec<Value> = cues
-        .iter()
-        .map(|c| {
+    let markers: Vec<Value> = cue_marks(s, start, end)
+        .into_iter()
+        .map(|(c, at, len)| {
             json!({
                 "OTIO_SCHEMA": "Marker.2",
                 "metadata": { "vcsd": { "cue_id": c.id, "code": c.code, "category": c.category.display() } },
                 "name": c.code,
                 "color": cue_colour(s, c),
-                "marked_range": range(c.start_sample - start, (c.end_sample.min(end) - c.start_sample).max(0), sr),
+                "marked_range": range(at, len, sr),
                 "comment": c.description,
             })
         })

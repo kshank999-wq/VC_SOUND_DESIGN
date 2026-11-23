@@ -537,3 +537,51 @@ fn track_colors_go_out_as_otio_colors() {
         assert_eq!(back.color.as_deref(), Some(*c), "from OTIO's Color alone");
     }
 }
+
+#[test]
+fn a_partial_export_marks_cue_durations_trimmed_to_its_range() {
+    let (mut s, root) = session("otiomarkdur", "24", "01:00:00:00");
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:08:00", "wind exterior", None);
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:02:00", "01:00:02:00", "glass smash", None);
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:03:00", "01:00:04:12", "rain", None);
+    marker_tc(&mut s, "fx", EventType::Point, "01:00:00:12", "01:00:00:12", "before", None);
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    let st = &s.state;
+    let sr = st.project.sample_rate as i64;
+    // 01:00:01:00 – 01:00:06:00: the wind began earlier and runs past the end
+    let o = otio::OtioOptions {
+        name: "part".into(),
+        start: sr,
+        end: 6 * sr,
+        exclude_temp_refs: false,
+        prints: Default::default(),
+        include_muted: false,
+    };
+    let file = root.join("part.otio");
+    let rep = otio::write(st, &file, &Default::default(), &o).unwrap();
+    assert_eq!(rep.markers, 3, "the point before the range left out");
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let samples = |v: &serde_json::Value| (v["value"].as_f64().unwrap() / v["rate"].as_f64().unwrap() * sr as f64).round() as i64;
+    let got: Vec<(String, i64, i64)> = raw["tracks"]["markers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (m["comment"].as_str().unwrap().into(), samples(&m["marked_range"]["start_time"]), samples(&m["marked_range"]["duration"]))
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![("wind exterior".to_string(), 0, 5 * sr), ("glass smash".to_string(), sr, 0), ("rain".to_string(), 2 * sr, 3 * sr / 2),],
+        "points without a duration; ranges with theirs, the wind's trimmed to the range at both ends"
+    );
+
+    let Some(py) = python() else {
+        eprintln!("SKIPPED: OpenTimelineIO not installed (python3 -m pip install opentimelineio==0.18.1)");
+        return;
+    };
+    let v = inspect(&py, &file);
+    let durs: Vec<f64> = v["markers"].as_array().unwrap().iter().map(|m| m["duration"].as_f64().unwrap()).collect();
+    assert_eq!(durs, [5.0 * sr as f64, 0.0, 1.5 * sr as f64], "as OpenTimelineIO reads them (in samples)");
+}

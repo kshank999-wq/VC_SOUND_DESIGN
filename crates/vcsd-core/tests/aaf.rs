@@ -291,19 +291,18 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
     let wind = tracks.iter().find(|t| t["name"].as_str().unwrap().starts_with(wind_name.as_str())).unwrap();
     assert_eq!(wind["components"][0]["kind"], "SourceClip", "no leading filler: the clip starts before the range");
 
-    // markers: the cues inside the range, at their positions relative to it
+    // markers: the cues the range marks, at their positions relative to it, with their
+    // durations — the wind's range (from before the range) trimmed to its start
     let mk = v["markers"].as_array().unwrap();
-    let mut want: Vec<(i64, String)> = s
-        .state
-        .cues
-        .values()
-        .filter(|c| c.start_sample >= start && c.start_sample < end)
-        .map(|c| (c.start_sample - start, c.code.clone()))
-        .collect();
+    let code = |what: &str| s.state.cues.values().find(|c| c.description.contains(what)).unwrap().code.clone();
+    let mut want: Vec<(i64, i64, String)> = vec![(0, 7 * sr, code("wind")), (sr, 0, code("glass")), (4 * sr, 0, code("door"))];
     want.sort();
-    let mut got: Vec<(i64, String)> = mk
+    let mut got: Vec<(i64, i64, String)> = mk
         .iter()
-        .map(|m| (m["position"].as_i64().unwrap(), m["comment"].as_str().unwrap().split(' ').next().unwrap().to_string()))
+        .map(|m| {
+            let c = m["comment"].as_str().unwrap().split(' ').next().unwrap().to_string();
+            (m["position"].as_i64().unwrap(), m["length"].as_i64().unwrap(), c)
+        })
         .collect();
     got.sort();
     assert_eq!(got, want);
