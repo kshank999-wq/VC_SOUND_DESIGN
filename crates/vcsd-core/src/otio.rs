@@ -84,7 +84,8 @@ fn fade(fade_in: i64, fade_out: i64, rate: f64) -> Value {
     })
 }
 
-fn colour(c: &Category) -> &'static str {
+/// A cue category's marker color (OTIO's named colors; the AAF export uses the same).
+pub(crate) fn colour(c: &Category) -> &'static str {
     match c {
         Category::Footsteps | Category::Props => "YELLOW",
         Category::HardFx => "RED",

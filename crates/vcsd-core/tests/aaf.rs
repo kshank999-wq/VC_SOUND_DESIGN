@@ -307,7 +307,7 @@ fn aaf_rebuilds_the_timeline_in_an_independent_reader() {
         .collect();
     got.sort();
     assert_eq!(got, want);
-    assert!(mk.iter().all(|m| m["kind"] == "CommentMarker"));
+    assert!(mk.iter().all(|m| m["kind"] == "DescriptiveMarker"), "Media Composer's kind of marker");
 }
 
 #[test]
@@ -617,5 +617,86 @@ fn printing_bakes_plugins_and_their_automation_into_the_aaf() {
             .unwrap()
             .iter()
             .any(|c| c["kind"] == "SourceClip" && !c["media"]["urls"][0].as_str().unwrap().contains("_print"))));
+    }
+}
+
+#[test]
+fn cue_markers_carry_their_category_colors() {
+    let Some(py) = python() else {
+        eprintln!("SKIPPED: pyaaf2 not installed (python3 -m pip install pyaaf2==1.7.1)");
+        return;
+    };
+    let (mut s, root) = session("aafmarkercolors", "24", "01:00:00:00");
+    with_pack(&mut s);
+    scene(&mut s, "1", "01:00:00:00", "01:00:10:00");
+    // one cue per palette color: FX red, BG green, design magenta, dialogue blue, music purple, foley yellow
+    let cues = [("fx", "glass"), ("bg", "wind"), ("design", "whoosh"), ("dialogue", "line"), ("music", "sting"), ("footsteps", "steps")];
+    for (k, (lane_cat, what)) in cues.iter().enumerate() {
+        let tc = format!("01:00:0{}:00", k + 1);
+        marker_tc(&mut s, lane_cat, EventType::Point, &tc, &tc, what, None);
+    }
+    s.edit("c", |st| markers_to_cues(st, None)).unwrap();
+    s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
+    let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-23");
+    o.aaf = true;
+    o.otio = true;
+    o.force = true;
+    let r = s.edit("x", |st| export::export(st, Some(&root), &o)).unwrap();
+    let aaf = r.dir.join(r.files.iter().find(|f| f.ends_with(".aaf")).unwrap());
+    let otio = r.dir.join(r.files.iter().find(|f| f.ends_with(".otio")).unwrap());
+
+    // pyaaf2: each marker's CommentMarkerColor, 16-bit channels
+    let code = r#"
+import sys, json, aaf2
+f = aaf2.open(sys.argv[1], 'r')
+m = next(f.content.compositionmobs())
+out = {}
+for sl in m.slots:
+    if sl.segment.classdef.class_name != 'Sequence' or sl.segment.media_kind != 'DescriptiveMetadata':
+        continue
+    for c in sl.segment.components:
+        v = c['CommentMarkerColor'].value
+        out[c['Comment'].value] = [v['red'], v['green'], v['blue']]
+print(json.dumps(out))
+"#;
+    let out = std::process::Command::new(&py).args(["-c", code]).arg(&aaf).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let colors: std::collections::BTreeMap<String, Vec<u32>> = serde_json::from_slice(&out.stdout).unwrap();
+    let of =
+        |what: &str| colors.iter().find(|(k, _)| k.contains(what)).map(|(_, v)| v.clone()).unwrap_or_else(|| panic!("{what}: {colors:?}"));
+    assert_eq!(of("glass"), [65535, 0, 0]);
+    assert_eq!(of("wind"), [0, 65535, 0]);
+    assert_eq!(of("whoosh"), [65535, 0, 65535]);
+    assert_eq!(of("line"), [0, 0, 65535]);
+    assert_eq!(of("sting"), [32639, 0, 32639]);
+    assert_eq!(of("steps"), [65535, 65535, 0]);
+
+    // through the OpenTimelineIO AAF adapter: the same marker colors as our OTIO export
+    let adapter =
+        std::process::Command::new(&py).args(["-c", "import otio_aaf_adapter"]).output().map(|o| o.status.success()).unwrap_or(false);
+    if !adapter {
+        eprintln!("SKIPPED (adapter part): the OpenTimelineIO AAF adapter isn't installed");
+        return;
+    }
+    let names = r#"
+import sys, json, opentimelineio as otio
+kw = {'adapter_name': 'AAF', 'simplify': True} if sys.argv[1].endswith('.aaf') else {}
+t = otio.adapters.read_from_file(sys.argv[1], **kw)
+# wherever a reader hangs them (the adapter puts them on clips, sometimes twice)
+ms = [m for item in [t.tracks] + list(t.find_children()) for m in getattr(item, 'markers', [])]
+print(json.dumps(sorted({((m.name or '') + ' ' + (m.comment or ''), m.color) for m in ms})))
+"#;
+    let read = |f: &Path| {
+        let out = std::process::Command::new(&py).args(["-c", names]).arg(f).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let v: Vec<(String, String)> = serde_json::from_slice(&out.stdout).unwrap();
+        v
+    };
+    let (via_aaf, ours) = (read(&aaf), read(&otio));
+    let color_of = |list: &[(String, String)], what: &str| {
+        list.iter().find(|(t, _)| t.contains(what)).map(|x| x.1.clone()).unwrap_or_else(|| panic!("{what}: {list:?}"))
+    };
+    for (_, what) in cues {
+        assert_eq!(color_of(&via_aaf, what), color_of(&ours, what), "{what}: AAF → adapter vs our OTIO");
     }
 }

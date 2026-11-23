@@ -15,7 +15,9 @@
 //!   as hard-panned L/R with the balance in each side's gain;
 //! - bus levels: AAF has no buses, so each bus's static gain, volume lane and
 //!   balance lane (down to the master) are folded into the tracks it carries;
-//! - cue markers (`CommentMarker`s with code and description).
+//! - cue markers with code and description, as Media Composer writes them
+//!   (`DescriptiveMarker`s describing the timecode track), each in its cue
+//!   category's color (`CommentMarkerColor`).
 //!
 //! The fixed parts of the file — the meta-dictionary (class and type
 //! definitions) and the dictionary (data/container/operation/parameter
@@ -58,7 +60,7 @@ pub(crate) mod class {
     pub const CONSTANT_VALUE: &str = "0d010101-0101-3d00-060e-2b3402060101";
     pub const VARYING_VALUE: &str = "0d010101-0101-3e00-060e-2b3402060101";
     pub const CONTROL_POINT: &str = "0d010101-0101-1900-060e-2b3402060101";
-    pub const COMMENT_MARKER: &str = "0d010101-0101-0800-060e-2b3402060101";
+    pub const DESCRIPTIVE_MARKER: &str = "0d010101-0101-4100-060e-2b3402060101";
     pub const TAGGED_VALUE: &str = "0d010101-0101-3f00-060e-2b3402060101";
     pub const WAVE_DESCRIPTOR: &str = "0d010101-0101-2c00-060e-2b3402060101";
     pub const IMPORT_DESCRIPTOR: &str = "0d010101-0101-4a00-060e-2b3402060101";
@@ -551,6 +553,26 @@ fn piece_obj(p: &Piece, master: &[u8], channel: u32) -> Obj {
     } else {
         clip
     }
+}
+
+/// Avid's `CommentMarkerColor` (an RGBColor record: red, green, blue as UInt16).
+/// It's an extension property; the template's meta-dictionary defines it at this pid.
+const PID_COMMENT_MARKER_COLOR: u16 = 0xffb9;
+
+/// A cue marker's color as `CommentMarkerColor`: its category's (the OTIO export's
+/// marker palette), each channel 0–65535 — as Media Composer writes marker colors and
+/// readers such as the OpenTimelineIO AAF adapter read them.
+fn marker_color(c: &Category) -> Vec<u8> {
+    let (r, g, b): (u16, u16, u16) = match crate::otio::colour(c) {
+        "RED" => (255, 0, 0),
+        "GREEN" => (0, 255, 0),
+        "BLUE" => (0, 0, 255),
+        "YELLOW" => (255, 255, 0),
+        "MAGENTA" => (255, 0, 255),
+        "PURPLE" => (127, 0, 127),
+        _ => (0, 255, 255), // CYAN
+    };
+    [r, g, b].iter().flat_map(|v| (v * 257).to_le_bytes()).collect()
 }
 
 /// An indirect Rational amplitude value (linear gain).
@@ -1243,17 +1265,23 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
             .iter()
             .map(|c| {
                 let text = if c.description.is_empty() { c.code.clone() } else { format!("{} {}", c.code, c.description) };
-                Obj::new(class::COMMENT_MARKER)
+                // as Media Composer writes markers (readers such as the OpenTimelineIO AAF adapter
+                // read only these): a descriptive marker describing a track — here the timecode
+                // track, so readers that find no audio track to hang it on keep it on the timeline
+                Obj::new(class::DESCRIPTIVE_MARKER)
                     .weak(0x0201, "DataDefinition", Defs::Data, key::DESCRIPTIVE)
                     .data(0x0202, "Length", i64v(0))
                     .data(0x0601, "Position", i64v(c.start_sample - start))
                     .data(0x0602, "Comment", utf16z(&text))
+                    .data(PID_COMMENT_MARKER_COLOR, "CommentMarkerColor", marker_color(&c.category))
+                    .data(0x6102, "DescribedSlots", u32v(1))
             })
             .collect();
         let ev = Obj::new(class::EVENT_SLOT)
             .data(0x4802, "SlotName", utf16z("Cues"))
             .data(0x4801, "SlotID", u32v(audio_slots.len() as u32 + 2))
             .data(0x4901, "EditRate", rational(sr, 1))
+            .data(0x4804, "PhysicalTrackNumber", u32v(1))
             .strong(0x4803, "Segment", sequence(key::DESCRIPTIVE, 0, items));
         slots.push(ev);
     }

@@ -99,7 +99,7 @@ inserts with their plugins' parameter automation. Other apps show the comment or
 | Track volume automation | Mono Audio Gain around the track with a `VaryingValue` Amplitude: linear control points at exact rational times, split until amplitude-linear interpolation matches the app's dB ramps within 0.1 dB |
 | Overlapping clips | Extra tracks ("Name (2)") |
 | Looped clips | Butt-spliced repeats of the loop span |
-| Cue markers | `CommentMarker`s ("code description") on an event track |
+| Cue markers | Markers ("code description") as Media Composer writes them: `DescriptiveMarker`s on an event track with a `PhysicalTrackNumber`, each describing the timecode track (`DescribedSlots`). Readers such as the OpenTimelineIO AAF adapter read only these; plain `CommentMarker`s were invisible to it. Each carries its cue category's color as `CommentMarkerColor` (16-bit RGB), from the OTIO export's marker palette: FX red, backgrounds green, design magenta, dialogue blue, music purple, Foley yellow, custom cyan. Checked: pyaaf2 reads the exact values, and through the adapter every marker has the same color as in our OTIO export |
 | Plugins, insert effects and plugin parameter automation (option "print tracks with plugins") | AAF can't carry VST3/AU plugins, so tracks with active inserts are rendered pre-fader (clips → inserts with their automation and delay compensation) to `AAF/Media/*_print.wav` and linked as one clip each. Their fader, volume, pan and bus levels stay editable around the print; their clips don't |
 | Start timecode, frame rate, drop frame | Timecode track |
 
