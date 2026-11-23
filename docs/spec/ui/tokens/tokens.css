@@ -1,0 +1,113 @@
+/* VC Sound Design — design tokens ("modern console")
+   Same vocabulary as VC Composer 2 (panels, keys, LEDs, readouts, meters), with a
+   flatter, glassier, higher-contrast skin. Source of truth: SPEC.md › Design tokens.
+   Themeable values (accent, readout, density) must be switchable at runtime. */
+
+:root {
+  /* ---- Themeable: lights (VC Composer's --led / --lcd, renamed) ---- */
+  --accent: #5B8CFF;                     /* options: #22D3EE cyan, #A78BFA violet, #FFB547 amber (VC Composer) */
+  --accent-glow: rgba(91, 140, 255, .45);
+  --accent-soft: rgba(91, 140, 255, .14); /* selection fills, hover */
+  --readout: #7CF5D8;                    /* options: #9BF07A green, #FFC266 amber, #C7D2FE ice */
+  --readout-glow: rgba(124, 245, 216, .35);
+
+  /* ---- Surfaces: layered glass over a near-black chassis ---- */
+  --chassis: #07080B;
+  --surface-0: #0D0F14;                  /* lanes, wells */
+  --surface-1: rgba(22, 25, 33, .82);    /* panels (over a 12px backdrop blur) */
+  --surface-2: rgba(32, 36, 47, .9);     /* keys, raised controls */
+  --surface-3: #2A2F3D;                  /* hover */
+  --hairline: rgba(255, 255, 255, .07);  /* 1px panel and divider lines */
+  --hairline-strong: rgba(255, 255, 255, .13);
+  --edge-light: linear-gradient(90deg, transparent, rgba(255,255,255,.18), transparent); /* 1px top sheen on panels */
+  --readout-bg: #04070A;
+
+  /* ---- Text ---- */
+  --text: #D6DCE6;
+  --text-bright: #F4F7FB;
+  --text-dim: #8A94A6;                   /* silkscreen labels */
+  --text-faint: #5B6475;
+
+  /* ---- Status ---- */
+  --meter-green: #34D399;
+  --meter-amber: #FBBF24;
+  --meter-red: #F87171;
+  --rec: #F43F5E;
+  --solo: #FBBF24;
+  --mute: #38BDF8;
+  --ok: #34D399;
+  --warn: #FBBF24;
+  --error: #F87171;
+  --playhead: var(--readout);
+  --marker-flag: #FDE047;
+  --ai: #C084FC;                         /* AI proposals: pending ring + badge */
+  --placeholder: #94A3B8;                /* placeholder (temp) clips: dashed outline */
+
+  /* ---- Spotting categories (lane + cue colours; match spotting::create_default_lanes,
+          brightened for dark glass) ---- */
+  --cat-footsteps: #6CC24A;
+  --cat-props: #A3E635;
+  --cat-hardfx: #F43F5E;
+  --cat-background: #60A5FA;
+  --cat-designfx: #C084FC;
+  --cat-dialogue: #FACC15;
+  --cat-music: #FB923C;
+  --cat-custom: #22D3EE;
+
+  /* ---- Type ---- */
+  --font-label: 'Barlow Condensed', sans-serif;  /* kept from VC Composer: family resemblance */
+  --font-ui: 'Inter', system-ui, sans-serif;
+  --font-readout: 'JetBrains Mono', 'Share Tech Mono', monospace; /* crisper than VC Composer's LCD face */
+
+  /* ---- Shape, depth, motion ---- */
+  --r-panel: 12px;
+  --r-key: 8px;
+  --r-readout: 6px;
+  --r-pill: 999px;
+  --gap-panel: 8px;
+  --pad-page: 12px;
+  --blur: 12px;
+  --shadow-panel: 0 1px 0 rgba(255,255,255,.05) inset, 0 8px 24px rgba(0,0,0,.45);
+  --shadow-key: 0 1px 0 rgba(255,255,255,.08) inset, 0 1px 2px rgba(0,0,0,.5);
+  --shadow-key-on: 0 0 0 1px var(--accent) inset, 0 0 14px var(--accent-glow);
+  --shadow-readout: 0 1px 6px rgba(0,0,0,.9) inset, 0 0 0 1px rgba(255,255,255,.04);
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --t-fast: 120ms;
+  --t-med: 200ms;
+
+  /* ---- Geometry (reference 1680 px wide) ---- */
+  --top-deck: 84px;
+  --toolbar: 44px;
+  --left-rack: 264px;
+  --inspector: 300px;
+  --track-header: 232px;
+  --lane-marker: 26px;
+  --lane-track: 72px;
+  --lane-track-tall: 112px;
+  --lane-auto: 44px;
+  --ruler: 66px;                          /* 3 rows × 22 px: timecode, scenes, markers */
+  --bottom-deck: 220px;
+  --status: 20px;
+}
+
+/* Density: "compact" for laptops */
+[data-density="compact"] {
+  --lane-track: 56px;
+  --lane-marker: 22px;
+  --track-header: 208px;
+  --bottom-deck: 180px;
+}
+
+/* Light-on-dark is the only full theme; a light "paper" theme is out of scope for v1. */
+
+/* Component recipes */
+.panel   { background: var(--surface-1); backdrop-filter: blur(var(--blur)); border: 1px solid var(--hairline); border-radius: var(--r-panel); box-shadow: var(--shadow-panel); }
+.label   { font: 600 11px/1 var(--font-label); letter-spacing: .14em; text-transform: uppercase; color: var(--text-dim); }
+.readout { background: var(--readout-bg); border-radius: var(--r-readout); box-shadow: var(--shadow-readout); color: var(--readout); font-family: var(--font-readout); font-variant-numeric: tabular-nums; text-shadow: 0 0 8px var(--readout-glow); }
+.key     { background: var(--surface-2); border: 1px solid var(--hairline-strong); border-radius: var(--r-key); box-shadow: var(--shadow-key); color: var(--text); font: 600 12px/1 var(--font-label); letter-spacing: .06em; text-transform: uppercase; transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease); }
+.key:hover { background: var(--surface-3); }
+.key[aria-pressed="true"] { background: linear-gradient(180deg, rgba(91,140,255,.22), rgba(91,140,255,.08)); box-shadow: var(--shadow-key-on); color: var(--text-bright); }
+.key:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.led     { width: 6px; height: 6px; border-radius: 50%; background: #262B36; }
+.led.on  { background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+.pill    { border-radius: var(--r-pill); padding: 2px 8px; font: 600 11px/1.4 var(--font-ui); }
