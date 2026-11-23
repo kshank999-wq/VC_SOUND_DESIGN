@@ -26,7 +26,9 @@ The composition "Reel 1 v3" runs at 25 fps from 10:00:00:00:
   gain of 0.5 inside a zero gain; "SILENT", a whole track inside a zero gain;
   "INACTIVE", a selector with filler selected and the clip as its alternate;
 - a picture-only track (ignored), a timecode track, and a descriptive
-  marker "door knock" at frame 50, colored Green (named) over red (RGB).
+  marker "door knock" at frame 50, colored Green (named) over red (RGB) and one
+  frame long (as Media Composer writes a point marker), and "ambience", a range
+  from frame 60, 24 long.
 """
 import math
 import os
@@ -316,6 +318,7 @@ def build(out):
         mk = f.create.DescriptiveMarker()
         mk["DataDefinition"].value = f.dictionary.lookup_datadef("DescriptiveMetadata")
         mk["Position"].value = 50
+        mk["Length"].value = 1
         mk["Comment"].value = "door knock"
         # the tracks it describes, as Media Composer writes them (readers such as the
         # OpenTimelineIO AAF adapter need them)
@@ -325,6 +328,13 @@ def build(out):
         mk["CommentMarkerColor"].value = {"red": 65535, "green": 0, "blue": 0}
         mk["CommentMarkerAttributeList"].append(f.create.TaggedValue("_ATN_CRM_COLOR", "Green"))
         eseq.components.append(mk)
+        rng = f.create.DescriptiveMarker()
+        rng["DataDefinition"].value = f.dictionary.lookup_datadef("DescriptiveMetadata")
+        rng["Position"].value = 60
+        rng["Length"].value = 24
+        rng["Comment"].value = "ambience"
+        rng["DescribedSlots"].value = [a1.slot_id]
+        eseq.components.append(rng)
         ev.segment = eseq
         comp.slots.append(ev)
 

@@ -1262,7 +1262,8 @@ pub fn write(s: &ProjectState, out: &Path, media: &BTreeMap<String, AafMedia>, o
                 // track, so readers that find no audio track to hang it on keep it on the timeline
                 Obj::new(class::DESCRIPTIVE_MARKER)
                     .weak(0x0201, "DataDefinition", Defs::Data, key::DESCRIPTIVE)
-                    .data(0x0202, "Length", i64v(0))
+                    // a range cue's duration (kept to the exported range); a point: none
+                    .data(0x0202, "Length", i64v((c.end_sample.min(end) - c.start_sample).max(0)))
                     .data(0x0601, "Position", i64v(c.start_sample - start))
                     .data(0x0602, "Comment", utf16z(&text))
                     .data(PID_COMMENT_MARKER_COLOR, "CommentMarkerColor", marker_color(s, c))

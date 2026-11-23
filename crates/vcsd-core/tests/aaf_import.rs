@@ -87,6 +87,15 @@ fn an_exported_aaf_imports_back_to_the_same_mix() {
     assert_eq!(rep.start_tc, "01:00:00:00");
     assert!(rep.stereo_tracks >= 1, "the L/R pair came back as one stereo track: {rep:?}");
     assert_eq!(rep.markers, s.state.cues.len(), "cue markers → spotting markers");
+    for c in s.state.cues.values() {
+        let m = s2.state.markers.values().find(|m| m.label.contains(&c.description)).unwrap();
+        assert_eq!(
+            (m.start_sample, m.end_sample, m.kind),
+            (c.start_sample, c.end_sample, c.event_type),
+            "{}: timing and duration",
+            c.description
+        );
+    }
     assert!(rep.automated_tracks >= 2, "{rep:?}");
     let st2 = &s2.state;
     let color = |what: &str| st2.markers.values().find(|m| m.label.contains(what)).unwrap().color.clone();
@@ -148,7 +157,7 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     assert!(rep.missing_media.is_empty(), "{:?}", rep.missing_media);
     assert_eq!(rep.tracks.len(), 10, "ten sound tracks (the picture track is ignored): {rep:?}");
     assert_eq!(rep.clips, 11);
-    assert_eq!(rep.markers, 1);
+    assert_eq!(rep.markers, 2);
     let st = &s.state;
     let f = 1920; // samples per frame at 25 fps
     let track = |name: &str| st.tracks.values().find(|t| t.name == name).unwrap_or_else(|| panic!("track {name}"));
@@ -295,9 +304,11 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
         rep.notes
     );
 
-    // the marker, in its own lane
-    let mk = st.markers.values().next().unwrap();
-    assert_eq!((mk.start_sample, mk.label.as_str(), mk.origin), (50 * f, "door knock", TimingOrigin::Imported));
+    // the markers, in their own lane: a one-frame marker is a point, a longer one a range
+    let mk = st.markers.values().find(|m| m.label == "door knock").unwrap();
+    assert_eq!((mk.start_sample, mk.end_sample, mk.kind, mk.origin), (50 * f, 50 * f, EventType::Point, TimingOrigin::Imported));
+    let amb = st.markers.values().find(|m| m.label == "ambience").unwrap();
+    assert_eq!((amb.start_sample, amb.end_sample, amb.kind), (60 * f, 84 * f, EventType::Range));
     assert_eq!(st.lanes[&mk.lane_id].name, "AAF markers");
     assert_eq!(mk.color.as_deref(), Some("#00ff00"), "Avid's named color, over its RGB");
 

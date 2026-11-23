@@ -1800,8 +1800,14 @@ pub fn import(s: &mut ProjectState, path: &Path, o: &AafImportOptions) -> Result
         let rate = Content::slot_rate(&sl).unwrap_or(sr);
         let items = if a.is(&seg, c::SEQUENCE) { a.children(&seg, 0x1001) } else { vec![seg] };
         for m in items.iter().filter(|m| a.is(m, c::COMMENT_MARKER)) {
-            let at = base + conv(m.i64(0x0601).unwrap_or(0), rate, sr);
-            let len = conv(m.len(), rate, sr);
+            let pos = m.i64(0x0601).unwrap_or(0);
+            // Media Composer writes a point marker one edit unit (a frame) long; longer
+            // is a range. Both ends converted from the slot's units, so the length
+            // doesn't drift by rounding.
+            let units = m.len();
+            let units = if units == 1 && rate.0 < 1000 * rate.1.max(1) { 0 } else { units.max(0) };
+            let at = base + conv(pos, rate, sr);
+            let len = conv(pos + units, rate, sr) - conv(pos, rate, sr);
             let label = m.string(0x0602).unwrap_or_default();
             if s.scene_at(at).is_none() {
                 notes.add("markers outside every scene left out (add scenes, then import again)", 1);

@@ -644,6 +644,8 @@ fn cue_markers_carry_their_own_or_category_colors() {
     for (what, hex) in custom {
         s.state.markers.values_mut().find(|m| m.label == what).unwrap().color = Some(hex.into());
     }
+    // and a range: its duration travels as the marker's Length
+    marker_tc(&mut s, "bg", EventType::Range, "01:00:00:00", "01:00:00:20", "rain", None);
     s.edit("c", |st| markers_to_cues(st, None)).unwrap();
     s.edit("p", |st| populate(st, &PopulateOptions::default())).unwrap();
     let mut o = export::ExportOptions::new(export::ExportProfile::Resolve, "2026-11-23");
@@ -694,7 +696,7 @@ kw = {'adapter_name': 'AAF', 'simplify': True} if sys.argv[1].endswith('.aaf') e
 t = otio.adapters.read_from_file(sys.argv[1], **kw)
 # wherever a reader hangs them (the adapter puts them on clips, sometimes twice)
 ms = [m for item in [t.tracks] + list(t.find_children()) for m in getattr(item, 'markers', [])]
-print(json.dumps(sorted({((m.name or '') + ' ' + (m.comment or ''), m.color) for m in ms})))
+print(json.dumps(sorted({((m.name or '') + ' ' + (m.comment or ''), m.color + ' ' + str(round(m.marked_range.duration.to_seconds(), 6))) for m in ms})))
 "#;
     let read = |f: &Path| {
         let out = std::process::Command::new(&py).args(["-c", names]).arg(f).output().unwrap();
@@ -706,9 +708,12 @@ print(json.dumps(sorted({((m.name or '') + ' ' + (m.comment or ''), m.color) for
     let color_of = |list: &[(String, String)], what: &str| {
         list.iter().find(|(t, _)| t.contains(what)).map(|x| x.1.clone()).unwrap_or_else(|| panic!("{what}: {list:?}"))
     };
-    for what in cues.iter().map(|c| c.1).chain(custom.iter().map(|c| c.0)) {
+    // colors and durations alike
+    for what in cues.iter().map(|c| c.1).chain(custom.iter().map(|c| c.0)).chain(["rain"]) {
         assert_eq!(color_of(&via_aaf, what), color_of(&ours, what), "{what}: AAF → adapter vs our OTIO");
     }
-    let named: Vec<String> = custom.iter().map(|c| color_of(&ours, c.0)).collect();
+    assert_eq!(color_of(&ours, "rain"), "GREEN 0.833333", "the range: 20 frames at 24 fps");
+    assert!(color_of(&ours, "glass").ends_with(" 0.0"), "a point");
+    let named: Vec<String> = custom.iter().map(|c| color_of(&ours, c.0).split(' ').next().unwrap().to_string()).collect();
     assert_eq!(named, ["BLUE", "ORANGE", "PINK", "PURPLE"], "own colors named as the adapter names them");
 }
