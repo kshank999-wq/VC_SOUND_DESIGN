@@ -79,6 +79,8 @@ pub struct Shared {
     pub device_warning: Mutex<Option<String>>,
     /// Device callbacks so far (tells whether an opened device is actually running).
     callbacks: AtomicU64,
+    /// Open no device: the software clock keeps time (see `Player::use_software_clock`).
+    software_clock: AtomicBool,
     /// Live automation values while a fader is being written (monitoring).
     overrides: Mutex<HashMap<(String, vcsd_core::AutomationParam), f32>>,
     overrides_version: AtomicU64,
@@ -153,6 +155,7 @@ impl Player {
             output_pref: Mutex::new(None),
             device_warning: Mutex::new(None),
             callbacks: AtomicU64::new(0),
+            software_clock: AtomicBool::new(false),
             overrides: Mutex::new(HashMap::new()),
             overrides_version: AtomicU64::new(1),
             plugins: Mutex::new(None),
@@ -181,6 +184,14 @@ impl Player {
                 let _ = self.out_tx.send(OutputCmd::Open(r));
             }
         }
+    }
+
+    /// Play through no device: the software clock consumes audio in real time,
+    /// silently. For tests of real-time behaviour, which must not depend on the
+    /// machine's audio hardware (a CI runner's virtual device can stall).
+    pub fn use_software_clock(&self) {
+        self.shared.software_clock.store(true, SeqCst);
+        let _ = self.out_tx.send(OutputCmd::Open(self.shared.project_rate.load(SeqCst)));
     }
 
     /// Switch output device (None = system default); takes effect immediately,
@@ -599,6 +610,9 @@ fn null_device(sh: Arc<Shared>, consumer: Arc<Mutex<Consumer>>, run: Arc<AtomicB
 }
 
 fn open_device(sh: &Arc<Shared>, consumer: &Arc<Mutex<Consumer>>, rate: u32) -> Result<cpal::Stream, String> {
+    if sh.software_clock.load(SeqCst) {
+        return Err("output off, software clock".into());
+    }
     let pref = sh.output_pref.lock().unwrap().clone();
     let (dev, warning) = crate::devices::find_output(pref.as_deref()).inspect_err(|e| {
         *sh.device_warning.lock().unwrap() = pref.as_ref().map(|p| format!("'{p}' unavailable: {e}"));

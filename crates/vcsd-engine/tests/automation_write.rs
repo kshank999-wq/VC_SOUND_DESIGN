@@ -38,6 +38,7 @@ fn lane_at(st: &Value, owner: &str, param: &str, t: i64) -> f64 {
 fn setup() -> (Arc<Engine>, String, String) {
     let dir = std::env::temp_dir().join(format!("vcsd_aw_{}_{}", std::process::id(), vcsd_core::ids::new_id("t")));
     let e = Engine::with_prefs(None);
+    e.player.use_software_clock(); // real-time logic, not the machine's audio hardware (see devices.rs)
     call(&e, "project.new", json!({"dir": dir, "name": "aw", "fps": "24", "start_tc": "01:00:00:00"}));
     let lib = dir.join("Audio/LibraryRefs/fx");
     std::fs::create_dir_all(&lib).unwrap();

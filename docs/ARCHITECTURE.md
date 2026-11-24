@@ -34,6 +34,9 @@
   If the open device goes 500 ms without a callback, the software clock stands in and the transport
   reports a device warning. The device gets the transport back only once it calls back steadily
   (three 100 ms checks in a row), so a stray callback can't hand it back. The warning then clears.
+  The tests of real-time behaviour (automation writing, plugins, transport) call
+  `Player::use_software_clock`, so they don't depend on the machine's audio hardware. A CI
+  runner's virtual device can stall. `tests/devices.rs` covers real devices.
 - **Automation writing.** In Touch/Latch/Write, control moves go to the engine, which stamps
   them with the heard position, monitors them live through mixer overrides (synced to the render
   thread only when they change), and on release/stop commits the pass as one undoable edit:
