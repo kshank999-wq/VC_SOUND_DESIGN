@@ -5,7 +5,10 @@ desktop app, for a UI design agent to design from and a coding agent to build fr
 
 The app uses the same five-band layout as the VC Composer 2 DAW (top deck, toolbar,
 rack / edit window / inspector, bottom deck, status strip), with a more modern tech look: glass
-panels, hairline borders, crisp glowing readouts and one electric accent color.
+panels over a softly lit backdrop, hairline borders, crisp glowing readouts and one themeable
+accent color (indigo by default). v2 fixes the v1 review: tokens that follow the theme, measured
+color separation and contrast, per-stage layouts with a height budget, a taller toolbar and one
+mixer.
 
 ## Start here
 

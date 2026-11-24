@@ -1,63 +1,86 @@
-/* VC Sound Design — design tokens ("modern console")
-   Same vocabulary as VC Composer 2 (panels, keys, LEDs, readouts, meters), with a
-   flatter, glassier, higher-contrast skin. Source of truth: SPEC.md › Design tokens.
-   Themeable values (accent, readout, density) must be switchable at runtime. */
+/* VC Sound Design — design tokens ("modern console"), v2
+   Same vocabulary as VC Composer 2 (panels, keys, LEDs, readouts, meters), with a flatter,
+   glassier skin. Source of truth: SPEC.md › Design tokens (which also lists the measured
+   color differences and contrast ratios behind these values).
+
+   Rules this file keeps:
+   - Everything derived from the accent or readout color is built with color-mix(), so
+     switching the theme changes lit keys, glows and fills too. Set the theme only on the
+     root element (data-accent / data-readout / data-density on <html>), never on a
+     descendant: derived values are computed where they're declared.
+   - No status color equals or nearly equals a category color it shares a surface with.
+   - Text tokens pass 4.5:1 on every surface; --decor is for lines and decoration only.
+   Requires color-mix() (Chromium 111+, Safari/WebKit 16.2+, WebKitGTK 2.40+). */
 
 :root {
-  /* ---- Themeable: lights (VC Composer's --led / --lcd, renamed) ---- */
-  --accent: #5B8CFF;                     /* options: #22D3EE cyan, #A78BFA violet, #FFB547 amber (VC Composer) */
-  --accent-glow: rgba(91, 140, 255, .45);
-  --accent-soft: rgba(91, 140, 255, .14); /* selection fills, hover */
-  --readout: #7CF5D8;                    /* options: #9BF07A green, #FFC266 amber, #C7D2FE ice */
-  --readout-glow: rgba(124, 245, 216, .35);
+  /* ---- Themeable: accent (lit keys, selection, focus, primary buttons) ---- */
+  --accent: #6366F1;                     /* indigo (default); see [data-accent] below */
+  --on-accent: #FFFFFF;                  /* legend on --accent-fill */
 
-  /* ---- Surfaces: layered glass over a near-black chassis ---- */
+  /* ---- Themeable: readout (counters, LCD-style numbers) ---- */
+  --readout: #7CF5D8;                    /* mint (default); see [data-readout] below */
+
+  /* ---- Derived (follow the theme automatically) ---- */
+  --accent-glow: color-mix(in srgb, var(--accent) 45%, transparent);
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);   /* selection fills, hover tints */
+  --accent-lit-top: color-mix(in srgb, var(--accent) 24%, transparent);
+  --accent-lit-bottom: color-mix(in srgb, var(--accent) 8%, transparent);
+  --accent-fill: color-mix(in oklab, var(--accent) 80%, black);        /* filled primary buttons */
+  --readout-glow: color-mix(in srgb, var(--readout) 35%, transparent);
+
+  /* ---- Chassis: a lit backdrop, so the glass panels have something to blur ---- */
   --chassis: #07080B;
-  --surface-0: #0D0F14;                  /* lanes, wells */
-  --surface-1: rgba(22, 25, 33, .82);    /* panels (over a 12px backdrop blur) */
-  --surface-2: rgba(32, 36, 47, .9);     /* keys, raised controls */
+  --chassis-bg:
+    radial-gradient(1100px 620px at 12% -8%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 62%),
+    radial-gradient(900px 520px at 96% 4%, color-mix(in srgb, var(--readout) 7%, transparent), transparent 60%),
+    radial-gradient(1200px 700px at 50% 120%, rgba(56, 66, 99, .35), transparent 65%),
+    linear-gradient(180deg, #0B0E16 0%, #07080B 55%, #06070A 100%);
+  --chassis-grid: radial-gradient(rgba(255, 255, 255, .035) 1px, transparent 1px) 0 0 / 22px 22px; /* faint dot grid */
+
+  /* ---- Surfaces: glass over the chassis ---- */
+  --surface-0: #0D0F14;                  /* timeline lanes, wells (opaque: no blur behind canvas) */
+  --surface-1: rgba(22, 25, 33, .72);    /* panels, over a 14px backdrop blur */
+  --surface-2: rgba(32, 36, 47, .90);    /* keys, raised controls */
   --surface-3: #2A2F3D;                  /* hover */
-  --hairline: rgba(255, 255, 255, .07);  /* 1px panel and divider lines */
-  --hairline-strong: rgba(255, 255, 255, .13);
-  --edge-light: linear-gradient(90deg, transparent, rgba(255,255,255,.18), transparent); /* 1px top sheen on panels */
+  --surface-opaque: #151822;             /* --surface-1 when "Reduce transparency" is on */
+  --hairline: rgba(255, 255, 255, .08);
+  --hairline-strong: rgba(255, 255, 255, .14);
+  --sheen: linear-gradient(90deg, transparent, rgba(255, 255, 255, .20), transparent); /* 1px top edge of panels */
   --readout-bg: #04070A;
 
-  /* ---- Text ---- */
+  /* ---- Text (all ≥ 4.5:1 on surface-0, -1, -2 and -3) ---- */
   --text: #D6DCE6;
   --text-bright: #F4F7FB;
-  --text-dim: #8A94A6;                   /* silkscreen labels */
-  --text-faint: #5B6475;
+  --text-dim: #9AA4B5;                   /* labels, secondary text */
+  --decor: #5B6475;                      /* NOT for text (≈3:1): dividers, tick marks, disabled glyph outlines */
 
-  /* ---- Status ---- */
-  --meter-green: #34D399;
-  --meter-amber: #FBBF24;
-  --meter-red: #F87171;
-  --rec: #F43F5E;
-  --solo: #FBBF24;
-  --mute: #38BDF8;
-  --ok: #34D399;
-  --warn: #FBBF24;
-  --error: #F87171;
-  --playhead: var(--readout);
-  --marker-flag: #FDE047;
-  --ai: #C084FC;                         /* AI proposals: pending ring + badge */
-  --placeholder: #94A3B8;                /* placeholder (temp) clips: dashed outline */
+  /* ---- Status (each kept apart from what it shares a surface with; see SPEC) ---- */
+  --rec: #FF2D55;                        /* record key, recording region (with diagonal hatch) */
+  --solo: #F59E0B;                       /* solo key fill */
+  --mute: #0EA5E9;                       /* mute key fill */
+  --caution: #FDE047;                    /* meter amber segments + QA warnings (always with ⚠) */
+  --ok: #16A34A;                         /* meter green segments + QA pass (with ✓) */
+  --error: #DC2626;                      /* meter red segments + QA errors (with ✕); icons only, never text */
+  --ai: #F8FAFC;                         /* AI proposal: dashed 2px ring + "AI" badge (form, not hue) */
+  --playhead: #FFFFFF;                   /* 1.5px line with a --readout-glow halo */
+  --marker-flag: var(--text-bright);     /* ruler flags (picture changes, score cues) */
+  --placeholder: #94A3B8;                /* placeholder clips: dashed outline */
 
-  /* ---- Spotting categories (lane + cue colours; match spotting::create_default_lanes,
-          brightened for dark glass) ---- */
-  --cat-footsteps: #6CC24A;
-  --cat-props: #A3E635;
-  --cat-hardfx: #F43F5E;
-  --cat-background: #60A5FA;
-  --cat-designfx: #C084FC;
+  /* ---- Spotting categories (lanes, cue badges, track stripes, clip tints) ---- */
+  --cat-footsteps: #34D399;
+  --cat-props: #BEF264;
+  --cat-hardfx: #FCA5A5;
+  --cat-background: #67E8F9;
+  --cat-designfx: #C4B5FD;
   --cat-dialogue: #FACC15;
-  --cat-music: #FB923C;
-  --cat-custom: #22D3EE;
+  --cat-music: #F97316;
+  --cat-custom: #A8A29E;
+  --on-category: #0B0D12;                /* legend on a category fill (≥ 6.9:1 on all eight) */
 
   /* ---- Type ---- */
   --font-label: 'Barlow Condensed', sans-serif;  /* kept from VC Composer: family resemblance */
   --font-ui: 'Inter', system-ui, sans-serif;
-  --font-readout: 'JetBrains Mono', 'Share Tech Mono', monospace; /* crisper than VC Composer's LCD face */
+  --font-readout: 'JetBrains Mono', monospace;
 
   /* ---- Shape, depth, motion ---- */
   --r-panel: 12px;
@@ -66,8 +89,8 @@
   --r-pill: 999px;
   --gap-panel: 8px;
   --pad-page: 12px;
-  --blur: 12px;
-  --shadow-panel: 0 1px 0 rgba(255,255,255,.05) inset, 0 8px 24px rgba(0,0,0,.45);
+  --blur: 14px;
+  --shadow-panel: 0 1px 0 rgba(255,255,255,.05) inset, 0 10px 30px rgba(0,0,0,.5);
   --shadow-key: 0 1px 0 rgba(255,255,255,.08) inset, 0 1px 2px rgba(0,0,0,.5);
   --shadow-key-on: 0 0 0 1px var(--accent) inset, 0 0 14px var(--accent-glow);
   --shadow-readout: 0 1px 6px rgba(0,0,0,.9) inset, 0 0 0 1px rgba(255,255,255,.04);
@@ -75,39 +98,68 @@
   --t-fast: 120ms;
   --t-med: 200ms;
 
-  /* ---- Geometry (reference 1680 px wide) ---- */
-  --top-deck: 84px;
-  --toolbar: 44px;
+  /* ---- Geometry (reference window 1680 × 1050; SPEC › Height budget) ---- */
+  --top-deck: 80px;
+  --toolbar: 52px;                       /* 4 pad + 12 label + 4 gap + 28 key + 4 pad */
+  --toolbar-key: 28px;
+  --status: 20px;
   --left-rack: 264px;
   --inspector: 300px;
   --track-header: 232px;
-  --lane-marker: 26px;
+  --ruler: 66px;                         /* 3 rows × 22px: timecode, scenes, flags */
+  --lane-marker: 26px;                   /* marker lanes: full */
+  --lane-marker-compact: 16px;           /* marker lanes: compact */
   --lane-track: 72px;
+  --lane-track-compact: 56px;
   --lane-track-tall: 112px;
   --lane-auto: 44px;
-  --ruler: 66px;                          /* 3 rows × 22 px: timecode, scenes, markers */
-  --bottom-deck: 220px;
-  --status: 20px;
+  --deck-open: 220px;
+  --deck-mixer: 300px;
+  --deck-pads: 132px;
+  --deck-collapsed: 28px;                /* tab bar only */
 }
+
+/* Accent themes (set on <html>). Each passes the SPEC's checks; amber and cyan are not
+   offered because they collide with Solo / Music and Backgrounds. */
+[data-accent="indigo"]  { --accent: #6366F1; --on-accent: #FFFFFF; }
+[data-accent="violet"]  { --accent: #8B5CF6; --on-accent: #FFFFFF; }
+[data-accent="magenta"] { --accent: #C026D3; --on-accent: #FFFFFF; }
+[data-accent="mono"]    { --accent: #E5E7EB; --on-accent: #0B0D12; --accent-fill: #E5E7EB; }
+
+/* Readout themes */
+[data-readout="mint"]  { --readout: #7CF5D8; }
+[data-readout="green"] { --readout: #9BF07A; }
+[data-readout="amber"] { --readout: #FFC266; }
+[data-readout="ice"]   { --readout: #C7D2FE; }
 
 /* Density: "compact" for laptops */
 [data-density="compact"] {
   --lane-track: 56px;
   --lane-marker: 22px;
   --track-header: 208px;
-  --bottom-deck: 180px;
+  --deck-open: 180px;
+  --deck-mixer: 260px;
 }
 
-/* Light-on-dark is the only full theme; a light "paper" theme is out of scope for v1. */
+/* Reduce transparency (Preferences, or the OS setting) */
+[data-transparency="reduced"] { --surface-1: var(--surface-opaque); --blur: 0px; }
+@media (prefers-reduced-transparency: reduce) { :root { --surface-1: var(--surface-opaque); --blur: 0px; } }
 
 /* Component recipes */
-.panel   { background: var(--surface-1); backdrop-filter: blur(var(--blur)); border: 1px solid var(--hairline); border-radius: var(--r-panel); box-shadow: var(--shadow-panel); }
+body     { background: var(--chassis-grid), var(--chassis-bg); background-color: var(--chassis); color: var(--text); font-family: var(--font-ui); }
+.panel   { position: relative; background: var(--surface-1); backdrop-filter: blur(var(--blur)) saturate(1.2); border: 1px solid var(--hairline); border-radius: var(--r-panel); box-shadow: var(--shadow-panel); }
+.panel::before { content: ""; position: absolute; inset: 0 12px auto; height: 1px; background: var(--sheen); }
 .label   { font: 600 11px/1 var(--font-label); letter-spacing: .14em; text-transform: uppercase; color: var(--text-dim); }
 .readout { background: var(--readout-bg); border-radius: var(--r-readout); box-shadow: var(--shadow-readout); color: var(--readout); font-family: var(--font-readout); font-variant-numeric: tabular-nums; text-shadow: 0 0 8px var(--readout-glow); }
-.key     { background: var(--surface-2); border: 1px solid var(--hairline-strong); border-radius: var(--r-key); box-shadow: var(--shadow-key); color: var(--text); font: 600 12px/1 var(--font-label); letter-spacing: .06em; text-transform: uppercase; transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease); }
+.key     { height: var(--toolbar-key); background: var(--surface-2); border: 1px solid var(--hairline-strong); border-radius: var(--r-key); box-shadow: var(--shadow-key); color: var(--text); font: 600 12px/1 var(--font-label); letter-spacing: .06em; text-transform: uppercase; transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease); }
 .key:hover { background: var(--surface-3); }
-.key[aria-pressed="true"] { background: linear-gradient(180deg, rgba(91,140,255,.22), rgba(91,140,255,.08)); box-shadow: var(--shadow-key-on); color: var(--text-bright); }
+.key[aria-pressed="true"] { background: linear-gradient(180deg, var(--accent-lit-top), var(--accent-lit-bottom)); box-shadow: var(--shadow-key-on); color: var(--text-bright); }
+.key.primary { background: var(--accent-fill); border-color: transparent; color: var(--on-accent); }
+.key.mute[aria-pressed="true"] { background: var(--mute); color: var(--on-category); box-shadow: none; }
+.key.solo[aria-pressed="true"] { background: var(--solo); color: var(--on-category); box-shadow: none; }
+.key.rec[aria-pressed="true"]  { background: var(--rec); color: var(--on-category); box-shadow: 0 0 12px color-mix(in srgb, var(--rec) 50%, transparent); }
 .key:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .led     { width: 6px; height: 6px; border-radius: 50%; background: #262B36; }
 .led.on  { background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
 .pill    { border-radius: var(--r-pill); padding: 2px 8px; font: 600 11px/1.4 var(--font-ui); }
+@media (prefers-reduced-motion: reduce) { * { transition-duration: 0ms !important; animation-duration: 0ms !important; } }
