@@ -17,6 +17,7 @@ import { BottomDeck, mixerWasDetached } from "./components/Deck";
 import { Key, StatusStrip, TopDeck, Toolbar } from "./components/Shell";
 import { getLayout, resetLayout, saveLayout } from "./layout";
 import { DEFAULTS, LIMITS } from "./layoutModel";
+import { toolForKey, type Tool } from "./tools";
 import { STAGE_LIMITS, stageForKey, stageLayout, type CenterTab, type DeckTab, type LeftTab, type Stage, type StageLayout } from "./stage";
 
 /** Width of the timeline's track-header column (for zoom-to-fit). */
@@ -51,6 +52,7 @@ export function App() {
   };
 
   const [spotMode, setSpotMode] = useState(false);
+  const [tool, setTool] = useState<Tool>("select");
   const [imp, setImp] = useState<ImportKind>(null);
   const [perform, setPerform] = useState<string | null>(null);
   const [devices, setDevices] = useState(false);
@@ -142,6 +144,8 @@ export function App() {
       if (perform) return; // pads own the keys
       const st = !spotMode && !e.shiftKey && !e.altKey ? stageForKey(e.code) : null;
       if (st) { e.preventDefault(); setStage(st); return; }
+      const tl = !spotMode && !e.shiftKey && !e.altKey ? toolForKey(e.code) : null;
+      if (tl) { e.preventDefault(); setTool(tl); return; }
       switch (e.code) {
         case "Space":
           e.preventDefault();
@@ -226,7 +230,7 @@ export function App() {
       <TopDeck eng={eng} sel={sel} menu={menu} />
       <Toolbar eng={eng} stage={stage} setStage={setStage} snapOn={snapOn} setSnapOn={setSnapOn}
         spotMode={spotMode} setSpotMode={setSpotMode} zoom={zoom} canZoomSel={!!selRange()}
-        onMixer={onMixer} onExport={() => setLay({ center: "qa" })} onBindings={() => setBindings(true)} />
+        onMixer={onMixer} onExport={() => setLay({ center: "qa" })} onBindings={() => setBindings(true)} tool={tool} setTool={setTool} />
 
       <div className="main-row">
         <aside className="panel rack" style={{ width: leftW }} aria-label="Left rack">
@@ -262,7 +266,7 @@ export function App() {
           <div className="center-body">
             {center === "timeline" && (
               <Timeline key={view.root} eng={eng} vp={vp} setVp={setVp} sel={sel} setSel={setSel} snapOn={snapOn}
-                laneMode={lay.lanes} onLaneMode={(m) => setLay({ lanes: m })}
+                laneMode={lay.lanes} onLaneMode={(m) => setLay({ lanes: m })} tool={tool}
                 initialScrollY={(view.root && getLayout().projects?.[view.root]?.scrollY) || 0}
                 onScrollY={(y) => view.root && saveLayout({ projects: { [view.root]: { scrollY: y } } })} />
             )}

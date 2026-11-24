@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { LaneMode } from "../stage";
+import { TOOL_CURSOR, clipAction, thinStroke, type Tool } from "../tools";
 import { Knob, fmtGain, fmtPan } from "./Knob";
 import { SegMeter } from "./Shell";
 import { call } from "../api";
@@ -163,13 +164,20 @@ interface Props {
   /** Marker lanes: full (Spot), folded strips, or hidden behind one row (Mix). */
   laneMode?: LaneMode;
   onLaneMode?: (m: LaneMode) => void;
+  /** The edit tool (toolbar). */
+  tool?: Tool;
   /** Restored vertical scroll for this project, and a callback to persist it. */
   initialScrollY?: number;
   onScrollY?: (y: number) => void;
 }
 
 interface Drag {
-  kind: "clip" | "marker" | "ruler" | "loop" | "newRange" | "auto";
+  kind: "clip" | "marker" | "ruler" | "loop" | "newRange" | "auto" | "pan" | "draw";
+  /** Hand: where the pan started. */
+  pan0?: { y: number; start: number; scroll: number };
+  /** Pencil: the stroke so far (canvas x/y and lane values) and its lane. */
+  stroke?: { x: number; y: number; sample: number; value: number }[];
+  drawLane?: { lane: string; param: Param; rowY: number };
   autoPreview?: { sample: number; value: number };
   autoTop?: number;
   zone?: ClipZone;
@@ -183,7 +191,7 @@ interface Drag {
   preview?: ClipEdit;
 }
 
-export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full", onLaneMode, initialScrollY = 0, onScrollY }: Props) {
+export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full", onLaneMode, tool = "select", initialScrollY = 0, onScrollY }: Props) {
   const LANE = LANE_H[laneMode];
   const { view, tx, rate, run, livePosition } = eng;
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -404,6 +412,14 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
           ctx.font = "10px var(--font)";
           ctx.fillText(`AI ${(p.confidence * 100).toFixed(0)}%`, a + 3, ly - 1 + LANE);
         }
+      }
+      // pencil stroke being drawn (canvas coordinates; content is translated by scrollY)
+      if (d?.kind === "draw" && d.stroke && d.stroke.length > 1) {
+        ctx.strokeStyle = C("--accent");
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        d.stroke.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y + scrollY) : ctx.moveTo(p.x, p.y + scrollY)));
+        ctx.stroke();
       }
       // new range being drawn
       if (d?.kind === "newRange" && d.laneId && laneY.has(d.laneId)) {
@@ -777,6 +793,16 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
         drag.current = { kind: "ruler", x0: x, s0: s, moved: false, delta: 0, cur: s };
         call("transport.locate", { sample: snapS(s) });
       }
+    } else if (tool === "hand") {
+      drag.current = { kind: "pan", x0: x, s0: s, moved: false, delta: 0, cur: s, pan0: { y, start: vp.start, scroll: scrollY } };
+    } else if (tool === "pencil" && rowAt(y)?.row.kind === "auto") {
+      const ra = rowAt(y)!;
+      const row = ra.row as Extract<Row, { kind: "auto" }>;
+      drag.current = {
+        kind: "draw", x0: x, s0: s, moved: false, delta: 0, cur: s,
+        drawLane: { lane: row.lane, param: row.param, rowY: row.y },
+        stroke: [{ x, y, sample: Math.max(0, Math.round(s)), value: autoVal(row.param, y, ra.top) }],
+      };
     } else if (hitAt(x, y, "auto") || rowAt(y)?.row.kind === "auto") {
       const ra = rowAt(y)!;
       const row = ra.row as Extract<Row, { kind: "auto" }>;
@@ -802,8 +828,15 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
         let zone: ClipZone | undefined;
         if (h.kind === "clip") {
           const c = view.clips.find((c) => c.id === h.id)!;
-          zone = clipZone(h, c, x, y, vp.spp);
           setSel({ kind: "clip", id: c.id });
+          const act = clipAction(tool, clipZone(h, c, x, y, vp.spp), (x - h.x) / Math.max(1, h.w));
+          if (!act) return;
+          if ("split" in act) {
+            const at = e.altKey ? Math.round(s) : snapS(s);
+            if (at > c.timeline_start && at < c.timeline_start + c.length) run("clip.split", { id: c.id, at });
+            return;
+          }
+          zone = act.zone;
         } else {
           const m = view.markers.find((m) => m.id === h.id)!;
           setSel(m.cue_id ? { kind: "cue", id: m.cue_id } : { kind: "marker", id: m.id });
@@ -829,6 +862,15 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
       const fade = dd.zone === "fadeIn" || dd.zone === "fadeOut";
       dd.cur = dd.kind === "ruler" || fade || ev.altKey ? Math.round(cs) : snapS(cs);
       if (dd.kind === "ruler") call("transport.locate", { sample: snapS(cs) });
+      if (dd.kind === "pan" && dd.pan0) {
+        setVp({ ...stateRef.current.vp, start: dd.pan0.start - (p.x - dd.x0) * stateRef.current.vp.spp });
+        setScrollY(Math.max(0, Math.min(Math.max(0, contentH - size.h), dd.pan0.scroll - (p.y - dd.pan0.y))));
+      }
+      if (dd.kind === "draw" && dd.stroke && dd.drawLane) {
+        const top = RULER + SCENES + lanesH + dd.drawLane.rowY - scrollY;
+        const py = Math.max(top, Math.min(top + AUTO - 1, p.y));
+        dd.stroke.push({ x: p.x, y: py, sample: Math.max(0, Math.round(cs)), value: autoVal(dd.drawLane.param, py, top) });
+      }
       if (dd.kind === "clip" || dd.kind === "marker") {
         const base = dd.kind === "clip" ? view.clips.find((c) => c.id === dd.id)!.timeline_start : view.markers.find((m) => m.id === dd.id)!.start_sample;
         const tgt = base + (cs - dd.s0);
@@ -839,7 +881,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
         const p = ((cur.view?.automation ?? []) as AutoPoint[]).find((q) => q.id === dd.id);
         const row = cur.rows.find((r) => r.kind === "auto" && r.y === dd.autoTop) as Extract<Row, { kind: "auto" }> | undefined;
         if (p && row) {
-          const top = RULER + SCENES + lanes.length * LANE + row.y - scrollY;
+          const top = RULER + SCENES + lanesH + row.y - scrollY;
           const sample = ev.shiftKey ? p.sample : Math.max(0, ev.altKey ? Math.round(cs) : snapS(cs));
           dd.autoPreview = { sample, value: autoVal(row.param, localXY(ev).y, top) };
         }
@@ -860,6 +902,11 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
       drag.current = null;
       if (!dd) return;
       if (dd.kind === "loop" && !dd.moved) call("transport.loop", {});
+      if (dd.kind === "draw" && dd.stroke && dd.drawLane) {
+        const pts = thinStroke(dd.stroke);
+        if (pts.length === 1) await run("automation.set", { owner_id: dd.drawLane.lane, param: dd.drawLane.param, sample: pts[0][0], value: pts[0][1] });
+        else await run("automation.draw", { owner_id: dd.drawLane.lane, param: dd.drawLane.param, points: pts });
+      }
       if (dd.kind === "auto" && dd.moved && dd.id && dd.autoPreview) {
         await run("automation.update", { id: dd.id, sample: dd.autoPreview.sample, value: dd.autoPreview.value });
       }
@@ -882,6 +929,10 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
           const lane = lanes.find((l) => l.id === dd.laneId)!;
           const kind = catKey(lane.category) === "footsteps" ? "repeated" : "range";
           const r = await run<{ id: string }>("marker.add", { lane: lane.id, kind, start: Math.min(dd.s0, dd.cur), end: Math.max(dd.s0, dd.cur), label: lane.name.split("•").pop()!.trim().toLowerCase() });
+          if (r) setSel({ kind: "marker", id: r.id });
+        } else if (tool === "pencil") {
+          const lane = lanes.find((l) => l.id === dd.laneId)!;
+          const r = await run<{ id: string }>("marker.add", { lane: lane.id, kind: "point", start: dd.s0, end: dd.s0, label: lane.name.split("•").pop()!.trim().toLowerCase() });
           if (r) setSel({ kind: "marker", id: r.id });
         } else {
           call("transport.locate", { sample: dd.s0 });
@@ -922,6 +973,13 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
   const onHover = (e: React.MouseEvent) => {
     if (drag.current || !view) return;
     const { x, y } = localXY(e);
+    if (tool !== "select" && y >= RULER + SCENES) {
+      // other tools: their own cursor, and no Select-tool handles lit under the pointer
+      hover.current = null;
+      const cur = tool === "pencil" && rowAt(y)?.row.kind !== "auto" && !laneAt(y) ? "not-allowed" : TOOL_CURSOR[tool];
+      if (canvasRef.current && canvasRef.current.style.cursor !== cur) canvasRef.current.style.cursor = cur;
+      return;
+    }
     if (hitAt(x, y, "auto")) {
       hover.current = null;
       if (canvasRef.current) canvasRef.current.style.cursor = "pointer";

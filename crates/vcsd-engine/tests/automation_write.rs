@@ -185,3 +185,34 @@ fn marker_colors_are_set_validated_reset_and_undone() {
     call(&e, "undo", json!({}));
     assert_eq!(marker(&e)["color"], "#12a4c8", "undoable");
 }
+
+#[test]
+fn a_pencil_stroke_replaces_the_lane_under_it_as_one_undo_step() {
+    let (e, t, _) = setup();
+    let lane = |e: &Arc<Engine>| {
+        let st = call(e, "state.get", json!({}));
+        let mut v: Vec<(i64, f64)> = st["automation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["owner_id"] == t.as_str() && p["param"] == "volume_db")
+            .map(|p| (p["sample"].as_i64().unwrap(), p["value"].as_f64().unwrap()))
+            .collect();
+        v.sort_by_key(|p| p.0);
+        v
+    };
+    for (s, v) in [(0, 0.0), (48_000, -6.0), (96_000, -12.0), (240_000, -3.0)] {
+        call(&e, "automation.set", json!({"owner_id": t, "param": "volume_db", "sample": s, "value": v}));
+    }
+    // a stroke over 0.5 s – 3 s: the points at 1 s and 2 s go, the stroke's come in
+    let r = call(
+        &e,
+        "automation.draw",
+        json!({"owner_id": t, "param": "volume_db", "points": [[24_000, -1.0], [144_000, -20.0], [72_000, -10.0]]}),
+    );
+    assert_eq!(r["points"], 3);
+    assert_eq!(lane(&e), vec![(0, 0.0), (24_000, -1.0), (72_000, -10.0), (144_000, -20.0), (240_000, -3.0)]);
+    call(&e, "undo", json!({}));
+    assert_eq!(lane(&e).len(), 4, "one undo step");
+    assert!(e.call("automation.draw", json!({"owner_id": t, "param": "volume_db"})).is_err());
+}

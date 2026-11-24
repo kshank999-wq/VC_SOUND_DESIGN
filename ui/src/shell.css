@@ -240,3 +240,5 @@ body.resizing-h, body.resizing-h * { cursor: row-resize !important; }
 .mixer .auto-badge { font-size: 9px; padding: 0 4px; border-radius: 5px; background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
 .mixer .fx-rack.compact { width: 100%; }
 .mixer .fx-add { height: 18px; font: 600 10px/1 var(--font-label); letter-spacing: .06em; border-radius: 5px; background: var(--surface-1-opaque); border: 1px dashed var(--hairline-strong); color: var(--text-dim); }
+
+.tool-key { width: 28px; padding: 0; }

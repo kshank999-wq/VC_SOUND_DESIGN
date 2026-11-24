@@ -297,6 +297,29 @@ pub fn delete_automation(s: &mut ProjectState, id: &str) -> Result<()> {
     s.automation.remove(id).map(|_| ()).ok_or_else(|| not_found("automation point", id))
 }
 
+/// Draw a lane with the pencil: the breakpoints between the stroke's first and last sample
+/// are replaced by the stroke's points (sorted; values clamped). Returns how many points the
+/// lane holds in that span afterwards.
+pub fn draw_automation(s: &mut ProjectState, owner_id: &str, param: AutomationParam, points: &[(i64, f32)]) -> Result<usize> {
+    check_owner(s, owner_id)?;
+    if points.is_empty() {
+        return Ok(0);
+    }
+    let mut pts = points.to_vec();
+    pts.sort_by_key(|p| p.0);
+    pts.dedup_by_key(|p| p.0);
+    let (a, b) = (pts[0].0, pts[pts.len() - 1].0);
+    s.automation.retain(|_, p| !(p.owner_id == owner_id && p.param == param && p.sample >= a && p.sample <= b));
+    for (sample, value) in &pts {
+        let id = new_id("aut");
+        s.automation.insert(
+            id.clone(),
+            AutomationPoint { id, owner_id: owner_id.into(), param, sample: *sample, value: clamp_automation(param, *value) },
+        );
+    }
+    Ok(pts.len())
+}
+
 /// Remove all breakpoints of a track or bus (one lane, or both when `param` is None).
 pub fn clear_automation(s: &mut ProjectState, owner_id: &str, param: Option<AutomationParam>) -> Result<usize> {
     check_owner(s, owner_id)?;

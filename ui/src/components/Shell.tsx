@@ -3,6 +3,7 @@ import { useState } from "react";
 import { call } from "../api";
 import type { EngineHook } from "../store";
 import { STAGES, type Stage } from "../stage";
+import { TOOLS, type Tool } from "../tools";
 import { frameAtSample, framesToTc, sampleAtTc, tcAt } from "../tc";
 import type { Selection } from "../types";
 
@@ -150,7 +151,19 @@ interface ToolbarProps {
   onMixer: () => void;
   onExport: () => void;
   onBindings: () => void;
+  tool: Tool;
+  setTool: (t: Tool) => void;
 }
+
+/** Small line icons for the tools (currentColor). */
+const TOOL_ICON: Record<Tool, React.ReactNode> = {
+  select: <path d="M5 3l12 8-5 1.5L9.5 18z" />,
+  trim: <path d="M8 4v16M16 4v16M4 12h4M16 12h4" />,
+  fade: <path d="M4 18L20 6M4 18h16" />,
+  split: <><circle cx="7" cy="7" r="2.5" /><circle cx="7" cy="17" r="2.5" /><path d="M9 8.5L20 16M9 15.5L20 8" /></>,
+  pencil: <path d="M5 19l1-4L16 5l3 3L9 18zM14 7l3 3" />,
+  hand: <path d="M8 12V6a1.5 1.5 0 013 0v5V4.5a1.5 1.5 0 013 0V11V6a1.5 1.5 0 013 0v7a6 6 0 01-6 6h-1a6 6 0 01-5-2.7L5 13.5a1.5 1.5 0 012.5-1.6z" />,
+};
 
 /** Stage bar · snap · spot · zoom · history · Mixer / Make cues / Populate / Export. */
 export function Toolbar(p: ToolbarProps) {
@@ -164,6 +177,13 @@ export function Toolbar(p: ToolbarProps) {
         {STAGES.map((s, i) => (
           <Key key={s.id} on={p.stage === s.id} className="stage-key" title={`${s.label} (${i + 1})`} onClick={() => p.setStage(s.id)}>
             <span className={"led" + (p.stage === s.id ? " on" : "")} />{s.label}
+          </Key>
+        ))}
+      </Group>
+      <Group label="Tools">
+        {TOOLS.map((t) => (
+          <Key key={t.id} on={p.tool === t.id} className="tool-key" aria-label={t.label} title={`${t.label} (${t.key}) — ${t.hint}`} onClick={() => p.setTool(t.id)}>
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{TOOL_ICON[t.id]}</svg>
           </Key>
         ))}
       </Group>
