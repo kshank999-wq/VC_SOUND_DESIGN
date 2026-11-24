@@ -94,9 +94,20 @@ fn perform_record_and_errors() {
     let clips: Vec<&Value> =
         st["clips"].as_array().unwrap().iter().filter(|c| c["cue_id"] == cue.as_str() && c["muted"] == false).collect();
     assert_eq!(clips.len(), 3);
-    // no input device in CI: recording fails cleanly, state unchanged
-    let err = e.call("record.start", json!({"cue_id": cue})).unwrap_err();
-    assert!(err.contains("input") || err.contains("device"), "{err}");
+    // Without an input device recording fails cleanly. Some CI machines have a virtual one (macOS):
+    // there it starts and stops cleanly, with a take or "no audio captured" if the device is silent.
+    match e.call("record.start", json!({"cue_id": cue})) {
+        Err(err) => assert!(err.contains("input") || err.contains("device"), "{err}"),
+        Ok(r) => {
+            assert!(r["device"].is_string(), "{r}");
+            assert!(e.call("record.start", json!({"cue_id": cue})).unwrap_err().contains("already recording"));
+            std::thread::sleep(Duration::from_millis(200));
+            if let Err(err) = e.call("record.stop", json!({})) {
+                assert!(err.contains("no audio captured"), "{err}");
+            }
+            assert!(e.call("record.stop", json!({})).unwrap_err().contains("not recording"));
+        }
+    }
     assert!(!call(&e, "transport.state", json!({}))["playing"].as_bool().unwrap());
     assert!(e.call("nope", json!({})).unwrap_err().contains("unknown command"));
     // audition a library sound on top of a stopped transport
