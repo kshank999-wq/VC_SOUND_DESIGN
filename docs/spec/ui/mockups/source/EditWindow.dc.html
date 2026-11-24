@@ -1,0 +1,719 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VC Sound Design — Edit window</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&amp;family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#07080B}
+.app{--chassis:#07080B;--s0:#0D0F14;--s1:rgba(22,25,33,.72);--s2:rgba(32,36,47,.9);--s3:#2A2F3D;--hl:rgba(255,255,255,.07);--hl2:rgba(255,255,255,.13);--rbg:#04070A;--text:#D6DCE6;--tb:#F4F7FB;--td:#9AA4B5;--tf:#949EB0;--mg:#16A34A;--ma:#FEF08A;--mr:#DC2626;--rec:#F43F5E;--solo:#FBBF24;--mute:#A1A1AA;--ok:#16A34A;--warn:#FEF08A;--err:#DC2626;--errt:#F87171;--okt:#86EFAC;--flag:#FDE047;--ph:#94A3B8;--c-foot:#4ADE80;--c-prop:#BEF264;--c-hfx:#FB923C;--c-bg:#2DD4BF;--c-dfx:#A78BFA;--c-dlg:#E2E8F0;--c-mus:#F472B6;--ag:color-mix(in srgb,var(--accent) 45%,transparent);--as:color-mix(in srgb,var(--accent) 14%,transparent);--rg:color-mix(in srgb,var(--ro) 35%,transparent);--phd:#F0ABFC;--phg:color-mix(in srgb,#F0ABFC 45%,transparent)}
+:where(.app) button{font:inherit;color:inherit;margin:0}
+.panel{background:var(--s1);backdrop-filter:blur(14px) saturate(140%);-webkit-backdrop-filter:blur(14px) saturate(140%);border:1px solid var(--hl);border-radius:12px;box-shadow:0 1px 0 rgba(255,255,255,.05) inset,0 8px 24px rgba(0,0,0,.45);position:relative;box-sizing:border-box;overflow:hidden}
+.panel::before{content:"";position:absolute;left:14px;right:14px;top:0;height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.18),transparent)}
+.lbl{font:600 10px/1 'Barlow Condensed',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:var(--td)}
+.key{background:var(--s2);border:1px solid var(--hl2);border-radius:8px;box-shadow:0 1px 0 rgba(255,255,255,.08) inset,0 1px 2px rgba(0,0,0,.5);color:var(--text);font:600 11.5px/1 'Barlow Condensed',sans-serif;letter-spacing:.07em;text-transform:uppercase;height:24px;padding:0 8px;display:inline-flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;box-sizing:border-box;white-space:nowrap;transition:background 120ms cubic-bezier(.2,.8,.2,1),box-shadow 120ms cubic-bezier(.2,.8,.2,1)}
+.key:hover{background:var(--s3)}
+.key.on{background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 24%,transparent),color-mix(in srgb,var(--accent) 8%,transparent));box-shadow:0 0 0 1px var(--accent) inset,0 0 14px var(--ag);color:var(--tb)}
+.key.fill{background:var(--accent);border-color:transparent;color:#05070A;box-shadow:0 0 16px var(--ag)}
+.key:focus-visible,.tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.ro{background:var(--rbg);border-radius:6px;box-shadow:0 1px 6px rgba(0,0,0,.9) inset,0 0 0 1px rgba(255,255,255,.04);color:var(--ro);font-family:'JetBrains Mono',monospace;font-variant-numeric:tabular-nums;text-shadow:0 0 8px var(--rg)}
+.led{width:6px;height:6px;border-radius:50%;background:#262B36;flex:none;display:inline-block}
+.pill{border-radius:999px;padding:2px 8px;font:600 10.5px/1.4 Inter,sans-serif;background:rgba(255,255,255,.06);color:var(--text);white-space:nowrap}
+.tab{height:24px;padding:0 10px;border-radius:7px;border:0;background:none;font:600 11px/1 'Barlow Condensed',sans-serif;letter-spacing:.1em;text-transform:uppercase;color:var(--td);cursor:pointer}
+.tab.on{color:var(--tb);background:var(--s2);box-shadow:inset 0 -2px 0 var(--accent)}
+.fld{background:var(--s0);border:1px solid var(--hl);border-radius:6px;min-height:24px;padding:0 8px;display:flex;align-items:center;gap:6px;font:500 11.5px/1.3 Inter,sans-serif;color:var(--text);box-sizing:border-box}
+.wf{background:repeating-linear-gradient(90deg,currentColor 0 1px,transparent 1px 3px);-webkit-mask:linear-gradient(180deg,transparent 12%,#000 38% 62%,transparent 88%);mask:linear-gradient(180deg,transparent 12%,#000 38% 62%,transparent 88%);opacity:.85}
+.mono{font-family:'JetBrains Mono',monospace;font-variant-numeric:tabular-nums}
+</style>
+</helmet>
+<div class="app" style="--accent:{{accent}};--ro:{{ro}};--ai:{{ai}};width:1680px;height:1050px;box-sizing:border-box;padding:8px 8px 0;display:flex;flex-direction:column;gap:6px;overflow:hidden;font-family:Inter,sans-serif;color:#D6DCE6;background:radial-gradient(900px 520px at 18% -8%,color-mix(in srgb,{{accent}} 13%,transparent),transparent 70%),radial-gradient(800px 480px at 102% 108%,rgba(45,212,191,.07),transparent 70%),repeating-linear-gradient(0deg,rgba(255,255,255,.018) 0 1px,transparent 1px 28px),repeating-linear-gradient(90deg,rgba(255,255,255,.018) 0 1px,transparent 1px 28px),#07080B">
+
+<!-- ============ 1. TOP DECK ============ -->
+<div class="panel" style="height:84px;flex:none;display:flex;align-items:center;gap:18px;padding:0 16px">
+  <div style="width:244px;display:flex;align-items:center;gap:12px;flex:none">
+    <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(145deg,color-mix(in srgb,{{accent}} 55%,#0D0F14),#0D0F14);box-shadow:0 0 0 1px var(--hl2) inset,0 0 18px var(--ag);display:flex;align-items:center;justify-content:center">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="#F4F7FB" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 10h1.5M6 6v8M9 3v14M12 7v6M15 5v10M17.5 10h-.5"/></svg>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:5px;min-width:0">
+      <span class="lbl">VC Sound Design</span>
+      <div style="display:flex;align-items:center;gap:7px"><span style="font:600 14px/1 Inter;color:#F4F7FB">Gravel Road · Reel 1</span><span style="width:6px;height:6px;border-radius:50%;background:var(--warn)" title="Unsaved changes"></span></div>
+    </div>
+    <button class="key" aria-label="Project menu" style="margin-left:auto;width:30px;padding:0"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 4h10M2 7h10M2 10h10"/></svg></button>
+  </div>
+  <div style="width:1px;height:52px;background:var(--hl)"></div>
+  <div style="display:flex;flex-direction:column;gap:6px">
+    <span class="lbl">Transport</span>
+    <div style="display:flex;gap:4px">
+      <button class="key" aria-label="To start" style="width:40px;height:36px"><svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><rect x="2" y="2" width="1.8" height="10"/><path d="M12 2L4.5 7 12 12z"/></svg></button>
+      <button class="{{playCls}}" aria-label="Play / stop" aria-pressed="{{playing}}" style="width:40px;height:36px"><sc-if value="{{playing}}" hint-placeholder-val="{{ true }}"><svg width="13" height="13" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><rect x="2.5" y="2.5" width="9" height="9" rx="1"/></svg></sc-if><sc-if value="{{stopped}}" hint-placeholder-val="{{ false }}"><svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M3.5 2l8.5 5-8.5 5z"/></svg></sc-if></button>
+      <button class="key" aria-label="To end" style="width:40px;height:36px"><svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M2 2l7.5 5L2 12z"/><rect x="10.2" y="2" width="1.8" height="10"/></svg></button>
+      <button class="key on" aria-label="Loop" aria-pressed="true" style="width:40px;height:36px"><svg width="15" height="15" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.5 6A4.5 4.5 0 103 9.5"/><path d="M11.8 2.5V6H8.3"/></svg></button>
+      <button class="key" aria-label="Record" aria-pressed="{{recording}}" style="{{recStyle}}"><span style="{{recDot}}"></span></button>
+      <button class="key" aria-label="Step back one frame" style="width:40px;height:36px"><svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M9.5 3L4 7l5.5 4z"/></svg></button>
+      <button class="key" aria-label="Step forward one frame" style="width:40px;height:36px"><svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M4.5 3L10 7l-5.5 4z"/></svg></button>
+    </div>
+  </div>
+  <div style="width:1px;height:52px;background:var(--hl)"></div>
+  <div style="display:flex;gap:10px;align-items:center">
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <button class="ro" aria-label="Timecode — click to type" style="width:240px;height:42px;border:0;font-size:30px;font-weight:500;letter-spacing:.02em;cursor:text;display:flex;align-items:center;justify-content:center">01:01:01:12</button>
+      <div style="display:flex;gap:4px">
+        <span class="ro" style="font-size:10px;padding:3px 6px;opacity:.8">92+04</span>
+        <span class="ro" style="font-size:10px;padding:3px 6px;opacity:.8">{{selIO}}</span>
+        <span class="ro" style="font-size:10px;padding:3px 6px;opacity:.8">{{selDur}}</span>
+      </div>
+    </div>
+    <span class="pill mono" style="color:var(--ro);background:rgba(124,245,216,.08)">24 fps</span>
+  </div>
+  <div style="width:1px;height:52px;background:var(--hl)"></div>
+  <div style="display:grid;grid-template-columns:auto auto;gap:6px 10px;align-items:center">
+    <span class="lbl">Picture</span><button class="key" style="height:22px;font-size:11px">v3 · locked</button>
+    <span class="lbl">Rate</span><span class="ro" style="font-size:11px;padding:3px 7px">48 kHz · 24 bit</span>
+    <span class="lbl">Loop</span><span class="ro" style="font-size:11px;padding:3px 7px">01:01:36:00 – 01:01:58:00</span>
+  </div>
+  <div style="margin-left:auto;display:flex;flex-direction:column;gap:5px;width:262px">
+    <div style="display:flex;justify-content:space-between;align-items:center"><span class="lbl">Master</span><span class="ro" style="font-size:11px;padding:2px 7px">{{peak}} dBFS</span></div>
+    <div style="display:flex;align-items:center;gap:6px"><span class="lbl" style="width:8px">L</span><div style="display:flex;gap:2px"><sc-for list="{{mL}}" as="g" hint-placeholder-count="30"><span style="{{g}}"></span></sc-for></div></div>
+    <div style="display:flex;align-items:center;gap:6px"><span class="lbl" style="width:8px">R</span><div style="display:flex;gap:2px"><sc-for list="{{mR}}" as="g" hint-placeholder-count="30"><span style="{{g}}"></span></sc-for></div></div>
+  </div>
+</div>
+
+<!-- ============ 2. TOOLBAR ============ -->
+<div class="panel" style="height:44px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;border-radius:10px">
+  <div style="display:flex;flex-direction:column;gap:3px"><span class="lbl">Stage · 1–6</span>
+    <div role="group" aria-label="Workflow stage" style="display:flex;gap:3px">
+      <sc-for list="{{stages}}" as="s" hint-placeholder-count="6"><button class="{{s.cls}}" aria-pressed="{{s.pressed}}" onClick="{{s.pick}}" style="height:22px;padding:0 7px"><span class="led" style="{{s.led}}"></span>{{s.label}}</button></sc-for>
+    </div>
+  </div>
+  <div style="width:1px;height:30px;background:var(--hl)"></div>
+  <div style="display:flex;flex-direction:column;gap:3px"><span class="lbl">Tools</span>
+    <div style="display:flex;gap:3px">
+      <button class="{{toolSel}}" aria-label="Select" aria-pressed="true" style="width:26px;height:22px;padding:0"><svg width="13" height="13" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M3 1.5l8.5 5-4 1.1L5.6 12z"/></svg></button>
+      <button class="key" aria-label="Trim" style="width:26px;height:22px;padding:0"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M5 2H3v10h2M9 2h2v10H9"/></svg></button>
+      <button class="key" aria-label="Fade" style="width:26px;height:22px;padding:0"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 12C7 12 8 2 12 2"/></svg></button>
+      <button class="key" aria-label="Split" style="width:26px;height:22px;padding:0"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="4" cy="10.5" r="2"/><circle cx="10" cy="10.5" r="2"/><path d="M5.3 9L11 2M8.7 9L3 2"/></svg></button>
+      <button class="{{toolPen}}" aria-label="Pencil (automation)" style="width:26px;height:22px;padding:0"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M2 12l.8-3.2L9.6 2l2.4 2.4-6.8 6.8z"/></svg></button>
+      <button class="key" aria-label="Hand" style="width:26px;height:22px;padding:0"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><path d="M4.5 7V3.2a1 1 0 012 0V6.5M6.5 6V2.2a1 1 0 012 0V6.5M8.5 6.5V3.6a1 1 0 012 0V8.5c0 2.2-1.5 3.8-3.6 3.8-1.6 0-2.6-.8-3.3-2L2.3 7.9a.9.9 0 011.5-1L4.5 8"/></svg></button>
+    </div>
+  </div>
+  <div style="width:1px;height:30px;background:var(--hl)"></div>
+  <div style="display:flex;flex-direction:column;gap:3px"><span class="lbl">Snap</span>
+    <div style="display:flex;gap:3px;align-items:center"><button class="key on" aria-pressed="true" style="height:22px">Frames</button><span class="ro" style="font-size:10.5px;padding:4px 6px">1 fr</span></div>
+  </div>
+  <div style="width:1px;height:30px;background:var(--hl)"></div>
+  <div style="display:flex;flex-direction:column;gap:3px"><span class="lbl">Spot</span>
+    <div style="display:flex;gap:3px"><button class="{{spotCls}}" aria-pressed="{{spotOn}}" style="height:22px"><span class="led" style="{{spotLed}}"></span>Spot</button><button class="key" style="height:22px">Bindings</button></div>
+  </div>
+  <sc-if value="{{isSpot}}" hint-placeholder-val="{{ true }}">
+    <div style="display:flex;align-items:center;gap:8px;height:26px;padding:0 12px;border-radius:999px;background:var(--as);box-shadow:0 0 0 1px var(--accent) inset,0 0 16px var(--ag);font:600 12px/1 'Barlow Condensed';letter-spacing:.1em;color:var(--tb)"><span class="led" style="background:var(--rec);box-shadow:0 0 8px var(--rec)"></span>SPOT — OPEN: F, B <span style="color:var(--td)">(ENTER CLOSES)</span></div>
+  </sc-if>
+  <div style="width:1px;height:30px;background:var(--hl)"></div>
+  <div style="display:flex;flex-direction:column;gap:3px"><span class="lbl">Zoom</span>
+    <div style="display:flex;gap:3px"><button class="key" aria-label="Zoom out" style="width:24px;height:22px;padding:0">−</button><button class="key" aria-label="Zoom in" style="width:24px;height:22px;padding:0">+</button><button class="key" style="height:22px">Fit</button><button class="key" style="height:22px">Sel</button></div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:3px"><span class="lbl">History</span>
+    <div style="display:flex;gap:3px"><button class="key" aria-label="Undo" style="width:26px;height:22px;padding:0"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3L2 6l3 3"/><path d="M2 6h6.5a3.5 3.5 0 010 7H6"/></svg></button><button class="key" aria-label="Redo" style="width:26px;height:22px;padding:0"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3l3 3-3 3"/><path d="M12 6H5.5a3.5 3.5 0 000 7H8"/></svg></button></div>
+  </div>
+  <div style="margin-left:auto;display:flex;gap:4px;align-items:center">
+    <button class="key" style="height:26px">Mixer ⧉</button>
+    <button class="{{makeCls}}" style="height:26px">Make cues<span class="pill mono" style="padding:0 5px;font-size:10px;background:rgba(251,191,36,.16);color:var(--warn)">2</span></button>
+    <button class="key" style="height:26px">Populate</button>
+    <button class="key fill" style="height:26px;padding:0 14px">Export</button>
+  </div>
+</div>
+
+<!-- ============ 3. RACK / EDIT / INSPECTOR ============ -->
+<div style="flex:1;min-height:0;display:flex;gap:6px">
+
+  <!-- 3a LEFT RACK -->
+  <div class="panel" style="width:264px;flex:none;display:flex;flex-direction:column">
+    <div role="tablist" style="display:flex;gap:2px;padding:6px;border-bottom:1px solid var(--hl)">
+      <sc-for list="{{rackTabs}}" as="t" hint-placeholder-count="4"><button class="{{t.cls}}" role="tab" aria-selected="{{t.on}}" style="flex:1;padding:0 4px;font-size:10.5px">{{t.label}}</button></sc-for>
+    </div>
+    <div style="flex:1;min-height:0;overflow:hidden;padding:10px;display:flex;flex-direction:column;gap:8px">
+
+      <sc-if value="{{rackScenes}}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;justify-content:space-between;align-items:center"><span class="lbl">Script breakdown</span><button class="key" style="height:22px">+ Scene</button></div>
+        <sc-for list="{{scenes}}" as="sc" hint-placeholder-count="2">
+          <div style="background:var(--s0);border:1px solid var(--hl);border-radius:8px;padding:9px;display:flex;flex-direction:column;gap:6px">
+            <div style="display:flex;align-items:center;gap:7px"><span class="ro" style="font-size:10px;padding:2px 5px">{{sc.num}}</span><span style="font:600 12.5px/1.2 Inter;color:#F4F7FB">{{sc.title}}</span><span class="pill mono" style="margin-left:auto">{{sc.cues}}</span></div>
+            <span class="mono" style="font-size:10px;color:var(--td)">{{sc.tc}}</span>
+            <span style="font:600 10.5px/1.3 'JetBrains Mono';color:var(--text);letter-spacing:.02em">{{sc.slug}}</span>
+            <span style="font:400 11.5px/1.45 Inter;color:var(--td)">{{sc.action}}</span>
+            <div style="display:flex;flex-wrap:wrap;gap:4px"><sc-for list="{{sc.items}}" as="it" hint-placeholder-count="3"><span class="pill" style="{{it.st}}">{{it.l}}</span></sc-for></div>
+          </div>
+        </sc-for>
+      </sc-if>
+
+      <sc-if value="{{rackIdent}}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;justify-content:space-between;align-items:center"><span class="lbl">Sound identities</span><button class="key" style="height:22px">+ Identity</button></div>
+        <sc-for list="{{idents}}" as="g" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:6px;margin-top:4px"><span style="{{g.dot}}"></span><span class="lbl" style="color:var(--text)">{{g.cat}}</span></div>
+          <sc-for list="{{g.items}}" as="it" hint-placeholder-count="2">
+            <div style="{{it.st}}"><div style="display:flex;justify-content:space-between;gap:6px"><span style="font:500 12px/1.3 Inter;color:#F4F7FB">{{it.name}}</span><span class="mono" style="font-size:10px;color:var(--td)">{{it.n}}</span></div><span class="mono" style="{{it.snd}}">{{it.file}}</span></div>
+          </sc-for>
+        </sc-for>
+      </sc-if>
+
+      <sc-if value="{{rackLib}}" hint-placeholder-val="{{ false }}">
+        <div class="fld" style="height:28px"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="#8A94A6" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="6" cy="6" r="4"/><path d="M9 9l3 3"/></svg><input aria-label="Search library" placeholder="engine start" style="background:none;border:0;outline:none;color:#D6DCE6;font:500 12px Inter;flex:1;min-width:0"></div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px"><span class="pill" style="background:var(--as);color:var(--tb);box-shadow:0 0 0 1px var(--accent) inset">Hard FX</span><span class="pill">Vehicles</span><span class="pill">Starter pack</span><span class="pill">Field rec</span></div>
+        <span class="lbl" style="margin-top:2px">6 results</span>
+        <sc-for list="{{libRes}}" as="r" hint-placeholder-count="6">
+          <div style="{{r.st}}">
+            <button class="key" aria-label="Audition" style="width:24px;height:24px;padding:0;flex:none"><svg width="10" height="10" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M3.5 2l8.5 5-8.5 5z"/></svg></button>
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+              <span style="font:500 11.5px/1.2 Inter;color:#F4F7FB;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{r.name}}</span>
+              <div class="wf" style="height:14px;color:var(--c-hfx)"></div>
+              <span class="mono" style="font-size:9.5px;color:var(--td)">{{r.meta}}</span>
+            </div>
+          </div>
+        </sc-for>
+      </sc-if>
+
+      <sc-if value="{{rackMarkers}}" hint-placeholder-val="{{ true }}">
+        <span class="lbl">Marker lanes</span>
+        <sc-for list="{{laneList}}" as="l" hint-placeholder-count="7">
+          <div style="display:flex;align-items:center;gap:7px;height:22px">
+            <button class="key" aria-label="Show lane" aria-pressed="true" style="width:22px;height:20px;padding:0"><svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M1.5 7S3.8 3 7 3s5.5 4 5.5 4-2.3 4-5.5 4S1.5 7 1.5 7z"/><circle cx="7" cy="7" r="1.6"/></svg></button>
+            <span style="{{l.sw}}"></span>
+            <span style="font:500 12px Inter;color:#D6DCE6;flex:1">{{l.name}}</span>
+            <span class="mono" style="font-size:10px;color:var(--td)">{{l.count}}</span>
+            <span class="key" style="height:18px;width:20px;padding:0;font-size:10px">{{l.key}}</span>
+          </div>
+        </sc-for>
+        <div style="height:1px;background:var(--hl);margin:4px 0"></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><span class="lbl">By scene</span><span class="pill" style="background:rgba(251,191,36,.14);color:var(--warn)">2 uncued</span></div>
+        <sc-for list="{{mkList}}" as="m" hint-placeholder-count="8">
+          <div style="{{m.row}}"><span style="{{m.dot}}"></span><span class="mono" style="font-size:10.5px;color:#F4F7FB;width:52px">{{m.id}}</span><span class="mono" style="font-size:10px;color:var(--td);flex:1">{{m.tc}}</span><span style="{{m.badge}}">{{m.state}}</span></div>
+        </sc-for>
+      </sc-if>
+    </div>
+  </div>
+
+  <!-- 3b EDIT WINDOW -->
+  <div class="panel" style="flex:1;min-width:0;display:flex;flex-direction:column">
+    <div role="tablist" style="display:flex;gap:2px;padding:4px 6px;border-bottom:1px solid var(--hl);align-items:center;flex:none">
+      <sc-for list="{{centerTabs}}" as="t" hint-placeholder-count="4"><button class="{{t.cls}}" role="tab" aria-selected="{{t.on}}">{{t.label}}</button></sc-for>
+      <span class="mono" style="margin-left:auto;font-size:10px;color:var(--td);padding-right:6px">{{viewInfo}}</span>
+    </div>
+
+    <sc-if value="{{showPic}}" hint-placeholder-val="{{ true }}">
+      <div style="{{picWell}}">
+        <div style="position:absolute;left:12px;top:10px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Picture</span><span class="mono" style="font-size:10px;color:var(--td)">GR_R1_PIC_v3.mov</span><span class="mono" style="font-size:10px;color:var(--td)">proxy · 1:1</span></div>
+        <div style="position:absolute;right:12px;top:10px;display:flex;flex-direction:column;gap:5px;align-items:flex-end"><span class="lbl">Scene</span><span style="font:600 12px Inter;color:#F4F7FB">SC 2 · Gravel road, night</span></div>
+        <div style="height:100%;aspect-ratio:2.39/1;position:relative;border-radius:4px;overflow:hidden;box-shadow:0 0 0 1px var(--hl2),0 10px 30px rgba(0,0,0,.6);background:radial-gradient(70px 22px at 41% 71%,rgba(255,240,210,.95),transparent 70%),radial-gradient(70px 22px at 50% 71%,rgba(255,240,210,.95),transparent 70%),radial-gradient(460px 120px at 46% 74%,rgba(255,214,150,.22),transparent 70%),linear-gradient(180deg,#0a0f1d 0%,#18213a 34%,#3b2e40 50%,#100d10 51%,#09090b 100%)">
+          <div style="position:absolute;inset:0;clip-path:polygon(0 52%,6% 44%,10% 49%,15% 40%,21% 47%,27% 42%,33% 50%,64% 50%,70% 41%,75% 46%,82% 38%,88% 45%,94% 41%,100% 47%,100% 53%,0 53%);background:#06070a"></div>
+          <div style="position:absolute;inset:0;clip-path:polygon(43% 51%,48% 51%,95% 100%,-5% 100%);background:repeating-linear-gradient(90deg,rgba(255,255,255,.03) 0 2px,transparent 2px 5px),linear-gradient(180deg,#2c2724,#4c4239)"></div>
+          <div style="position:absolute;inset:6% 5%;border:1px dashed rgba(255,255,255,.14);border-radius:2px"></div>
+          <span class="mono" style="position:absolute;left:50%;bottom:8px;transform:translateX(-50%);font-size:12px;color:#fff;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:3px">01:01:01:12</span>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{showTimeline}}" hint-placeholder-val="{{ true }}">
+      <div style="flex:1;min-height:0;position:relative;overflow:hidden;display:flex;flex-direction:column">
+        <!-- ruler -->
+        <div style="display:flex;height:66px;flex:none;border-bottom:1px solid var(--hl2)">
+          <div style="width:232px;flex:none;display:flex;flex-direction:column;border-right:1px solid var(--hl2);background:rgba(13,15,20,.6)">
+            <div style="height:22px;display:flex;align-items:center;padding:0 10px;justify-content:space-between"><span class="lbl">Timecode</span><span class="mono" style="font-size:9.5px;color:var(--td)">24 fps</span></div>
+            <div style="height:22px;display:flex;align-items:center;padding:0 10px"><span class="lbl">Scenes</span></div>
+            <div style="height:22px;display:flex;align-items:center;padding:0 10px"><span class="lbl">Markers</span></div>
+          </div>
+          <div style="flex:1;position:relative;background:rgba(4,7,10,.65)">
+            <div style="position:absolute;left:0;right:0;top:0;height:22px;background:repeating-linear-gradient(90deg,rgba(255,255,255,.16) 0 1px,transparent 1px 3.3333%) bottom/100% 5px no-repeat">
+              <sc-for list="{{ticks}}" as="k" hint-placeholder-count="8"><span style="{{k.st}}">{{k.l}}</span></sc-for>
+              <div style="{{loopBar}}"></div>
+            </div>
+            <div style="position:absolute;left:0;right:0;top:22px;height:22px">
+              <sc-for list="{{sceneBlocks}}" as="b" hint-placeholder-count="2"><div style="{{b.st}}"><span style="font:700 10px/1 'Barlow Condensed';letter-spacing:.1em;color:#F4F7FB">{{b.n}}</span><span style="font:500 10.5px/1 Inter;color:var(--td)">{{b.t}}</span></div></sc-for>
+            </div>
+            <div style="position:absolute;left:0;right:0;top:44px;height:22px">
+              <sc-for list="{{flags}}" as="f" hint-placeholder-count="2"><div style="{{f.st}}"><span style="{{f.pole}}"></span><span style="font:500 10px/1 Inter;color:#D6DCE6;white-space:nowrap">{{f.t}}</span></div></sc-for>
+            </div>
+          </div>
+        </div>
+        <!-- marker lanes -->
+        <sc-for list="{{lanes}}" as="ln" hint-placeholder-count="7">
+          <div style="display:flex;flex:none;{{ln.h}};border-bottom:1px solid rgba(255,255,255,.04)">
+            <div style="width:232px;flex:none;display:flex;align-items:center;gap:7px;padding:0 10px;box-sizing:border-box;border-right:1px solid var(--hl2);background:rgba(13,15,20,.6)">
+              <span style="width:3px;align-self:stretch;margin:2px 0;border-radius:2px;{{ln.stripe}}"></span>
+              <sc-if value="{{ln.showLabel}}" hint-placeholder-val="{{ true }}"><span style="font:500 11.5px Inter;color:#D6DCE6;flex:1">{{ln.name}}</span><span class="key" style="height:16px;width:18px;padding:0;font-size:9.5px">{{ln.key}}</span></sc-if>
+            </div>
+            <div style="flex:1;position:relative;background:rgba(13,15,20,.55)">
+              <sc-for list="{{ln.markers}}" as="m" hint-placeholder-count="2">
+                <sc-if value="{{m.pt}}" hint-placeholder-val="{{ false }}"><div style="{{m.wrap}}"><span style="{{m.stem}}"></span><span style="{{m.cap}}"></span></div></sc-if>
+                <sc-if value="{{m.rng}}" hint-placeholder-val="{{ true }}"><div style="{{m.bar}}">{{m.label}}</div></sc-if>
+              </sc-for>
+            </div>
+          </div>
+        </sc-for>
+        <sc-if value="{{mkHidden}}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;height:18px;flex:none;border-bottom:1px solid var(--hl2)"><div style="width:232px;flex:none;display:flex;align-items:center;padding:0 10px;box-sizing:border-box;border-right:1px solid var(--hl2);gap:6px"><span class="lbl">▸ Marker lanes</span><span class="mono" style="font-size:9.5px;color:var(--td)">7 folded</span></div><div style="flex:1;background:rgba(13,15,20,.55)"></div></div>
+        </sc-if>
+        <!-- tracks -->
+        <sc-for list="{{rows}}" as="r" hint-placeholder-count="6">
+          <sc-if value="{{r.folder}}" hint-placeholder-val="{{ true }}">
+            <div style="display:flex;height:22px;flex:none;border-top:1px solid var(--hl2)">
+              <div style="width:232px;flex:none;display:flex;align-items:center;gap:7px;padding:0 8px 0 10px;box-sizing:border-box;border-right:1px solid var(--hl2);background:rgba(32,36,47,.55)">
+                <span style="color:var(--td);font-size:10px;width:10px">{{r.chev}}</span><span style="font:700 11px/1 'Barlow Condensed';letter-spacing:.12em;color:#F4F7FB">{{r.name}}</span><span class="mono" style="font-size:9.5px;color:var(--td);flex:1">{{r.count}}</span>
+                <button class="key" style="height:16px;width:18px;padding:0;font-size:9.5px">M</button><button class="key" style="height:16px;width:18px;padding:0;font-size:9.5px">S</button>
+              </div>
+              <div style="flex:1;position:relative;background:rgba(32,36,47,.25)"><sc-for list="{{r.clips}}" as="c" hint-placeholder-count="2"><div style="{{c.st}}"><div class="wf" style="flex:1"></div></div></sc-for></div>
+            </div>
+          </sc-if>
+          <sc-if value="{{r.track}}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;height:56px;flex:none;border-top:1px solid rgba(255,255,255,.04)">
+              <div style="width:232px;flex:none;display:flex;box-sizing:border-box;border-right:1px solid var(--hl2);background:rgba(13,15,20,.6)">
+                <span style="width:4px;flex:none;{{r.stripe}}"></span>
+                <div style="flex:1;padding:6px 6px 6px 8px;display:flex;flex-direction:column;gap:5px;min-width:0">
+                  <div style="display:flex;align-items:baseline;gap:6px"><span class="ro" style="font-size:9.5px;padding:1px 4px">{{r.num}}</span><span style="font:600 12.5px/1 Inter;color:#F4F7FB">{{r.name}}</span><span style="font:400 10.5px/1 Inter;color:var(--td);white-space:nowrap">{{r.busName}}</span></div>
+                  <div style="display:flex;align-items:center;gap:3px">
+                    <button class="key" style="{{r.mSt}}">M</button><button class="key" style="{{r.sSt}}">S</button><button class="{{r.aCls}}" style="height:20px;width:22px;padding:0;font-size:10px">A</button><button class="key" style="height:20px;width:22px;padding:0;font-size:10px">{{r.mode}}</button>
+                    <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
+                      <span style="{{r.vol}}" aria-label="Volume"><span style="position:absolute;inset:3px;border-radius:50%;background:#161922"></span></span>
+                      <span style="{{r.pan}}" aria-label="Pan"><span style="position:absolute;inset:3px;border-radius:50%;background:#161922"></span></span>
+                      <span class="mono" style="font-size:9.5px;color:var(--ro);width:30px;text-align:right">{{r.db}}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="width:12px;flex:none;margin:6px 6px 6px 0;border-radius:3px;position:relative;overflow:hidden;background:linear-gradient(0deg,var(--mg) 0 68%,var(--ma) 68% 86%,var(--mr) 86%)"><span style="{{r.meter}}"></span></div>
+              </div>
+              <div style="flex:1;position:relative;background:rgba(13,15,20,.45)">
+                <sc-for list="{{r.clips}}" as="c" hint-placeholder-count="2">
+                  <div style="{{c.st}}"><span style="font:500 9.5px/13px Inter;color:#D6DCE6;padding:0 5px;white-space:nowrap;overflow:hidden;background:rgba(255,255,255,.05)">{{c.name}}</span><div class="wf" style="flex:1"></div><sc-if value="{{c.sel}}" hint-placeholder-val="{{ false }}"><span style="position:absolute;left:0;top:0;width:6px;height:6px;background:#F4F7FB;border-radius:0 0 3px 0"></span><span style="position:absolute;right:0;top:0;width:6px;height:6px;background:#F4F7FB;border-radius:0 0 0 3px"></span></sc-if></div>
+                </sc-for>
+              </div>
+            </div>
+          </sc-if>
+          <sc-if value="{{r.auto}}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;height:44px;flex:none;border-top:1px solid rgba(255,255,255,.04)">
+              <div style="width:232px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px 0 22px;box-sizing:border-box;border-right:1px solid var(--hl2);background:rgba(13,15,20,.7)"><span class="lbl" style="color:#D6DCE6">Volume</span><span class="pill" style="background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--tb)">Touch</span><button class="key" style="margin-left:auto;height:18px;font-size:10px">Clear</button></div>
+              <div style="flex:1;position:relative;background:rgba(13,15,20,.35)">
+                <svg viewBox="0 0 1000 44" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true"><polyline points="{{autoPts}}" fill="none" stroke="#4ADE80" stroke-width="1.6" vector-effect="non-scaling-stroke"></polyline></svg>
+                <sc-for list="{{autoDots}}" as="d" hint-placeholder-count="8"><span style="{{d}}"></span></sc-for>
+              </div>
+            </div>
+          </sc-if>
+          <sc-if value="{{r.bus}}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;height:22px;flex:none;border-top:1px solid rgba(255,255,255,.04)">
+              <div style="width:232px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px 0 10px;box-sizing:border-box;border-right:1px solid var(--hl2);background:rgba(13,15,20,.7)"><span style="{{r.dot}}"></span><span style="font:700 11px/1 'Barlow Condensed';letter-spacing:.12em;color:#F4F7FB;flex:1">{{r.name}}</span><span class="mono" style="font-size:10px;color:var(--ro)">{{r.db}}</span></div>
+              <div style="flex:1;position:relative;background:rgba(13,15,20,.35)"><span style="position:absolute;left:0;right:0;top:50%;height:1px;background:rgba(255,255,255,.12)"></span></div>
+            </div>
+          </sc-if>
+        </sc-for>
+        <div style="flex:1;display:flex"><div style="width:232px;border-right:1px solid var(--hl2);background:rgba(13,15,20,.4)"></div><div style="flex:1"></div></div>
+        <!-- playhead + scene divider -->
+        <div style="position:absolute;top:0;bottom:0;left:calc(232px + (100% - 232px) * .48);width:1px;background:rgba(255,255,255,.12);pointer-events:none"></div>
+        <div style="position:absolute;top:0;bottom:0;left:calc(232px + (100% - 232px) * .41);width:1.5px;background:var(--phd);box-shadow:0 0 8px var(--phg);pointer-events:none"><span style="position:absolute;top:0;left:-5px;width:11px;height:12px;background:var(--phd);clip-path:polygon(0 0,100% 0,100% 60%,50% 100%,0 60%)"></span></div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{showQA}}" hint-placeholder-val="{{ false }}">
+      <div style="flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr) minmax(0,.9fr);gap:12px;padding:14px">
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px"><span class="lbl" style="font-size:12px;color:#F4F7FB">QA check</span><span class="mono" style="font-size:10px;color:var(--td)">ran 16:41 · 0.4 s</span><button class="key on" style="margin-left:auto">Run QA</button></div>
+          <div style="display:flex;gap:6px"><span class="pill" style="background:color-mix(in srgb,var(--err) 16%,transparent);color:var(--errt)">1 error</span><span class="pill" style="background:rgba(251,191,36,.14);color:var(--warn)">3 warnings</span><span class="pill" style="background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--okt)">9 passed</span></div>
+          <sc-for list="{{qa}}" as="q" hint-placeholder-count="6">
+            <button style="{{q.row}}"><span style="{{q.dot}}"></span><span style="flex:1;display:flex;flex-direction:column;gap:3px;text-align:left"><span style="font:500 12px/1.3 Inter;color:#F4F7FB">{{q.t}}</span><span class="mono" style="font-size:10px;color:var(--td)">{{q.d}}</span></span><span class="lbl" style="color:var(--accent)">{{q.act}}</span></button>
+          </sc-for>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:10px;border-left:1px solid var(--hl);padding-left:12px">
+          <span class="lbl" style="font-size:12px;color:#F4F7FB">Export</span>
+          <span class="lbl">Profile</span>
+          <div style="display:flex;gap:3px;flex-wrap:wrap"><button class="key on" aria-pressed="true">Pro Tools</button><button class="key">Resolve</button><button class="key">Nuendo</button><button class="key">Generic</button></div>
+          <span class="lbl">Range</span>
+          <div style="display:flex;gap:3px"><button class="key on" aria-pressed="true">All</button><button class="key">Scene</button><button class="key">TC range</button></div>
+          <div style="display:flex;gap:6px;align-items:center"><span class="ro" style="font-size:11px;padding:4px 8px">01:00:00:00</span><span style="color:var(--td)">→</span><span class="ro" style="font-size:11px;padding:4px 8px">01:02:30:00</span></div>
+          <span class="lbl">Options</span>
+          <sc-for list="{{opts}}" as="o" hint-placeholder-count="4"><label style="display:flex;align-items:center;gap:8px;font:500 12px Inter;color:#D6DCE6"><span style="{{o.box}}">{{o.tick}}</span>{{o.l}}</label></sc-for>
+          <button class="key fill" style="height:32px;margin-top:6px;font-size:13px">Export reel 1</button>
+          <span class="lbl" style="margin-top:6px">Output · Nov 21 export</span>
+          <sc-for list="{{outFiles}}" as="o" hint-placeholder-count="6"><div style="display:flex;gap:8px;align-items:center"><span class="mono" style="font-size:10.5px;color:#D6DCE6;flex:1">{{o.n}}</span><span class="mono" style="font-size:10px;color:var(--td)">{{o.s}}</span></div></sc-for>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:10px;border-left:1px solid var(--hl);padding-left:12px">
+          <span class="lbl" style="font-size:12px;color:#F4F7FB">Reports</span>
+          <sc-for list="{{reports}}" as="rp" hint-placeholder-count="2">
+            <div style="background:var(--s0);border:1px solid var(--hl);border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:8px"><span style="font:600 12.5px Inter;color:#F4F7FB">{{rp.t}}</span><span style="font:400 11.5px/1.4 Inter;color:var(--td)">{{rp.d}}</span><div style="display:flex;gap:3px"><button class="key">PDF</button><button class="key">CSV</button><button class="key">JSON</button></div></div>
+          </sc-for>
+          <div style="background:var(--s0);border:1px solid var(--hl);border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:8px"><span style="font:600 12.5px Inter;color:#F4F7FB">Active at…</span><div style="display:flex;gap:6px;align-items:center"><span class="ro" style="font-size:12px;padding:4px 8px">01:01:41:00</span><button class="key">Report</button></div><span style="font:400 11.5px/1.5 Inter;color:var(--td)">FS-009 · BG-006 · MU-012 · PR-010</span></div>
+          <button class="key" style="margin-top:auto;height:30px">Save project  ⌘S</button>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+
+  <!-- 3c INSPECTOR -->
+  <div class="panel" style="width:300px;flex:none;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--hl)"><span class="lbl">Inspector</span><span class="pill" style="margin-left:auto;background:var(--as);color:var(--tb)">{{inspKind}}</span></div>
+    <div style="flex:1;min-height:0;overflow:hidden;padding:12px;display:flex;flex-direction:column;gap:10px">
+
+      <sc-if value="{{inspProject}}" hint-placeholder-val="{{ false }}">
+        <span style="font:600 15px/1.2 Inter;color:#F4F7FB">Gravel Road · Reel 1</span>
+        <span class="mono" style="font-size:10.5px;color:var(--td)">24 fps · 48 kHz · start 01:00:00:00</span>
+        <span class="lbl" style="margin-top:4px">Cues by status · 11</span>
+        <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;gap:2px"><span style="flex:2;background:var(--ph)"></span><span style="flex:6;background:var(--accent)"></span><span style="flex:2;background:var(--c-foot)"></span><span style="flex:1;background:var(--ok)"></span></div>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:5px 8px;font:500 11.5px Inter">
+          <span style="color:var(--td)">Placeholder</span><span class="mono">2</span><span style="color:var(--td)">Sound chosen</span><span class="mono">6</span><span style="color:var(--td)">Performed</span><span class="mono">2</span><span style="color:var(--td)">Approved</span><span class="mono">1</span>
+        </div>
+        <div style="height:1px;background:var(--hl)"></div>
+        <div class="fld" style="justify-content:space-between"><span>Uncued markers</span><span class="mono" style="color:var(--warn)">2</span></div>
+        <div class="fld" style="justify-content:space-between"><span>Missing media</span><span style="display:flex;gap:6px;align-items:center"><span class="mono" style="color:var(--errt)">1</span><button class="key" style="height:18px;font-size:10px">Relink</button></span></div>
+        <sc-if value="{{isPrep}}" hint-placeholder-val="{{ false }}">
+          <span class="lbl" style="margin-top:4px">Prep checklist</span>
+          <sc-for list="{{prepList}}" as="p" hint-placeholder-count="6"><div style="display:flex;align-items:center;gap:8px;font:500 11.5px Inter"><span class="led" style="background:var(--ok);box-shadow:0 0 6px var(--ok)"></span><span style="flex:1;color:#D6DCE6">{{p.t}}</span><span class="mono" style="font-size:10px;color:var(--td)">{{p.d}}</span></div></sc-for>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:4px"><button class="key">Import picture</button><button class="key">Import AAF</button><button class="key">Import OTIO</button><button class="key">Import score</button><button class="key">Breakdown</button><button class="key">Devices</button></div>
+        </sc-if>
+        <sc-if value="{{isDeliver}}" hint-placeholder-val="{{ false }}">
+          <span class="lbl" style="margin-top:4px">Last export</span>
+          <span style="font:500 12px/1.4 Inter;color:#D6DCE6">Nov 21, 2026 · Pro Tools · AAF + stems</span>
+          <span class="lbl" style="margin-top:4px">Picture</span>
+          <span style="font:500 12px/1.4 Inter;color:#D6DCE6">v3 · locked Nov 18</span>
+        </sc-if>
+      </sc-if>
+
+      <sc-if value="{{inspMarker}}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;align-items:center;gap:6px"><span class="ro" style="font-size:12px;padding:3px 7px">FS-009</span><span class="pill" style="background:color-mix(in srgb,var(--c-foot) 22%,transparent);color:var(--c-foot)">Footsteps</span><span class="pill">Repeated</span></div>
+        <span class="lbl">Lane</span><div class="fld" style="justify-content:space-between"><span>Footsteps</span><span style="color:var(--td)">▾</span></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px"><div style="display:flex;flex-direction:column;gap:4px"><span class="lbl">In</span><span class="ro" style="font-size:12px;padding:5px 7px">01:01:36:00</span></div><div style="display:flex;flex-direction:column;gap:4px"><span class="lbl">Out</span><span class="ro" style="font-size:12px;padding:5px 7px">01:01:58:00</span></div></div>
+        <div style="display:flex;justify-content:space-between"><span class="lbl">Taps · 14</span><button class="key" style="height:18px;font-size:10px">Edit taps</button></div>
+        <div style="height:22px;border-radius:5px;background:repeating-linear-gradient(90deg,rgba(4,7,10,.6) 0 1px,transparent 1px 7.14%),color-mix(in srgb,var(--c-foot) 75%,transparent);box-shadow:0 0 0 1.5px var(--accent),0 0 12px var(--ag)"></div>
+        <span class="lbl">Color</span>
+        <div style="display:flex;align-items:center;gap:8px"><span style="width:14px;height:14px;border-radius:4px;background:var(--c-foot);box-shadow:0 0 0 1px var(--hl2)"></span><span style="font:500 11.5px Inter;color:var(--td)">Lane color</span><button class="key" style="margin-left:auto;height:20px">Use lane's</button></div>
+        <div class="fld" style="height:30px;justify-content:space-between"><span style="display:flex;gap:7px;align-items:center"><span class="led" style="background:var(--ok);box-shadow:0 0 6px var(--ok)"></span>Has a cue · FS-009</span><span class="lbl" style="color:var(--accent)">Open</span></div>
+        <div style="height:1px;background:var(--hl)"></div>
+        <span class="lbl">Spot keys</span>
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 10px"><sc-for list="{{spotKeys}}" as="k" hint-placeholder-count="7"><div style="display:flex;align-items:center;gap:6px;font:500 11px Inter;color:#D6DCE6"><span class="key" style="height:18px;width:20px;padding:0;font-size:10px">{{k.k}}</span><span style="{{k.dot}}"></span>{{k.l}}</div></sc-for></div>
+        <div style="display:flex;gap:4px;margin-top:auto"><button class="key on" style="flex:1;height:28px">Make cues · 2 uncued</button><button class="key" style="height:28px;color:var(--errt)">Delete</button></div>
+      </sc-if>
+
+      <sc-if value="{{inspCue}}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;align-items:center;gap:6px"><span class="ro" style="font-size:12px;padding:3px 7px">HF-007</span><span class="pill" style="background:color-mix(in srgb,var(--c-hfx) 22%,transparent);color:var(--c-hfx)">Hard FX</span><span class="pill">Range</span></div>
+        <div class="fld" style="min-height:30px">Pickup engine start, settles to idle</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px"><span class="ro" style="font-size:11.5px;padding:5px 7px">IN 01:00:36:00</span><span class="ro" style="font-size:11.5px;padding:5px 7px">OUT 01:00:41:00</span></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="lbl">Identity</span><div class="fld">Pickup engine '78</div></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="lbl">Owner</span><div class="fld">J. Ortiz</div></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="lbl">Status</span><div class="fld"><span class="led" style="background:var(--accent)"></span>Sound chosen</div></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="lbl">Priority</span><div class="fld">High</div></div>
+        </div>
+        <span class="lbl">Sound</span>
+        <div style="background:var(--s0);border:1px solid var(--hl);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px"><span class="mono" style="font-size:11px;color:#F4F7FB">engine_start_78_pickup_02.wav</span><div class="wf" style="height:22px;color:var(--c-hfx)"></div><span class="mono" style="font-size:9.5px;color:var(--td)">replaced placeholder · Starter: Engine start</span></div>
+        <div style="display:flex;gap:4px"><button class="key on" style="flex:1">Replace ▾</button><button class="key">Revert</button><button class="key">Perform</button></div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:2px"><span class="lbl" style="color:var(--ai)">AI proposals · 2</span><button class="key" style="margin-left:auto;height:20px;font-size:10px">Run AI</button></div>
+        <sc-for list="{{aiProps}}" as="a" hint-placeholder-count="2">
+          <div style="border:1px dashed var(--ai);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px;background:color-mix(in srgb,var(--ai) 6%,transparent)"><span style="font:500 11.5px/1.35 Inter;color:#F4F7FB">{{a.t}}</span><span class="mono" style="font-size:9.5px;color:var(--td)">{{a.d}}</span><div style="display:flex;gap:4px"><button class="key" style="height:20px;font-size:10px;flex:1">Accept</button><button class="key" style="height:20px;font-size:10px;flex:1">Reject</button></div></div>
+        </sc-for>
+      </sc-if>
+
+      <sc-if value="{{inspPerform}}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;align-items:center;gap:6px"><span class="ro" style="font-size:12px;padding:3px 7px">FS-009</span><span class="pill" style="background:color-mix(in srgb,var(--c-foot) 22%,transparent);color:var(--c-foot)">Footsteps</span><span class="pill">Repeated</span></div>
+        <span style="font:500 12px/1.4 Inter;color:#D6DCE6">Mara walks the shoulder, boots on gravel</span>
+        <div style="background:var(--rbg);border-radius:8px;padding:10px;box-shadow:0 0 0 1px rgba(244,63,94,.5) inset,0 0 18px rgba(244,63,94,.18);display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px"><span class="led" style="background:var(--rec);box-shadow:0 0 8px var(--rec)"></span><span class="lbl" style="color:#F4F7FB">Performing · pass 3</span><span class="mono" style="margin-left:auto;font-size:12px;color:var(--ro)">00:00:07:16</span></div>
+          <div style="display:flex;gap:2px;height:16px;align-items:flex-end"><sc-for list="{{hits}}" as="h" hint-placeholder-count="14"><span style="{{h}}"></span></sc-for></div>
+          <div style="display:flex;gap:4px"><button class="key fill" style="flex:1;height:28px">Commit</button><button class="key" style="flex:1;height:28px">Cancel</button></div>
+        </div>
+        <span class="lbl">Takes</span>
+        <sc-for list="{{takes}}" as="t" hint-placeholder-count="3">
+          <div style="{{t.row}}"><span class="ro" style="font-size:10px;padding:2px 5px">{{t.n}}</span><span style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font:500 11.5px Inter;color:#F4F7FB">{{t.t}}</span><span class="mono" style="font-size:9.5px;color:var(--td)">{{t.d}}</span></span><span class="lbl" style="{{t.bc}}">{{t.b}}</span></div>
+        </sc-for>
+        <div style="display:flex;gap:4px"><button class="key" style="flex:1"><span class="led" style="background:var(--rec)"></span>Record mic</button><button class="key" style="flex:1">Add take…</button></div>
+        <div class="fld" style="justify-content:space-between"><span>Input</span><span class="mono" style="font-size:10.5px;color:var(--td)">Babyface In 1 · −18 dB</span></div>
+      </sc-if>
+
+      <sc-if value="{{inspTrack}}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;align-items:center;gap:8px"><span style="width:14px;height:14px;border-radius:4px;background:var(--c-foot);box-shadow:0 0 0 1px var(--hl2)"></span><span style="font:600 15px Inter;color:#F4F7FB">Feet</span><span class="ro" style="font-size:10px;padding:2px 5px;margin-left:auto">01</span></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="lbl">Folder</span><div class="fld">FOLEY /</div></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><span class="lbl">Bus</span><div class="fld">FOLEY stem</div></div>
+        </div>
+        <div style="display:flex;gap:16px;align-items:center;justify-content:center;padding:6px 0">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:5px"><span style="width:44px;height:44px;border-radius:50%;position:relative;background:conic-gradient(from -135deg,var(--accent) 0 168deg,rgba(255,255,255,.08) 168deg 270deg,transparent 270deg)"><span style="position:absolute;inset:4px;border-radius:50%;background:#161922;box-shadow:0 1px 0 rgba(255,255,255,.06) inset"></span></span><span class="lbl">Gain</span><span class="ro" style="font-size:11px;padding:2px 6px">−4.0 dB</span></div>
+          <div style="display:flex;flex-direction:column;align-items:center;gap:5px"><span style="width:44px;height:44px;border-radius:50%;position:relative;background:conic-gradient(from -135deg,var(--accent) 0 135deg,rgba(255,255,255,.08) 135deg 270deg,transparent 270deg)"><span style="position:absolute;inset:4px;border-radius:50%;background:#161922"></span></span><span class="lbl">Pan</span><span class="ro" style="font-size:11px;padding:2px 6px">C</span></div>
+          <div style="display:flex;flex-direction:column;gap:4px"><button class="key" style="width:30px">M</button><button class="key" style="width:30px">S</button></div>
+        </div>
+        <span class="lbl">Inserts</span>
+        <sc-for list="{{inserts}}" as="i" hint-placeholder-count="3"><div class="fld" style="height:28px"><span class="led" style="{{i.led}}"></span><span class="mono" style="font-size:10px;color:var(--td)">{{i.n}}</span><span style="flex:1;{{i.c}}">{{i.t}}</span><span style="color:var(--td);font-size:11px">⋮⋮</span></div></sc-for>
+        <button class="key" style="height:26px">+ Add insert</button>
+        <span class="lbl">Automation lanes</span>
+        <sc-for list="{{autoLanes}}" as="a" hint-placeholder-count="3"><div style="display:flex;align-items:center;gap:8px;font:500 11.5px Inter;color:#D6DCE6"><span class="led" style="{{a.led}}"></span><span style="flex:1">{{a.t}}</span><span class="pill">{{a.m}}</span></div></sc-for>
+        <div style="display:flex;gap:3px"><button class="key">R</button><button class="key on" aria-pressed="true">T</button><button class="key">L</button><button class="key">W</button><span class="lbl" style="margin-left:auto;align-self:center">Mode</span></div>
+      </sc-if>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 4. BOTTOM DECK ============ -->
+<div class="panel" style="{{deckSt}}">
+  <div role="tablist" style="display:flex;gap:2px;padding:2px 6px;height:28px;box-sizing:border-box;align-items:center;flex:none">
+    <sc-for list="{{deckTabs}}" as="t" hint-placeholder-count="4"><button class="{{t.cls}}" role="tab" aria-selected="{{t.on}}" style="height:22px">{{t.label}}</button></sc-for>
+    <span class="mono" style="margin-left:auto;font-size:10px;color:var(--td)">{{deckInfo}}</span>
+    <button class="key" aria-label="Collapse deck" style="height:20px;width:24px;padding:0;margin-left:8px">▾</button>
+  </div>
+
+  <sc-if value="{{deckPads}}" hint-placeholder-val="{{ true }}">
+    <div style="flex:1;min-height:0;display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;padding:0 8px 8px">
+      <sc-for list="{{pads}}" as="p" hint-placeholder-count="8">
+        <button style="{{p.st}}"><span style="{{p.bar}}"></span><span style="display:flex;justify-content:space-between;align-items:flex-start;width:100%"><span style="font:700 26px/1 'Barlow Condensed';color:#F4F7FB">{{p.k}}</span><span class="lbl" style="{{p.tagSt}}">{{p.tag}}</span></span><span style="font:600 12px/1.25 Inter;color:#F4F7FB;text-align:left">{{p.name}}</span><span class="lbl" style="text-align:left">{{p.sub}}</span></button>
+      </sc-for>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{deckLib}}" hint-placeholder-val="{{ false }}">
+    <div style="flex:1;min-height:0;display:flex;gap:12px;padding:0 10px 10px">
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:8px">
+        <div style="flex:1;position:relative;background:var(--s0);border:1px solid var(--hl);border-radius:8px;display:flex;align-items:center;gap:2px;padding:0 10px;overflow:hidden">
+          <sc-for list="{{bigWave}}" as="w" hint-placeholder-count="40"><span style="{{w}}"></span></sc-for>
+          <span style="position:absolute;top:0;bottom:0;left:31%;width:1.5px;background:var(--phd);box-shadow:0 0 8px var(--phg)"></span>
+        </div>
+        <div style="display:flex;gap:4px;align-items:center"><button class="key on" aria-pressed="true"><svg width="10" height="10" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M3.5 2l8.5 5-8.5 5z"/></svg>Audition</button><button class="key">Stop</button><button class="key">Loop</button><span class="ro" style="font-size:11px;padding:4px 8px;margin-left:6px">00:00:01:08 / 00:00:04:11</span><span class="lbl" style="margin-left:auto">Drag onto a cue or track</span></div>
+      </div>
+      <div style="width:280px;flex:none;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;align-content:start;font:500 11.5px Inter;padding-top:2px">
+        <span class="lbl">File</span><span class="mono" style="font-size:11px;color:#F4F7FB">{{libFile}}</span>
+        <span class="lbl">Pack</span><span>{{libPack}}</span>
+        <span class="lbl">License</span><span>{{libLic}}</span>
+        <span class="lbl">Format</span><span class="mono" style="font-size:11px">48 kHz · 24 bit · {{libCh}}</span>
+        <span class="lbl">Length</span><span class="mono" style="font-size:11px">00:00:04:11</span>
+        <span class="lbl">Used by</span><span>{{libUsed}}</span>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{deckMixer}}" hint-placeholder-val="{{ false }}">
+    <div style="flex:1;min-height:0;display:flex;gap:6px;padding:0 8px 8px;overflow:hidden">
+      <sc-for list="{{strips}}" as="s" hint-placeholder-count="12">
+        <div style="{{s.st}}">
+          <span style="{{s.plate}}"></span>
+          <span style="font:600 11px/1 Inter;color:#F4F7FB;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%">{{s.name}}</span>
+          <div style="display:flex;gap:3px"><sc-for list="{{s.ins}}" as="i" hint-placeholder-count="3"><span class="led" style="{{i}}"></span></sc-for></div>
+          <span style="{{s.knob}}"><span style="position:absolute;inset:3px;border-radius:50%;background:#161922"></span></span>
+          <div style="flex:1;width:100%;display:flex;justify-content:center;gap:6px;min-height:0">
+            <div style="display:flex;flex-direction:column;justify-content:space-between;font:500 8px/1 'JetBrains Mono';color:var(--tf);text-align:right"><span>+6</span><span>0</span><span>-12</span><span>-24</span><span>-∞</span></div>
+            <div style="width:6px;border-radius:3px;background:var(--rbg);position:relative;box-shadow:0 0 0 1px rgba(255,255,255,.05)"><span style="{{s.cap}}"></span></div>
+            <div style="display:flex;gap:2px"><div style="width:4px;border-radius:2px;position:relative;overflow:hidden;background:linear-gradient(0deg,var(--mg) 0 68%,var(--ma) 68% 86%,var(--mr) 86%)"><span style="{{s.mL}}"></span></div><div style="width:4px;border-radius:2px;position:relative;overflow:hidden;background:linear-gradient(0deg,var(--mg) 0 68%,var(--ma) 68% 86%,var(--mr) 86%)"><span style="{{s.mR}}"></span></div></div>
+          </div>
+          <span class="ro" style="font-size:10px;padding:2px 5px">{{s.db}}</span>
+          <div style="display:flex;gap:2px"><button class="key" style="{{s.mSt}}">M</button><button class="key" style="{{s.sSt}}">S</button><button class="key" style="height:18px;width:18px;padding:0;font-size:9.5px">{{s.mode}}</button></div>
+        </div>
+      </sc-for>
+    </div>
+  </sc-if>
+</div>
+
+<!-- ============ 5. STATUS STRIP ============ -->
+<div style="height:20px;flex:none;display:flex;align-items:center;gap:16px;padding:0 6px;font:400 11px/1 'JetBrains Mono',monospace;color:#8A94A6">
+  <span>48 kHz</span><span>24 fps</span><span>CPU 18%</span><span>RAM 2.1 GB</span><span>DISK 7%</span>
+  <button style="background:none;border:0;padding:0;cursor:pointer;color:#D6DCE6;font:inherit">RME Babyface Pro · 256</button>
+  <span style="display:flex;align-items:center;gap:6px">MIDI<span class="led" style="background:var(--ok);box-shadow:0 0 6px var(--ok)"></span></span>
+  <span style="margin-left:auto">Saved 12 s ago</span>
+  <span class="pill" style="background:var(--as);color:var(--tb);font-family:Inter">Update 2.4.1</span>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#5B8CFF","options":["#5B8CFF","#22D3EE","#A78BFA","#FFB547"],"section":"Theme"},"readout":{"editor":"color","default":"#7CF5D8","options":["#7CF5D8","#9BF07A","#FFC266","#C7D2FE"],"section":"Theme"},"stage":{"editor":"enum","options":["prep","spot","build","perform","mix","deliver"],"default":"spot","section":"Theme"},"$preview":{"width":1680,"height":1050}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const st = (this.state && this.state.stage) || this.props.stage || 'spot';
+    const accent = this.props.accent ?? '#5B8CFF';
+    const ro = this.props.readout ?? '#7CF5D8';
+    const ai = accent.toUpperCase() === '#22D3EE' ? '#F0ABFC' : '#22D3EE';
+    const T = 150, pc = s => (s / T * 100).toFixed(3) + '%';
+    const CFG = {
+      prep:    { rack:'Scenes', insp:'project', ik:'Project', deck:'Library browser', dh:200, pic:300, mk:'thin', open:[] },
+      spot:    { rack:'Markers', insp:'marker', ik:'Marker', deck:'Pads', dh:150, pic:320, mk:'full', open:[] },
+      build:   { rack:'Library', insp:'cue', ik:'Cue', deck:'Library browser', dh:200, pic:170, mk:'thin', open:['FOLEY','FX'] },
+      perform: { rack:'Identities', insp:'perform', ik:'Cue · Perform', deck:'Pads', dh:170, pic:300, mk:'thin', open:['FOLEY'] },
+      mix:     { rack:'Scenes', insp:'track', ik:'Track', deck:'Mixer', dh:250, pic:0, mk:'hidden', open:['FOLEY','FX'] },
+      deliver: { rack:'Scenes', insp:'project', ik:'Project', deck:'Log', dh:28, pic:0, mk:'hidden', open:[] }
+    }[st];
+    const tabs = (list, cur) => list.map(l => ({ label:l, cls: l===cur ? 'tab on' : 'tab', on: l===cur ? 'true' : 'false' }));
+    const STG = [['prep','Prep'],['spot','Spot'],['build','Build'],['perform','Perform'],['mix','Mix'],['deliver','Deliver']];
+    const stages = STG.map(([k,l]) => ({ label:l, cls: k===st ? 'key on' : 'key', pressed: k===st ? 'true':'false',
+      led: k==='prep' ? 'background:var(--ok);box-shadow:0 0 7px var(--ok)' : (k===st ? 'background:var(--accent);box-shadow:0 0 7px var(--ag)' : ''),
+      pick: () => this.setState({ stage:k }) }));
+    const playing = st==='spot' || st==='perform';
+    const recording = st==='perform';
+    const seg = (lit, pk) => Array.from({length:30}, (_,i) => { const c = i<20?'var(--mg)':i<26?'var(--ma)':'var(--mr)'; const on = i<lit || i===pk;
+      return `width:6px;height:9px;border-radius:1.5px;background:${on?c:'rgba(255,255,255,.06)'};${on?`box-shadow:0 0 5px ${c}`:''}`; });
+    const lvl = playing ? [21,24,19,23] : st==='mix' ? [22,25,21,24] : [0,-1,0,-1];
+
+    // marker lanes
+    const sel = { spot:'FS-009', build:'HF-007', perform:'FS-009' }[st] || '';
+    const LANES = [
+      ['foot','Footsteps','F',[[8,22,'FS-001',10],[96,118,'FS-009',14]]],
+      ['prop','Props','P',[[24,null,'PR-002'],[27,28.5,'PR-003'],[101,null,'PR-010']]],
+      ['hfx','Hard FX','G',[[31,null,'HF-004'],[36,41,'HF-007'],[124,null,'HF-011',0,1]]],
+      ['bg','Backgrounds','B',[[0.4,71.6,'BG-005'],[72.4,149.6,'BG-006']]],
+      ['dfx','Design FX','D',[[74,77,'DS-008']]],
+      ['dlg','Dialogue notes','N',[[55,null,'DN-013',0,1]]],
+      ['mus','Music','M',[[80,140,'MU-012']]]
+    ];
+    const full = CFG.mk==='full';
+    const lanes = CFG.mk==='hidden' ? [] : LANES.map(([k,name,key,ms]) => {
+      const col = `var(--c-${k})`;
+      return { name, key, h:`height:${full?26:10}px`, stripe:`background:${col}`, showLabel: full,
+        markers: ms.map(([s,e,id,taps,unc]) => {
+          const glow = id===sel ? 'box-shadow:0 0 0 1.5px var(--accent),0 0 12px var(--ag);' : '';
+          if (e==null) return { pt:true, rng:false, wrap:`position:absolute;top:0;bottom:0;left:${pc(s)};width:0`,
+            stem:`position:absolute;left:-1.5px;top:${full?5:1}px;bottom:${full?3:1}px;width:3px;border-radius:2px;${unc?`background:repeating-linear-gradient(180deg,${col} 0 3px,transparent 3px 5px);opacity:.75;`:`background:${col};`}${glow}`,
+            cap: full ? `position:absolute;left:-5.5px;top:0;width:0;height:0;border-left:5.5px solid transparent;border-right:5.5px solid transparent;border-top:6px solid ${col};${unc?'opacity:.75':''}` : 'display:none' };
+          const ticks = taps ? `repeating-linear-gradient(90deg,rgba(4,7,10,.55) 0 1px,transparent 1px ${(100/taps).toFixed(2)}%),` : '';
+          const bg = unc ? `color-mix(in srgb,${col} 22%,transparent)` : `${ticks}color-mix(in srgb,${col} 80%,transparent)`;
+          return { pt:false, rng:true, label: full ? id : '',
+            bar:`position:absolute;top:${full?4:2}px;bottom:${full?4:2}px;left:${pc(s)};width:${pc(e-s)};border-radius:${full?5:3}px;background:${bg};${unc?`outline:1px dashed ${col};outline-offset:-1px;opacity:.75;`:''}${glow}font:600 9px/18px 'JetBrains Mono',monospace;color:#05070A;padding-left:5px;overflow:hidden;white-space:nowrap;box-sizing:border-box` };
+        }) };
+    });
+
+    // tracks
+    const TR = [
+      { f:'FOLEY', t:[{n:1,name:'Feet',bus:'FOLEY stem',c:'foot',db:'−4.0',v:.62,p:.5,m:72,clips:[[8,22,'FS-001 gravel steps'],[96,118,'FS-009 gravel steps']]},
+                      {n:2,name:'Props',bus:'FOLEY stem',c:'prop',db:'−6.5',v:.55,p:.4,m:48,clips:[[24,25.6,'PR-002 keys'],[27,28.5,'PR-003 door'],[101,102.4,'PR-010 click',1]]}]},
+      { f:'FX', t:[{n:3,name:'Hard FX',bus:'FX stem',c:'hfx',db:'−2.0',v:.7,p:.5,m:30,clips:[[31,32.8,'HF-004 slam',1],[36,41,'HF-007 engine start']]},
+                   {n:4,name:'Design FX',bus:'FX stem',c:'dfx',db:'−8.0',v:.48,p:.6,m:12,clips:[[74,77,'DS-008 sweep']]}]},
+      { f:'BG', t:[{n:5,name:'BG A',bus:'BG stem',c:'bg',db:'−12.0',v:.42,p:.5,m:40,clips:[[0,72,'BG-005 diner exterior']]},
+                   {n:6,name:'BG B',bus:'BG stem',c:'bg',db:'−12.0',v:.42,p:.5,m:36,clips:[[72,150,'BG-006 night crickets · offline',0,1]]}]},
+      { f:'MUSIC', t:[{n:7,name:'Score',bus:'MX stem',c:'mus',db:'−3.0',v:.66,p:.5,m:58,clips:[[80,140,'MU-012 1M2 Headlights']]}]}
+    ];
+    const knob = (v,sz) => `width:${sz}px;height:${sz}px;border-radius:50%;position:relative;flex:none;background:conic-gradient(from -135deg,var(--accent) 0 ${Math.round(v*270)}deg,rgba(255,255,255,.08) ${Math.round(v*270)}deg 270deg,transparent 270deg)`;
+    const clip = (c, [s,e,nm,ph,off], thin) => {
+      const col = ph ? 'var(--ph)' : `var(--c-${c})`;
+      const isSel = nm.split(' ')[0]===sel;
+      return { name: nm, sel: isSel && !thin, st:`position:absolute;top:${thin?3:4}px;bottom:${thin?3:4}px;left:${pc(s)};width:${pc(e-s)};border-radius:${thin?3:5}px;box-sizing:border-box;overflow:hidden;display:flex;flex-direction:column;color:${col};background:color-mix(in srgb,${col} 18%,#0D0F14);border:1px ${ph||off?'dashed':'solid'} color-mix(in srgb,${col} ${ph?85:55}%,transparent);${off?'opacity:.5;':''}${isSel?'box-shadow:0 0 0 1.5px var(--accent),0 0 14px var(--ag);':''}` };
+    };
+    const key22 = (on, c) => `height:20px;width:22px;padding:0;font-size:10px;${on?`background:${c};color:#05070A;border-color:transparent`:''}`;
+    const rows = [];
+    if (CFG.insp !== 'project' || st==='prep') TR.forEach(g => {
+      const isOpen = CFG.open.includes(g.f);
+      const n = g.t.reduce((a,t) => a + t.clips.length, 0);
+      rows.push({ folder:true, name:g.f, chev: isOpen?'▾':'▸', count: isOpen ? '' : n + ' clips', clips: isOpen ? [] : g.t.flatMap(t => t.clips.map(cl => clip(t.c, cl, true))) });
+      if (isOpen) g.t.forEach(t => {
+        const a = st==='mix' && t.n===1;
+        rows.push({ track:true, num:String(t.n).padStart(2,'0'), name:t.name, busName:t.bus, stripe:`background:var(--c-${t.c})`, db:t.db,
+          vol:knob(t.v,20), pan:knob(t.p,20), meter:`position:absolute;left:0;right:0;top:0;height:${playing||st==='mix'?100-t.m:100}%;background:#0B0D12`,
+          mSt:key22(t.n===4 && st==='mix','var(--mute)'), sSt:key22(false,'var(--solo)'), aCls: a?'key on':'key', mode: a?'T':'R', clips: t.clips.map(cl => clip(t.c, cl, false)) });
+        if (a) rows.push({ auto:true });
+      });
+    });
+    if (st==='mix') [['FOLEY stem','−1.5','var(--c-foot)'],['FX stem','0.0','var(--c-hfx)'],['BG stem','−3.0','var(--c-bg)'],['MX stem','−2.0','var(--c-mus)'],['MASTER','0.0','var(--accent)']]
+      .forEach(([nm,db,c]) => rows.push({ bus:true, name:nm, db, dot:`width:8px;height:8px;border-radius:2px;background:${c}` }));
+    const AP = [[0,.6],[60,.6],[62,.34],[70,.34],[72,.6],[95,.6],[96.5,.78],[118,.78],[120,.6],[150,.6]];
+    const autoPts = AP.map(([s,v]) => `${(s/T*1000).toFixed(1)},${(44-v*40).toFixed(1)}`).join(' ');
+    const autoDots = AP.map(([s,v]) => `position:absolute;left:calc(${pc(s)} - 3px);top:${(44-v*40-3).toFixed(1)}px;width:6px;height:6px;border-radius:50%;background:#0D0F14;border:1.5px solid #4ADE80;box-sizing:border-box`);
+
+    const ticks = [0,20,40,60,80,100,120,140].map(s => ({ l:`01:0${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}:00`, st:`position:absolute;left:${pc(s)};top:0;height:22px;border-left:1px solid rgba(255,255,255,.22);padding-left:4px;font:500 9.5px/18px 'JetBrains Mono',monospace;color:#8A94A6;white-space:nowrap` }));
+    const sceneBlocks = [[0,72,'SC 1','Diner lot, dusk'],[72,150,'SC 2','Gravel road, night']].map(([s,e,n,t]) => ({ n, t, st:`position:absolute;top:3px;bottom:3px;left:calc(${pc(s)} + 1px);width:calc(${pc(e-s)} - 2px);border-radius:5px;background:rgba(255,255,255,.06);box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);display:flex;align-items:center;gap:7px;padding:0 8px;box-sizing:border-box` }));
+    const flags = [[48,'PIC v3 · shot 14 trimmed +6 fr','var(--flag)'],[80,'Score 1M2 in','var(--c-mus)']].map(([s,t,c]) => ({ t, st:`position:absolute;left:${pc(s)};top:0;bottom:0;display:flex;align-items:center;gap:5px`, pole:`width:8px;height:12px;background:${c};clip-path:polygon(0 0,100% 25%,0 50%);border-left:1.5px solid ${c}` }));
+
+    // rack
+    const chip = (l,c) => ({ l, st:`background:color-mix(in srgb,var(--c-${c}) 16%,transparent);color:var(--c-${c})` });
+    const scenes = [
+      { num:'SC 1', title:'Diner lot, dusk', cues:'6 cues', tc:'01:00:00:00 – 01:01:12:00', slug:'EXT. DINER LOT – DUSK', action:'Mara crosses the lot, keys in hand, and climbs into the pickup. It coughs to life.', items:[chip('gravel steps','foot'),chip('keys','prop'),chip('truck door','prop'),chip('engine','hfx'),chip('diner ambience','bg')] },
+      { num:'SC 2', title:'Gravel road, night', cues:'5 cues', tc:'01:01:12:00 – 01:02:30:00', slug:'EXT. GRAVEL ROAD – NIGHT', action:'Headlights sweep the ditch. Mara walks the shoulder with a flashlight. A branch snaps.', items:[chip('headlight sweep','dfx'),chip('flashlight','prop'),chip('crickets','bg'),chip('branch snap','hfx'),chip('1M2','mus')] }
+    ];
+    const idRow = (name,n,file,c,warn) => ({ name, n, file, st:'background:#0D0F14;border:1px solid rgba(255,255,255,.07);border-radius:7px;padding:7px 8px;display:flex;flex-direction:column;gap:4px;margin-left:12px', snd:`font-size:9.5px;color:${warn?'var(--err)':'var(--td)'}` });
+    const idents = [
+      { cat:'Footsteps', dot:'width:8px;height:8px;border-radius:2px;background:var(--c-foot)', items:[idRow('Mara · boots on gravel','2 cues','gravel_boot_walk_03.wav')] },
+      { cat:'Props', dot:'width:8px;height:8px;border-radius:2px;background:var(--c-prop)', items:[idRow('Truck keys','1 cue','keys_ring_jingle_01.wav'),idRow('Pickup door','1 cue','door_truck_open_04.wav'),idRow('Flashlight','1 cue','placeholder · Starter click')] },
+      { cat:'Hard FX', dot:'width:8px;height:8px;border-radius:2px;background:var(--c-hfx)', items:[idRow("Pickup engine '78",'1 cue','engine_start_78_pickup_02.wav')] },
+      { cat:'Backgrounds', dot:'width:8px;height:8px;border-radius:2px;background:var(--c-bg)', items:[idRow('Night road','1 cue','crickets_night_02.wav · missing',0,1)] }
+    ];
+    const libRes = [["engine_start_78_pickup_02.wav",'00:00:04:11 · 48k · mono · Vehicles',1],['engine_start_V8_cold_01.wav','00:00:06:02 · 48k · stereo · Vehicles'],['engine_crank_fail_03.wav','00:00:03:20 · 48k · mono · Vehicles'],['starter_whine_short.wav','00:00:01:14 · 48k · mono · Starter'],['engine_idle_rough_loop.wav','00:00:12:00 · 48k · stereo · Vehicles'],['truck_ignition_click.wav','00:00:00:18 · 48k · mono · Starter']]
+      .map(([name,meta,on]) => ({ name, meta, st:`display:flex;gap:8px;align-items:center;padding:7px;border-radius:8px;${on?'background:var(--as);box-shadow:0 0 0 1px var(--accent) inset':'background:#0D0F14;box-shadow:0 0 0 1px rgba(255,255,255,.06) inset'}` }));
+    const laneList = LANES.map(([k,name,key,ms]) => ({ name, key, count:String(ms.length), sw:`width:10px;height:10px;border-radius:3px;background:var(--c-${k})` }));
+    const mkAll = []; LANES.forEach(([k,,,ms]) => ms.forEach(m => mkAll.push([m[0],m[2],k,m[4]])));
+    mkAll.sort((a,b) => a[0]-b[0]);
+    const tc = s => { const f = Math.round((s%1)*24); return `01:0${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}:${String(f).padStart(2,'0')}`; };
+    const mkList = mkAll.map(([s,id,k,unc]) => ({ id, tc:tc(s), state: unc?'UNCUED':'CUE',
+      row:`display:flex;align-items:center;gap:7px;height:20px;padding:0 4px;border-radius:5px;${id===sel?'background:var(--as);box-shadow:0 0 0 1px var(--accent) inset':''}`,
+      dot:`width:7px;height:7px;border-radius:50%;flex:none;background:var(--c-${k});${unc?'opacity:.6':''}`,
+      badge:`font:600 9.5px/1 'Barlow Condensed';letter-spacing:.1em;color:${unc?'var(--warn)':'var(--td)'}` }));
+
+    // deck
+    const padSt = (c, hit, open) => `position:relative;overflow:hidden;border-radius:10px;border:1px solid rgba(255,255,255,.13);padding:12px 12px 10px;display:flex;flex-direction:column;gap:6px;align-items:flex-start;cursor:pointer;background:${hit?`color-mix(in srgb,${c} 32%,rgba(32,36,47,.9))`:'rgba(32,36,47,.9)'};box-shadow:${open?'0 0 0 1.5px var(--accent) inset,0 0 18px var(--ag)':hit?`0 0 22px color-mix(in srgb,${c} 45%,transparent)`:'0 1px 0 rgba(255,255,255,.08) inset'};transition:background 120ms`;
+    const pad = (k,name,sub,c,hit,open,tag) => ({ k, name, sub, tag: tag||'', tagSt:`color:${open?'var(--accent)':'var(--td)'}`, st:padSt(c,hit,open), bar:`position:absolute;left:0;right:0;top:0;height:3px;background:${c}` });
+    const pads = st==='perform'
+      ? [pad('J','Gravel step L','Feet','var(--c-foot)'),pad('K','Gravel step R','Feet','var(--c-foot)',1,0,'HIT'),pad('L','Heel scuff','Feet','var(--c-foot)'),pad(';','Boot stop','Feet','var(--c-foot)'),
+         pad('U','Pebble kick','Props','var(--c-prop)'),pad('I','Jacket rustle','Props','var(--c-prop)'),pad('O','Flashlight click','Props','var(--c-prop)'),pad('P','Keys jingle','Props','var(--c-prop)')]
+      : [pad('F','Footsteps','Repeated','var(--c-foot)',0,1,'OPEN'),pad('P','Props','Point','var(--c-prop)'),pad('G','Hard FX','Hit','var(--c-hfx)'),pad('B','Backgrounds','Range','var(--c-bg)',0,1,'OPEN'),
+         pad('D','Design FX','Range','var(--c-dfx)'),pad('N','Dialogue note','Point','var(--c-dlg)'),pad('M','Music','Range','var(--c-mus)'),pad('⏎','Close range','Shift+key also closes','var(--accent)')];
+    const bigWave = Array.from({length:150}, (_,i) => {
+      const h = st==='build' ? (i<18 ? 6+i*3.6 : 22+52*Math.exp(-(i-30)/50)*(0.65+0.35*Math.abs(Math.sin(i*1.3)))) : 6 + 78*Math.exp(-Math.pow((i%14)-2,2)/2.4)*(0.55+0.45*Math.abs(Math.sin(i*.7)));
+      return `flex:1;min-width:1px;height:${Math.min(92,h).toFixed(0)}%;border-radius:1px;background:${i<46?'var(--ro)':(st==='build'?'var(--c-hfx)':'var(--c-foot)')};opacity:${i<46?.95:.75}`;
+    });
+    const strip = (name,c,v,p,m,db,opts) => {
+      const o = opts || {};
+      return { name, db, mode: o.mode || 'R',
+        st:`width:${o.master?104:80}px;flex:none;border-radius:9px;padding:8px 6px;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;gap:6px;background:rgba(13,15,20,.7);${o.master?'box-shadow:0 0 0 1.5px var(--accent) inset,0 0 18px var(--ag)':'box-shadow:0 0 0 1px rgba(255,255,255,.07) inset'}`,
+        plate:`width:100%;height:3px;border-radius:2px;background:${c};box-shadow:0 0 8px ${c}`,
+        ins:[0,1,2].map(i => i < (o.ins||0) ? 'background:var(--accent);box-shadow:0 0 6px var(--ag)' : (i===o.byp ? 'background:var(--warn)' : '')),
+        knob:knob(p,22), cap:`position:absolute;left:-11px;top:calc(${((1-v)*100).toFixed(0)}% - 7px);width:28px;height:14px;border-radius:4px;background:linear-gradient(180deg,#3a4152,#232835);box-shadow:0 1px 0 rgba(255,255,255,.15) inset,0 2px 6px rgba(0,0,0,.6);${o.touch?'border-left:2px solid var(--accent);border-right:2px solid var(--accent);box-sizing:border-box':''}`,
+        mL:`position:absolute;left:0;right:0;top:0;height:${100-m}%;background:#0B0D12`, mR:`position:absolute;left:0;right:0;top:0;height:${100-m+4}%;background:#0B0D12`,
+        mSt:`height:18px;width:18px;padding:0;font-size:9.5px;${o.mute?'background:var(--mute);color:#05070A;border-color:transparent':''}`, sSt:'height:18px;width:18px;padding:0;font-size:9.5px' };
+    };
+    const strips = [strip('Feet','var(--c-foot)',.66,.5,72,'−4.0',{ins:2,mode:'T',touch:1}),strip('Props','var(--c-prop)',.6,.4,48,'−6.5',{ins:1}),strip('Hard FX','var(--c-hfx)',.72,.5,34,'−2.0',{ins:2}),strip('Design FX','var(--c-dfx)',.52,.62,0,'−8.0',{ins:1,mute:1}),
+      strip('BG A','var(--c-bg)',.46,.5,40,'−12.0'),strip('BG B','var(--c-bg)',.46,.5,36,'−12.0',{byp:0}),strip('Score','var(--c-mus)',.68,.5,58,'−3.0'),
+      strip('FOLEY stem','var(--c-foot)',.7,.5,66,'−1.5',{ins:1}),strip('FX stem','var(--c-hfx)',.74,.5,52,'0.0',{ins:1}),strip('BG stem','var(--c-bg)',.66,.5,44,'−3.0'),strip('MX stem','var(--c-mus)',.7,.5,58,'−2.0'),
+      strip('MASTER','var(--accent)',.74,.5,74,'0.0',{master:1,ins:2})];
+
+    const qaRow = (t,d,c,act,on) => ({ t, d, act, dot:`width:8px;height:8px;border-radius:50%;flex:none;background:${c};box-shadow:0 0 6px ${c}`, row:`display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;border:0;cursor:pointer;width:100%;${on?'background:var(--as);box-shadow:0 0 0 1px var(--accent) inset':'background:#0D0F14;box-shadow:0 0 0 1px rgba(255,255,255,.07) inset'}` });
+    const qa = [qaRow('Missing media · crickets_night_02.wav','BG-006 · BG B · 01:01:12:10','var(--err)','Relink',1),qaRow('Uncued marker · HF-011 branch snap','Hard FX lane · 01:02:04:00','var(--warn)','Make cue'),qaRow('Uncued marker · DN-013 dialogue note','Dialogue notes · 01:00:55:00','var(--warn)','Make cue'),qaRow('Placeholder still in place · PR-010','Props · flashlight click · 01:01:41:00','var(--warn)','Select'),qaRow('Clip overlaps · none','All tracks checked','var(--ok)',''),qaRow('Plugins · all available','4 inserts · 2 formats','var(--ok)','')];
+    const opt = (l,on) => ({ l, tick: on?'✓':'', box:`width:15px;height:15px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;${on?'background:var(--accent);color:#05070A':'background:#0D0F14;box-shadow:0 0 0 1px rgba(255,255,255,.13) inset'}` });
+
+    return {
+      accent, ro, ai, stages, playing, stopped: !playing, recording: recording ? 'true':'false',
+      playCls: playing ? 'key on' : 'key',
+      recStyle: `width:40px;height:36px;${recording?'background:color-mix(in srgb,var(--rec) 22%,rgba(32,36,47,.9));box-shadow:0 0 0 1px var(--rec) inset,0 0 16px rgba(244,63,94,.45)':''}`,
+      recDot: `width:12px;height:12px;border-radius:50%;${recording?'background:var(--rec);box-shadow:0 0 10px var(--rec)':'border:1.5px solid var(--rec)'};box-sizing:border-box`,
+      selIO: { build:'IN 01:00:36:00 · OUT 01:00:41:00', mix:'IN 01:01:36:00 · OUT 01:01:58:00' }[st] || 'IN 01:01:36:00 · OUT 01:01:58:00',
+      selDur: st==='build' ? 'DUR 00:00:05:00' : 'DUR 00:00:22:00',
+      peak: playing||st==='mix' ? '−6.2' : '−∞',
+      mL: seg(lvl[0], lvl[1]), mR: seg(lvl[2], lvl[3]),
+      toolSel: st==='mix' ? 'key' : 'key on', toolPen: st==='mix' ? 'key on' : 'key',
+      isSpot: st==='spot', spotOn: st==='spot' ? 'true':'false', spotCls: st==='spot' ? 'key on' : 'key',
+      spotLed: st==='spot' ? 'background:var(--rec);box-shadow:0 0 8px var(--rec)' : '',
+      makeCls: st==='spot' ? 'key on' : 'key',
+      rackTabs: tabs(['Scenes','Identities','Library','Markers'], CFG.rack),
+      rackScenes: CFG.rack==='Scenes', rackIdent: CFG.rack==='Identities', rackLib: CFG.rack==='Library', rackMarkers: CFG.rack==='Markers',
+      scenes, idents, libRes, laneList, mkList,
+      centerTabs: tabs(['Timeline','Cue chart','Mixer','QA & Export'], st==='deliver' ? 'QA & Export' : 'Timeline'),
+      viewInfo: st==='deliver' ? 'Reel 1 · 11 cues · 13 markers' : 'Viewport 01:00:00:00 – 01:02:30:00 · Fit',
+      showPic: CFG.pic > 0, showTimeline: st!=='deliver', showQA: st==='deliver',
+      picWell: `height:${CFG.pic}px;flex:none;position:relative;display:flex;justify-content:center;padding:10px 0;box-sizing:border-box;background:#04070A;border-bottom:1px solid rgba(255,255,255,.13)`,
+      ticks, loopBar:`position:absolute;bottom:0;height:3px;left:${pc(96)};width:${pc(22)};background:var(--accent);box-shadow:0 0 8px var(--ag);border-radius:2px`,
+      sceneBlocks, flags, lanes, mkHidden: CFG.mk==='hidden', rows, autoPts, autoDots,
+      qa, opts:[opt('AAF',1),opt('OTIO',1),opt('Print plugins',1),opt('Include muted tracks',0)],
+      outFiles:[{n:'GravelRoad_R1_v3.aaf',s:'1.2 MB'},{n:'GravelRoad_R1_v3.otio',s:'84 KB'},{n:'R1_FOLEY_stem.wav',s:'82 MB'},{n:'R1_FX_stem.wav',s:'82 MB'},{n:'R1_BG_stem.wav',s:'82 MB'},{n:'R1_MX_stem.wav',s:'82 MB'}],
+      reports:[{t:'Summary',d:'Scenes, cues by status, missing media, inserts and buses.'},{t:'Cue sheet',d:'Every cue with TC in/out, identity, sound, owner and status.'}],
+      inspKind: CFG.ik, inspProject: CFG.insp==='project', inspMarker: CFG.insp==='marker', inspCue: CFG.insp==='cue', inspPerform: CFG.insp==='perform', inspTrack: CFG.insp==='track',
+      isPrep: st==='prep', isDeliver: st==='deliver',
+      prepList:[{t:'Picture',d:'v3 · proxy ready'},{t:'Script breakdown',d:'2 scenes'},{t:'Score',d:'1M2'},{t:'Editor AAF',d:'7 clips · 0 notes'},{t:'Library',d:'Starter + 2 folders'},{t:'Audio & MIDI',d:'Babyface · 1 pad'}],
+      spotKeys:[['F','Footsteps','foot'],['P','Prop','prop'],['G','Hit','hfx'],['B','Ambience','bg'],['D','Design','dfx'],['N','Note','dlg'],['M','Music','mus']].map(([k,l,c]) => ({ k, l, dot:`width:7px;height:7px;border-radius:2px;background:var(--c-${c})` })),
+      aiProps:[{t:'Layer a starter whine under the first 0.4 s',d:'starter_whine_short.wav · −6 dB · confidence 0.82'},{t:'Extend with an idle tail to 01:00:44:00',d:'engine_idle_rough_loop.wav · loop fill'}],
+      hits: Array.from({length:24}, (_,i) => `flex:1;border-radius:1px;height:${[30,90,20,80,25,95,30,70,20,85,35,90,25,75,30,88,20,82,28,92,24,78,30,86][i]}%;background:${i<17?'var(--c-foot)':'rgba(255,255,255,.08)'}`),
+      takes:[{n:'T1',t:'Pads pass · 14 hits',d:'Nov 22 · 00:00:22:00',b:'In use',bc:'color:var(--ok)',row:'display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:8px;background:var(--as);box-shadow:0 0 0 1px var(--accent) inset'},
+             {n:'T2',t:'Mic · shotgun, gravel pit',d:'Nov 22 · 00:00:23:04',b:'Alt',bc:'',row:'display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:8px;background:#0D0F14'},
+             {n:'T3',t:'Pads pass · recording',d:'now · 00:00:07:16',b:'Rec',bc:'color:var(--rec)',row:'display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:8px;background:#0D0F14;box-shadow:0 0 0 1px rgba(244,63,94,.4) inset'}],
+      inserts:[{n:'1',t:'VC EQ-8',c:'',led:'background:var(--accent);box-shadow:0 0 6px var(--ag)'},{n:'2',t:'De-click',c:'',led:'background:var(--accent);box-shadow:0 0 6px var(--ag)'},{n:'3',t:'Room verb · bypassed',c:'color:var(--td)',led:'background:var(--warn)'}],
+      autoLanes:[{t:'Volume',m:'Touch',led:'background:var(--ok)'},{t:'Pan',m:'Read',led:''},{t:'EQ-8 · Band 2 gain',m:'Read',led:''}],
+      deckSt:`height:${CFG.dh}px;flex:none;display:flex;flex-direction:column;border-radius:12px 12px 10px 10px`,
+      deckTabs: tabs(['Pads','Library browser','Mixer','Log'], CFG.deck),
+      deckInfo: { spot:'Spot keys · tap while picture plays', perform:'Performing FS-009 · Shift = accent', build:'Selected result · drag onto HF-007', prep:'Starter library · 1,240 sounds', mix:'7 tracks · 4 stems · master', deliver:'Log · 3 entries since export' }[st],
+      deckPads: CFG.deck==='Pads', deckLib: CFG.deck==='Library browser', deckMixer: CFG.deck==='Mixer',
+      pads, bigWave, strips,
+      libFile: st==='build' ? 'engine_start_78_pickup_02.wav' : 'gravel_boot_walk_03.wav',
+      libPack: st==='build' ? 'Vehicles · Field' : 'Field: Gravel & Dirt',
+      libLic: st==='build' ? 'Owned · in-house recording' : 'Starter library · CC0',
+      libCh: st==='build' ? 'mono' : 'stereo',
+      libUsed: st==='build' ? 'HF-007' : 'FS-001, FS-009'
+    };
+  }
+}
+</script>
+</body>
+</html>
