@@ -1,3 +1,4 @@
+import { sampleAtTc, tcAt } from "../tc";
 import { useMemo, useState } from "react";
 import { call } from "../api";
 import type { EngineHook } from "../store";
@@ -165,6 +166,80 @@ export function QaExport({ eng }: { eng: EngineHook }) {
           <h4>Previous exports</h4>
           {view.exports.map((x) => <div key={x.id} className="small mono">{x.profile} · {x.file_count} files · {x.output_dir}</div>)}
         </div>
+      </div>
+      <Reports eng={eng} />
+    </div>
+  );
+}
+
+interface SceneSummary {
+  scene: string; cues: number; by_status: Record<string, number>; missing_media: string[]; overlaps: string[];
+  ambience_gaps: string[]; muted_tracks: string[]; sync_warnings: string[]; pending_ai: number;
+}
+interface ActiveSound { code: string; identity: string; category: string; description: string; start_tc: string; end_tc: string; tracks: string[] }
+
+/** Reports (spec v2.1 › Screens › Reports): a scene's summary, cue sheets, and what plays at a timecode. */
+function Reports({ eng }: { eng: EngineHook }) {
+  const { view, rate, run, tx } = eng;
+  const [sceneId, setSceneId] = useState(view?.scenes[0]?.id ?? "");
+  const [sum, setSum] = useState<SceneSummary | null>(null);
+  const [tc, setTc] = useState("");
+  const [active, setActive] = useState<ActiveSound[] | null>(null);
+  const [written, setWritten] = useState<string | null>(null);
+  if (!view?.open || !rate) return null;
+  const sc = view.scenes.find((x) => x.id === sceneId);
+  const write = async (ext: "pdf" | "csv" | "json", scope: string) => {
+    const path = `${view.root}/Reports/cue_sheet${scope ? "_sc" + (view.scenes.find((x) => x.id === scope)?.number ?? "") : ""}.${ext}`;
+    if (await run("report.write", { path, scene_id: scope || undefined }, `Cue sheet written (${ext.toUpperCase()})`)) setWritten(path);
+  };
+  const list = (label: string, items: string[]) => items.length > 0 && (
+    <div className="rep-list"><span className="label">{label} · {items.length}</span>{items.map((x) => <div key={x} className="small">{x}</div>)}</div>
+  );
+  return (
+    <div className="qa-col reports">
+      <div className="toolbar"><b>Reports</b></div>
+      <div className="form">
+        <h4>Scene summary</h4>
+        <div className="dev-row">
+          <select aria-label="Scene" value={sceneId} onChange={(e) => { setSceneId(e.target.value); setSum(null); }}>
+            {view.scenes.map((x) => <option key={x.id} value={x.id}>Scene {x.number} · {x.title}</option>)}
+          </select>
+          <button disabled={!sc} onClick={async () => setSum(await run<SceneSummary>("report.summary", { scene_id: sceneId }))}>Summarize</button>
+        </div>
+        {sum && (
+          <div className="rep-summary">
+            <div className="rep-status">
+              <span className="pill">{sum.cues} cues</span>
+              {Object.entries(sum.by_status).map(([k, n]) => <span key={k} className="pill">{k.replace(/_/g, " ")} {n}</span>)}
+              {sum.pending_ai > 0 && <span className="pill">{sum.pending_ai} AI pending</span>}
+            </div>
+            {list("Missing media", sum.missing_media)}
+            {list("Overlaps", sum.overlaps)}
+            {list("Ambience gaps", sum.ambience_gaps)}
+            {list("Muted tracks", sum.muted_tracks)}
+            {list("Sync warnings", sum.sync_warnings)}
+            {!sum.missing_media.length && !sum.overlaps.length && !sum.ambience_gaps.length && !sum.sync_warnings.length && <div className="small"><span className="sym ok">✓</span> Nothing to flag.</div>}
+          </div>
+        )}
+        <h4>Cue sheet</h4>
+        <div className="small dim">Every cue with timecode in/out, identity, sound, owner and status{sc ? "; choose the whole project or the scene above" : ""}.</div>
+        <div className="btns">
+          {(["pdf", "csv", "json"] as const).map((ext) => <button key={ext} onClick={() => write(ext, "")}>{ext.toUpperCase()} · project</button>)}
+        </div>
+        {sc && <div className="btns">{(["pdf", "csv", "json"] as const).map((ext) => <button key={ext} onClick={() => write(ext, sceneId)}>{ext.toUpperCase()} · scene {sc.number}</button>)}</div>}
+        {written && <div className="small mono ellipsis" title={written}>→ {written}</div>}
+        <h4>Active at…</h4>
+        <div className="dev-row">
+          <input className="mono" aria-label="Timecode" placeholder={tcAt(rate, tx?.position ?? 0)} value={tc} onChange={(e) => setTc(e.target.value)} onKeyDown={(e) => e.stopPropagation()} />
+          <button onClick={async () => {
+            const s = tc ? sampleAtTc(rate, tc) : tx?.position ?? 0;
+            if (s === null) return eng.toast("Not a timecode", "error");
+            setActive(await run<ActiveSound[]>("report.active_at", { sample: s }));
+          }}>Report</button>
+        </div>
+        {active && (active.length ? active.map((a) => (
+          <div key={a.code} className="small rep-active"><span className="code">{a.code}</span> {a.identity || a.description} <span className="dim">{a.start_tc}–{a.end_tc} · {a.category}</span></div>
+        )) : <div className="small dim">Nothing plays there.</div>)}
       </div>
     </div>
   );

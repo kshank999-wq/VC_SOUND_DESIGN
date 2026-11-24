@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { call, isTauri, openMixerWindow } from "./api";
-import { useEngine, type EngineHook } from "./store";
-import type { Asset, EventType, Selection } from "./types";
+import { useEngine } from "./store";
+import type { Asset, Selection } from "./types";
 import { tcAt } from "./tc";
 import { Timeline, zoomToRange, type Viewport } from "./components/Timeline";
 import { Viewer } from "./components/Viewer";
@@ -18,6 +18,8 @@ import { Key, StatusStrip, TopDeck, Toolbar } from "./components/Shell";
 import { getLayout, resetLayout, saveLayout } from "./layout";
 import { DEFAULTS, LIMITS } from "./layoutModel";
 import { toolForKey, type Tool } from "./tools";
+import { applyTheme, pushRecent, theme as themeOf, type Theme } from "./theme";
+import { PreferencesDialog, type PrefsTab } from "./components/Preferences";
 import { STAGE_LIMITS, stageForKey, stageLayout, type CenterTab, type DeckTab, type LeftTab, type Stage, type StageLayout } from "./stage";
 
 /** Width of the timeline's track-header column (for zoom-to-fit). */
@@ -57,7 +59,23 @@ export function App() {
   const [perform, setPerform] = useState<string | null>(null);
   const [devices, setDevices] = useState(false);
   const [plugins, setPlugins] = useState(false);
-  const [bindings, setBindings] = useState(false);
+  const [prefs, setPrefs] = useState<PrefsTab | null>(null);
+  const [thm, setThm] = useState<Theme>(() => themeOf(L0.theme));
+  const setTheme = (t: Theme) => {
+    setThm(t);
+    applyTheme(t);
+    saveLayout({ theme: t });
+  };
+  // narrow windows (< 1280 px): rack as an icon rail + drawer, inspector as an overlay sheet
+  const [winW, setWinW] = useState(window.innerWidth);
+  useEffect(() => {
+    const on = () => setWinW(window.innerWidth);
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
+  const narrow = winW < 1280;
+  const [rackOpen, setRackOpen] = useState(false);
+  const [inspOpen, setInspOpen] = useState(false);
   const [mixerDetached, setMixerDetached] = useState(() => mixerWasDetached() && isTauri);
   const updates = useUpdates(eng);
   const [showUpdates, setShowUpdates] = useState(false);
@@ -76,6 +94,15 @@ export function App() {
     else if (sc) setVp(zoomToRange(rate, sc.start_sample, sc.end_sample, timelineWidth()));
     setSel(null);
   }, [view?.open, view?.root, rate]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // the recent-projects list (Welcome screen)
+  useEffect(() => {
+    if (view?.open && view.root) saveLayout({ recent: pushRecent(getLayout().recent, { path: view.root, name: view.project.name, at: Date.now() }) });
+  }, [view?.open, view?.root]); // eslint-disable-line react-hooks/exhaustive-deps
+  // a selection opens the inspector sheet in a narrow window
+  useEffect(() => {
+    if (narrow && sel) setInspOpen(true);
+  }, [sel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // remember the timeline view per project
   useEffect(() => {
@@ -193,8 +220,10 @@ export function App() {
   if (!view.open || !rate)
     return (
       <div className="app-bare">
-        <Welcome eng={eng} onDevices={() => setDevices(true)} />
+        <Welcome eng={eng} onDevices={() => setDevices(true)} onPrefs={() => setPrefs("appearance")} />
         {devices && <DevicesDialog eng={eng} onClose={() => setDevices(false)} />}
+        {prefs && <PreferencesDialog eng={eng} initial={prefs} theme={thm} setTheme={setTheme} onClose={() => setPrefs(null)}
+          version={updates.info?.version} updatesEnabled={!!updates.enabled} onCheckUpdates={() => { setPrefs(null); setShowUpdates(true); }} />}
         <Toasts toasts={toasts} />
       </div>
     );
@@ -217,8 +246,8 @@ export function App() {
       <div role="menuitem" onClick={resetWindowLayout}>Reset window layout</div>
       {updates.enabled && <div role="menuitem" onClick={() => setShowUpdates(true)}>Check for updates…{updates.phase === "available" ? " ●" : ""}</div>}
       {updates.info && <div className="dim small" style={{ cursor: "default" }}>Version {updates.info.version}</div>}
-      <div role="menuitem" onClick={() => setDevices(true)}>Audio & MIDI devices…</div>
-      <div role="menuitem" onClick={() => setBindings(true)}>Spot bindings…</div>
+      <div role="menuitem" onClick={() => setPrefs("appearance")}>Preferences…</div>
+      <div role="menuitem" onClick={() => setPrefs("audio")}>Audio & MIDI…</div>
       <div role="menuitem" onClick={() => setPlugins(true)}>Plugins…</div>
       <hr />
       <div role="menuitem" onClick={() => run("project.close")}>Close project</div>
@@ -226,19 +255,33 @@ export function App() {
   );
 
   return (
-    <div className="app" data-stage={stage}>
+    <div className={"app" + (narrow ? " narrow" : "")} data-stage={stage}>
       <TopDeck eng={eng} sel={sel} menu={menu} />
       <Toolbar eng={eng} stage={stage} setStage={setStage} snapOn={snapOn} setSnapOn={setSnapOn}
         spotMode={spotMode} setSpotMode={setSpotMode} zoom={zoom} canZoomSel={!!selRange()}
-        onMixer={onMixer} onExport={() => setLay({ center: "qa" })} onBindings={() => setBindings(true)} tool={tool} setTool={setTool} />
+        onMixer={onMixer} onExport={() => setLay({ center: "qa" })} onBindings={() => setPrefs("spot")} tool={tool} setTool={setTool} />
 
       <div className="main-row">
-        <aside className="panel rack" style={{ width: leftW }} aria-label="Left rack">
-          <LeftDock key={stage} eng={eng} setSel={setSel} libSel={libSel} setLibSel={setLibSel} gotoRange={gotoRange}
-            initialTab={lay.leftTab} onTab={(t: LeftTab) => setLay({ leftTab: t })} />
-        </aside>
-        <Splitter dir="v" title="Drag to resize the left rack (double-click: default)"
-          onDrag={(x) => setLeftW(clamp(x - 8, LIMITS.leftW))} onDone={() => saveLayout({ leftW })} onReset={() => { setLeftW(DEFAULTS.leftW); saveLayout({ leftW: DEFAULTS.leftW }); }} />
+        {narrow && (
+          <nav className="panel rail" aria-label="Left rack">
+            {(["scenes", "identities", "library"] as const).map((t) => (
+              <button key={t} className={"rail-btn" + (rackOpen && lay.leftTab === t ? " on" : "")} title={t[0].toUpperCase() + t.slice(1)} aria-label={t}
+                onClick={() => { if (rackOpen && lay.leftTab === t) setRackOpen(false); else { setLay({ leftTab: t }); setRackOpen(true); } }}>
+                {{ scenes: "SC", identities: "ID", library: "LIB" }[t]}
+              </button>
+            ))}
+          </nav>
+        )}
+        {(!narrow || rackOpen) && (
+          <aside className={"panel rack" + (narrow ? " drawer" : "")} style={{ width: narrow ? 300 : leftW }} aria-label="Left rack">
+            <LeftDock key={stage + lay.leftTab + (narrow ? "n" : "")} eng={eng} setSel={setSel} libSel={libSel} setLibSel={setLibSel} gotoRange={gotoRange}
+              initialTab={lay.leftTab} onTab={(t: LeftTab) => setLay({ leftTab: t })} />
+          </aside>
+        )}
+        {!narrow && (
+          <Splitter dir="v" title="Drag to resize the left rack (double-click: default)"
+            onDrag={(x) => setLeftW(clamp(x - 8, LIMITS.leftW))} onDone={() => saveLayout({ leftW })} onReset={() => { setLeftW(DEFAULTS.leftW); saveLayout({ leftW: DEFAULTS.leftW }); }} />
+        )}
 
         <main className="panel center-col" ref={centerRef}>
           <div className="center-tabs" role="tablist">
@@ -249,6 +292,7 @@ export function App() {
             ))}
             <span className="spacer" />
             {center === "timeline" && <span className="dim small mono">{tcAt(rate, Math.max(0, vp.start))} · {vp.spp.toFixed(1)} smp/px</span>}
+            {narrow && <Key on={inspOpen} title="Show / hide the inspector" onClick={() => setInspOpen(!inspOpen)}>Inspector</Key>}
             {center === "timeline" && (
               <Key on={showPicture} title="Show / hide the picture (P)" onClick={() => setLay({ pictureH: lay.pictureH > 0 ? 0 : (stageLayout(stage).pictureH || 300) })}>Picture</Key>
             )}
@@ -275,11 +319,16 @@ export function App() {
           </div>
         </main>
 
-        <Splitter dir="v" title="Drag to resize the inspector (double-click: default)"
-          onDrag={(x) => setRightW(clamp(window.innerWidth - x - 8, LIMITS.rightW))} onDone={() => saveLayout({ rightW })} onReset={() => { setRightW(DEFAULTS.rightW); saveLayout({ rightW: DEFAULTS.rightW }); }} />
-        <aside className="panel inspector-col" style={{ width: rightW }} aria-label="Inspector">
-          <Inspector eng={eng} sel={sel} setSel={setSel} libSel={libSel} onPerform={startPerform} />
-        </aside>
+        {!narrow && (
+          <Splitter dir="v" title="Drag to resize the inspector (double-click: default)"
+            onDrag={(x) => setRightW(clamp(window.innerWidth - x - 8, LIMITS.rightW))} onDone={() => saveLayout({ rightW })} onReset={() => { setRightW(DEFAULTS.rightW); saveLayout({ rightW: DEFAULTS.rightW }); }} />
+        )}
+        {(!narrow || inspOpen) && (
+          <aside className={"panel inspector-col" + (narrow ? " sheet" : "")} style={{ width: narrow ? 340 : rightW }} aria-label="Inspector">
+            {narrow && <button className="sheet-close" aria-label="Close the inspector" onClick={() => setInspOpen(false)}>✕</button>}
+            <Inspector eng={eng} sel={sel} setSel={setSel} libSel={libSel} onPerform={startPerform} />
+          </aside>
+        )}
       </div>
 
       {lay.deckOpen && (
@@ -293,9 +342,10 @@ export function App() {
         mixerDetached={mixerDetached} setMixerDetached={setMixerDetached} />
       <StatusStrip eng={eng} onDevices={() => setDevices(true)} />
 
-      <ImportDialog kind={imp} eng={eng} onClose={() => setImp(null)} />
+      <ImportDialog kind={imp} eng={eng} onClose={() => setImp(null)} onRelink={() => setImp("relink")} />
       {devices && <DevicesDialog eng={eng} onClose={() => setDevices(false)} />}
-      {bindings && <BindingsDialog eng={eng} onClose={() => setBindings(false)} />}
+      {prefs && <PreferencesDialog eng={eng} initial={prefs} theme={thm} setTheme={setTheme} onClose={() => setPrefs(null)}
+        version={updates.info?.version} updatesEnabled={!!updates.enabled} onCheckUpdates={() => { setPrefs(null); setShowUpdates(true); }} />}
       {plugins && <PluginBrowser onClose={() => setPlugins(false)} />}
       <PluginEditors eng={eng} />
       {showUpdates && <UpdatesDialog u={updates} onClose={() => setShowUpdates(false)} />}
@@ -334,49 +384,6 @@ function Splitter({ dir, title, onDrag, onDone, onReset }: { dir: "v" | "h"; tit
       }}
       onDoubleClick={onReset}
     />
-  );
-}
-
-/** Spot keys: which marker lane and kind each key spots (spot.bindings / spot.bind). */
-function BindingsDialog({ eng, onClose }: { eng: EngineHook; onClose: () => void }) {
-  const { view, run } = eng;
-  const [newKey, setNewKey] = useState("");
-  if (!view) return null;
-  const entries = Object.entries(view.bindings).filter(([k]) => k.startsWith("key:")).sort((a, b) => a[0].localeCompare(b[0]));
-  const bind = (key: string, b: { lane_id: string; kind: EventType; label: string; identity_id: string | null }) =>
-    run("spot.bind", { key, lane: b.lane_id, kind: b.kind, label: b.label, identity_id: b.identity_id });
-  const add = () => {
-    const ch = newKey.trim().toUpperCase();
-    if (!/^[A-Z]$/.test(ch) || !view.lanes[0]) return eng.toast("Type one letter A–Z", "error");
-    bind("key:Key" + ch, { lane_id: view.lanes[0].id, kind: "point", label: view.lanes[0].name, identity_id: null }).then(() => setNewKey(""));
-  };
-  return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal bindings" role="dialog" aria-label="Spot bindings" onClick={(e) => e.stopPropagation()}>
-        <div className="panel-title">Spot bindings</div>
-        <div className="small dim">In Spot mode, each key drops a marker of its kind in its lane at the playhead. Ranges and repeated runs stay open until Enter or Shift+key.</div>
-        <table>
-          <thead><tr><th>Key</th><th>Lane</th><th>Kind</th><th>Label</th><th /></tr></thead>
-          <tbody>
-            {entries.map(([k, b]) => (
-              <tr key={k}>
-                <td className="mono">{k.replace("key:Key", "").replace("key:", "")}</td>
-                <td><select value={b.lane_id} onChange={(e) => bind(k, { ...b, lane_id: e.target.value })}>{view.lanes.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></td>
-                <td><select value={b.kind} onChange={(e) => bind(k, { ...b, kind: e.target.value as EventType })}>{(["point", "range", "repeated"] as const).map((x) => <option key={x}>{x}</option>)}</select></td>
-                <td><input defaultValue={b.label} onBlur={(e) => e.target.value !== b.label && bind(k, { ...b, label: e.target.value })} /></td>
-                <td><button className="link" onClick={() => run("spot.bind", { key: k, remove: true })}>Remove</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="btns">
-          <input placeholder="Letter" maxLength={1} value={newKey} onChange={(e) => setNewKey(e.target.value)} style={{ width: 70 }} onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter") add(); }} />
-          <button onClick={add}>Add key</button>
-          <span className="spacer" />
-          <button className="primary" onClick={onClose}>Done</button>
-        </div>
-      </div>
-    </div>
   );
 }
 

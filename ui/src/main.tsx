@@ -2,7 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App, MixerWindow } from "./App";
 import { initApi, trackWindowState } from "./api";
-import { loadLayout } from "./layout";
+import { getLayout, loadLayout } from "./layout";
+import { applyTheme, theme } from "./theme";
 // Fonts are bundled: the desktop app's content policy allows no remote fonts.
 import "@fontsource/inter/400.css";
 import "@fontsource/inter/500.css";
@@ -21,6 +22,7 @@ const view = new URLSearchParams(location.search).get("view");
 initApi()
   .then(() => loadLayout())
   .then(() => {
+    applyTheme(theme(getLayout().theme));
     trackWindowState();
   })
   .then(() => {
