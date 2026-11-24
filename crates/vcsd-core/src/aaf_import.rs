@@ -183,7 +183,7 @@ fn hexs(b: &[u8]) -> String {
 }
 
 fn utf16(b: &[u8]) -> String {
-    let u: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+    let u: Vec<u16> = b.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
     String::from_utf16_lossy(&u)
 }
 
@@ -1346,9 +1346,9 @@ fn d10_samples(elements: &[Vec<u8>], ch: usize) -> Vec<i32> {
         let Some(data) = e.get(4..) else { continue };
         // the header's sample count; the data holds at most what fits
         let n = (u16::from_le_bytes([e[1], e[2]]) as usize).min(data.len() / 32);
-        for frame in data.chunks_exact(32).take(n) {
-            for w in frame.chunks_exact(4).take(ch) {
-                let w = u32::from_le_bytes(w.try_into().unwrap());
+        for frame in data.as_chunks::<32>().0.iter().take(n) {
+            for w in frame.as_chunks::<4>().0.iter().take(ch) {
+                let w = u32::from_le_bytes(*w);
                 out.push((((w >> 4) & 0xff_ffff) << 8) as i32);
             }
         }
@@ -2082,7 +2082,8 @@ mod tests {
         let (info, buf) = wav::read(&out).unwrap();
         assert_eq!((info.sample_rate, info.channels, info.frames), (48000, 4, 3));
         let (_, raw) = wav::read_raw(&out).unwrap();
-        let got: Vec<i32> = raw.chunks_exact(3).map(|c| ((c[2] as i32) << 24 | (c[1] as i32) << 16 | (c[0] as i32) << 8) >> 8).collect();
+        let got: Vec<i32> =
+            raw.as_chunks::<3>().0.iter().map(|c| ((c[2] as i32) << 24 | (c[1] as i32) << 16 | (c[0] as i32) << 8) >> 8).collect();
         let want: Vec<i32> = [s(1), s(2), s(3)].iter().flat_map(|x| x[0..4].to_vec()).collect();
         assert_eq!(got, want, "24-bit samples exact, channel bits and V/U/C/P dropped");
         assert!(buf.peak() > 0.99);
@@ -2170,7 +2171,8 @@ mod tests {
         mxf_to_wav(&f, None, &out).unwrap();
         let (info, raw) = wav::read_raw(&out).unwrap();
         assert_eq!((info.channels, info.frames, info.format.bits()), (3, 4, 24), "2 + 1 channels at the widest depth");
-        let got: Vec<i32> = raw.chunks_exact(3).map(|c| ((c[2] as i32) << 24 | (c[1] as i32) << 16 | (c[0] as i32) << 8) >> 8).collect();
+        let got: Vec<i32> =
+            raw.as_chunks::<3>().0.iter().map(|c| ((c[2] as i32) << 24 | (c[1] as i32) << 16 | (c[0] as i32) << 8) >> 8).collect();
         // track 2 (stereo) first, by track id; 16-bit samples shifted up to 24
         let want: Vec<i32> = (0..4).flat_map(|k| [(k * 10) << 8, (-k * 10) << 8, m(k)]).collect();
         assert_eq!(got, want);

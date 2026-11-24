@@ -179,7 +179,7 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     assert_eq!(a.channels, 1, "a mono extract of channel 1");
     let (_, extract) = wav::read_raw(Path::new(&a.path)).unwrap();
     let (_, orig) = wav::read_raw(&dir.join("dialog.wav")).unwrap();
-    let left: Vec<u8> = orig.chunks_exact(4).flat_map(|fr| fr[0..2].to_vec()).collect();
+    let left: Vec<u8> = orig.as_chunks::<4>().0.iter().flat_map(|fr| fr[0..2].to_vec()).collect();
     assert!(extract == left, "bit-exact left channel of the embedded essence");
 
     // MX: the linked music found by name next to the AAF; clip gain, volume curve and pan

@@ -214,15 +214,17 @@ pub fn read(path: &Path) -> Result<(WavInfo, AudioBuffer)> {
     }
     raw.truncate(got);
     let data: Vec<f32> = match (p.info.format, p.float) {
-        (SampleFormat::Int16, _) => raw.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32_768.0).collect(),
+        (SampleFormat::Int16, _) => raw.as_chunks::<2>().0.iter().map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32_768.0).collect(),
         (SampleFormat::Int24, _) => raw
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| (((c[2] as i32) << 24 | (c[1] as i32) << 16 | (c[0] as i32) << 8) >> 8) as f32 / 8_388_608.0)
             .collect(),
         (SampleFormat::Int32, _) => {
-            raw.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32 / 2_147_483_648.0).collect()
+            raw.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32 / 2_147_483_648.0).collect()
         }
-        (SampleFormat::Float32, _) => raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
+        (SampleFormat::Float32, _) => raw.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
     };
     let ch = p.info.channels as usize;
     let mut buf = AudioBuffer { sample_rate: p.info.sample_rate, channels: p.info.channels, data };
