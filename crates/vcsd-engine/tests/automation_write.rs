@@ -58,6 +58,15 @@ fn setup() -> (Arc<Engine>, String, String) {
     assert_eq!(st["clips"].as_array().unwrap().len(), 1, "constant tone placed");
     let t = st["tracks"][0]["id"].as_str().unwrap().to_string();
     let master = st["buses"].as_array().unwrap().iter().find(|b| b["parent_id"].is_null()).unwrap()["id"].as_str().unwrap().to_string();
+    // Wait until playback keeps time: a device that opens but does not start (a
+    // virtual one on CI) is covered by the software clock only after a moment.
+    call(&e, "transport.play", json!({"from": 0}));
+    let t0 = std::time::Instant::now();
+    while pos(&e) <= 0 {
+        assert!(t0.elapsed() < Duration::from_secs(5), "the transport never moved: {}", call(&e, "transport.state", json!({})));
+        sleep(20);
+    }
+    call(&e, "transport.stop", json!({}));
     (e, t, master)
 }
 

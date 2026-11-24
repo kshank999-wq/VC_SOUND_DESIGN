@@ -77,6 +77,8 @@ pub struct Shared {
     pub output_pref: Mutex<Option<String>>,
     /// Why the requested device is not the one in use, if it isn't.
     pub device_warning: Mutex<Option<String>>,
+    /// Device callbacks so far (tells whether an opened device is actually running).
+    callbacks: AtomicU64,
     /// Live automation values while a fader is being written (monitoring).
     overrides: Mutex<HashMap<(String, vcsd_core::AutomationParam), f32>>,
     overrides_version: AtomicU64,
@@ -150,6 +152,7 @@ impl Player {
             seek_ms: AtomicU64::new(0),
             output_pref: Mutex::new(None),
             device_warning: Mutex::new(None),
+            callbacks: AtomicU64::new(0),
             overrides: Mutex::new(HashMap::new()),
             overrides_version: AtomicU64::new(1),
             plugins: Mutex::new(None),
@@ -470,26 +473,83 @@ impl Consumer {
     }
 }
 
+/// How long an opened device may stay silent (no callbacks) before the
+/// software clock stands in for it.
+const STANDIN_AFTER: Duration = Duration::from_millis(500);
+
+/// What the output thread does about a device that has not called back yet.
+#[derive(Debug, PartialEq)]
+enum Standin {
+    Keep,
+    /// The device has not started: drive the transport with the software clock.
+    Start,
+    /// The device started: hand back to it.
+    Stop,
+}
+
+fn standin(device_started: bool, standing_in: bool, since_open: Duration) -> Standin {
+    match (device_started, standing_in) {
+        (true, true) => Standin::Stop,
+        (false, false) if since_open >= STANDIN_AFTER => Standin::Start,
+        _ => Standin::Keep,
+    }
+}
+
 fn output_thread(sh: Arc<Shared>, consumer: Arc<Mutex<Consumer>>, rx: mpsc::Receiver<OutputCmd>) {
     let mut _stream: Option<cpal::Stream> = None;
     let null_running = Arc::new(AtomicBool::new(false));
-    while let Ok(cmd) = rx.recv() {
-        match cmd {
-            OutputCmd::Shutdown => break,
-            OutputCmd::Open(rate) => {
+    let start_null = |sh: &Arc<Shared>, run: &Arc<AtomicBool>| {
+        run.store(true, SeqCst);
+        let (sh2, c2, run) = (sh.clone(), consumer.clone(), run.clone());
+        thread::spawn(move || null_device(sh2, c2, run));
+    };
+    // the open device: when, callbacks at that moment, and the warning it had
+    let mut opened: Option<(Instant, u64, Option<String>)> = None;
+    let mut standing_in = false;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(OutputCmd::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(OutputCmd::Open(rate)) => {
                 _stream = None;
+                opened = None;
+                standing_in = false;
                 null_running.store(false, SeqCst);
                 thread::sleep(Duration::from_millis(15));
                 match open_device(&sh, &consumer, rate) {
-                    Ok(s) => _stream = Some(s),
+                    Ok(s) => {
+                        _stream = Some(s);
+                        opened = Some((Instant::now(), sh.callbacks.load(SeqCst), sh.device_warning.lock().unwrap().clone()));
+                    }
                     Err(e) => {
                         *sh.device_name.lock().unwrap() = format!("null (no audio device: {e})");
                         sh.device_rate.store(rate, SeqCst);
                         sh.output_latency.store(0, SeqCst);
-                        null_running.store(true, SeqCst);
-                        let (sh2, c2, run) = (sh.clone(), consumer.clone(), null_running.clone());
-                        thread::spawn(move || null_device(sh2, c2, run));
+                        start_null(&sh, &null_running);
                     }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        // A device can open and then never call back (e.g. a virtual device on a
+        // headless machine): the software clock keeps the transport moving, and
+        // the device takes over as soon as it starts.
+        if let Some((at, cb0, warning)) = &opened {
+            match standin(sh.callbacks.load(SeqCst) > *cb0, standing_in, at.elapsed()) {
+                Standin::Keep => {}
+                Standin::Start => {
+                    standing_in = true;
+                    let name = sh.device_name.lock().unwrap().clone();
+                    let w = format!("{name} is not running: the transport keeps time without sound until it starts");
+                    *sh.device_warning.lock().unwrap() = Some(match warning {
+                        Some(x) => format!("{x}; {w}"),
+                        None => w,
+                    });
+                    start_null(&sh, &null_running);
+                }
+                Standin::Stop => {
+                    standing_in = false;
+                    null_running.store(false, SeqCst);
+                    *sh.device_warning.lock().unwrap() = warning.clone();
                 }
             }
         }
@@ -572,6 +632,7 @@ fn build<T: SizedSample + FromSample<f32> + Send + 'static>(
     dev.build_output_stream::<T, _, _>(
         cfg,
         move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+            sh.callbacks.fetch_add(1, Relaxed);
             let ts = info.timestamp();
             let lat_dev = ts.playback.duration_since(ts.callback).as_secs_f64();
             let proj_rate = sh.project_rate.load(Relaxed) as f64;
@@ -600,4 +661,19 @@ fn build<T: SizedSample + FromSample<f32> + Send + 'static>(
         None,
     )
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_software_clock_stands_in_for_a_device_that_does_not_start_and_hands_back() {
+        let ms = Duration::from_millis;
+        assert_eq!(standin(false, false, ms(100)), Standin::Keep, "a device gets time to start");
+        assert_eq!(standin(false, false, STANDIN_AFTER), Standin::Start, "silent too long: stand in");
+        assert_eq!(standin(false, true, ms(5000)), Standin::Keep, "still silent: keep standing in");
+        assert_eq!(standin(true, true, ms(5000)), Standin::Stop, "the device started: hand back");
+        assert_eq!(standin(true, false, ms(5000)), Standin::Keep, "a running device is left alone");
+    }
 }

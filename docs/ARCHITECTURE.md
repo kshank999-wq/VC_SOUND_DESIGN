@@ -28,6 +28,11 @@
   seek epoch and per-frame timeline positions, so stale audio is discarded on locate and the heard
   position (minus output latency) is exact. The render thread renders at project rate and
   resamples to the device rate.
+- **A device that does not run.** With no output device, a software clock consumes audio in real
+  time so the transport still keeps time. A device can also open and then never call back (a
+  virtual device on a headless Mac, for example). If an opened device hasn't called back within
+  500 ms, the software clock stands in and the transport reports a device warning. When the device
+  starts, it takes over and the warning clears.
 - **Automation writing.** In Touch/Latch/Write, control moves go to the engine, which stamps
   them with the heard position, monitors them live through mixer overrides (synced to the render
   thread only when they change), and on release/stop commits the pass as one undoable edit:
