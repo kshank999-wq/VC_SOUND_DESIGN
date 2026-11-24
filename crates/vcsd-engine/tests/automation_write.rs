@@ -92,7 +92,7 @@ fn latch_touch_write_and_read() {
     call(&e, "automation.mode", json!({"owner_id": t, "mode": "latch"}));
     call(&e, "transport.play", json!({"from": 0}));
     sleep(300);
-    call(&e, "automation.touch", json!({"owner_id": t, "param": "volume_db", "value": -6, "phase": "begin"}));
+    let touch_begin = call(&e, "automation.touch", json!({"owner_id": t, "param": "volume_db", "value": -6, "phase": "begin"}));
     let t_begin = pos(&e);
     sleep(250);
     call(&e, "automation.touch", json!({"owner_id": t, "param": "volume_db", "value": -12, "phase": "move"}));
@@ -100,7 +100,16 @@ fn latch_touch_write_and_read() {
     sleep(150);
     call(&e, "automation.touch", json!({"owner_id": t, "param": "volume_db", "value": -12, "phase": "end"}));
     let live = meter(&e);
-    assert!((20.0 * (live / full).log10() + 12.0).abs() < 1.0, "monitoring the latched value live: {live}");
+    let ts = call(&e, "transport.state", json!({}));
+    assert!(
+        (20.0 * (live / full).log10() + 12.0).abs() < 1.0,
+        "monitoring the latched value live: {live} (touch {touch_begin}; position {t_begin} → {t_move} → {}; device {}; playing {}; dropouts {}; load {})",
+        ts["position"],
+        ts["device"],
+        ts["playing"],
+        ts["dropouts"],
+        ts["load"],
+    );
     let writing = call(&e, "transport.state", json!({}))["writing"].clone();
     assert_eq!(writing.as_array().unwrap().len(), 1, "latch stays armed after release");
     sleep(300);
