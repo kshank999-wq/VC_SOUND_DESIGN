@@ -14,7 +14,12 @@ use vcsd_core::*;
 
 fn python() -> Option<String> {
     let py = std::env::var("VCSD_OTIO_PYTHON").unwrap_or_else(|_| "python3".into());
-    let ok = std::process::Command::new(&py).args(["-c", "import opentimelineio"]).output().map(|o| o.status.success()).unwrap_or(false);
+    let ok = std::process::Command::new(&py)
+        .env("PYTHONUTF8", "1")
+        .args(["-c", "import opentimelineio"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     ok.then_some(py)
 }
 
@@ -112,7 +117,7 @@ fn an_editors_otio_imports_clips_transitions_nesting_media_and_markers() {
     };
     let dir = tmp("otiofixture");
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/otio/make_fixture.py");
-    let out = std::process::Command::new(&py).arg(script).arg(&dir).output().unwrap();
+    let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").arg(script).arg(&dir).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let file = dir.join("fixture.otio");
 
@@ -314,8 +319,12 @@ fn levels_come_back_from_an_aaf_converted_by_the_opentimelineio_aaf_adapter() {
         eprintln!("SKIPPED: OpenTimelineIO not installed");
         return;
     };
-    let has_adapter =
-        std::process::Command::new(&py).args(["-c", "import otio_aaf_adapter"]).output().map(|o| o.status.success()).unwrap_or(false);
+    let has_adapter = std::process::Command::new(&py)
+        .env("PYTHONUTF8", "1")
+        .args(["-c", "import otio_aaf_adapter"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     if !has_adapter {
         eprintln!("SKIPPED: the OpenTimelineIO AAF adapter isn't installed (python3 -m pip install otio-aaf-adapter==2.0.0)");
         return;
@@ -330,7 +339,7 @@ fn levels_come_back_from_an_aaf_converted_by_the_opentimelineio_aaf_adapter() {
     let conv = "import sys, opentimelineio as otio\n\
                 tl = otio.adapters.read_from_file(sys.argv[1], adapter_name='AAF', simplify=True)\n\
                 otio.adapters.write_to_file(tl, sys.argv[2])";
-    let out = std::process::Command::new(&py).args(["-c", conv]).arg(&aaf).arg(&otio).output().unwrap();
+    let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").args(["-c", conv]).arg(&aaf).arg(&otio).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
     let (mut s2, root2) = session("otioadapter2", "24", "01:00:00:00");
@@ -742,8 +751,12 @@ fn a_stereo_track_split_left_right_by_the_aaf_adapter_comes_back_as_one() {
         eprintln!("SKIPPED: OpenTimelineIO not installed");
         return;
     };
-    let has_adapter =
-        std::process::Command::new(&py).args(["-c", "import otio_aaf_adapter"]).output().map(|o| o.status.success()).unwrap_or(false);
+    let has_adapter = std::process::Command::new(&py)
+        .env("PYTHONUTF8", "1")
+        .args(["-c", "import otio_aaf_adapter"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     if !has_adapter {
         eprintln!("SKIPPED: the OpenTimelineIO AAF adapter isn't installed (python3 -m pip install otio-aaf-adapter==2.0.0)");
         return;
@@ -778,7 +791,7 @@ fn a_stereo_track_split_left_right_by_the_aaf_adapter_comes_back_as_one() {
     let conv = "import sys, opentimelineio as otio\n\
                 tl = otio.adapters.read_from_file(sys.argv[1], adapter_name='AAF', simplify=True)\n\
                 otio.adapters.write_to_file(tl, sys.argv[2])";
-    let out = std::process::Command::new(&py).args(["-c", conv]).arg(&aaf).arg(&otio).output().unwrap();
+    let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").args(["-c", conv]).arg(&aaf).arg(&otio).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
     let (mut s2, root2) = session("otiostereo2", "24", "01:00:00:00");
@@ -868,7 +881,12 @@ fn volume_automation_comes_back_from_an_editors_aaf_converted_by_the_aaf_adapter
         return;
     };
     let has = |m: &str| {
-        std::process::Command::new(&py).args(["-c", &format!("import {m}")]).output().map(|o| o.status.success()).unwrap_or(false)
+        std::process::Command::new(&py)
+            .env("PYTHONUTF8", "1")
+            .args(["-c", &format!("import {m}")])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     };
     if !has("otio_aaf_adapter") || !has("aaf2") {
         eprintln!("SKIPPED: the OpenTimelineIO AAF adapter or pyaaf2 isn't installed");
@@ -877,13 +895,14 @@ fn volume_automation_comes_back_from_an_editors_aaf_converted_by_the_aaf_adapter
     // the AAF import's editor-style fixture (pyaaf2), converted to OTIO by the AAF adapter
     let dir = tmp("otioaaffixture");
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/aaf/make_fixture.py");
-    let out = std::process::Command::new(&py).arg(script).arg(&dir).output().unwrap();
+    let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").arg(script).arg(&dir).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let otio = dir.join("fixture.otio");
     let conv = "import sys, opentimelineio as otio\n\
                 tl = otio.adapters.read_from_file(sys.argv[1], adapter_name='AAF', simplify=True)\n\
                 otio.adapters.write_to_file(tl, sys.argv[2])";
-    let out = std::process::Command::new(&py).args(["-c", conv]).arg(dir.join("fixture.aaf")).arg(&otio).output().unwrap();
+    let out =
+        std::process::Command::new(&py).env("PYTHONUTF8", "1").args(["-c", conv]).arg(dir.join("fixture.aaf")).arg(&otio).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
     let (mut s, root) = session("otioaaffix", "25", "10:00:00:00");
@@ -1032,7 +1051,7 @@ fn muted_tracks_kept_disabled_in_our_otio_come_back_muted() {
         .count();
     assert_eq!(disabled_clips, 1, "the muted clip, disabled (the others play, inside their disabled tracks)");
     if let Some(py) = python() {
-        let out = std::process::Command::new(&py)
+        let out = std::process::Command::new(&py).env("PYTHONUTF8", "1")
             .args(["-c", "import sys, opentimelineio as o; t = o.adapters.read_from_file(sys.argv[1]); print(sum(1 for x in t.tracks if not x.enabled))"])
             .arg(&file)
             .output()
@@ -1068,8 +1087,12 @@ fn mutes_carried_as_zero_gains_by_an_aaf_through_the_adapter_come_back_as_mutes(
         eprintln!("SKIPPED: OpenTimelineIO not installed");
         return;
     };
-    let has_adapter =
-        std::process::Command::new(&py).args(["-c", "import otio_aaf_adapter"]).output().map(|o| o.status.success()).unwrap_or(false);
+    let has_adapter = std::process::Command::new(&py)
+        .env("PYTHONUTF8", "1")
+        .args(["-c", "import otio_aaf_adapter"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     if !has_adapter {
         eprintln!("SKIPPED: the OpenTimelineIO AAF adapter isn't installed (python3 -m pip install otio-aaf-adapter==2.0.0)");
         return;
@@ -1113,7 +1136,7 @@ fn mutes_carried_as_zero_gains_by_an_aaf_through_the_adapter_come_back_as_mutes(
     let conv = "import sys, opentimelineio as otio\n\
                 tl = otio.adapters.read_from_file(sys.argv[1], adapter_name='AAF', simplify=True)\n\
                 otio.adapters.write_to_file(tl, sys.argv[2])";
-    let out = std::process::Command::new(&py).args(["-c", conv]).arg(&aaf).arg(&otio).output().unwrap();
+    let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").args(["-c", conv]).arg(&aaf).arg(&otio).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
     let (mut s2, root2) = session("otiozero2", "24", "01:00:00:00");
@@ -1139,7 +1162,7 @@ fn a_disabled_compound_clip_comes_back_muted() {
     };
     let dir = tmp("otiodisabledstack");
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/otio/make_fixture.py");
-    let out = std::process::Command::new(&py).arg(script).arg(&dir).output().unwrap();
+    let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").arg(script).arg(&dir).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     // switch the nested stack (MX's compound clip) off
     let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("fixture.otio")).unwrap()).unwrap();
@@ -1293,6 +1316,7 @@ fn track_colors_come_back_from_otio() {
     // OpenTimelineIO itself reads a file with a track Color (0.18)
     if let Some(py) = python() {
         let out = std::process::Command::new(&py)
+            .env("PYTHONUTF8", "1")
             .args([
                 "-c",
                 "import sys, opentimelineio as o; t = o.adapters.read_from_file(sys.argv[1]); print(t.tracks[0].color.to_hex()[:7])",

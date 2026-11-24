@@ -12,13 +12,18 @@ use vcsd_core::*;
 
 fn python() -> Option<String> {
     let py = std::env::var("VCSD_AAF_PYTHON").unwrap_or_else(|_| "python3".into());
-    let ok = std::process::Command::new(&py).args(["-c", "import aaf2"]).output().map(|o| o.status.success()).unwrap_or(false);
+    let ok = std::process::Command::new(&py)
+        .env("PYTHONUTF8", "1")
+        .args(["-c", "import aaf2"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     ok.then_some(py)
 }
 
 fn inspect(py: &str, file: &Path) -> serde_json::Value {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/aaf/inspect.py");
-    let out = std::process::Command::new(py).arg(script).arg(file).output().unwrap();
+    let out = std::process::Command::new(py).env("PYTHONUTF8", "1").arg(script).arg(file).output().unwrap();
     assert!(out.status.success(), "pyaaf2 could not read the file:\n{}", String::from_utf8_lossy(&out.stderr));
     serde_json::from_slice(&out.stdout).unwrap()
 }
@@ -671,7 +676,7 @@ for sl in m.slots:
         out[c['Comment'].value] = [v['red'], v['green'], v['blue']]
 print(json.dumps(out))
 "#;
-    let out = std::process::Command::new(&py).args(["-c", code]).arg(&aaf).output().unwrap();
+    let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").args(["-c", code]).arg(&aaf).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let colors: std::collections::BTreeMap<String, Vec<u32>> = serde_json::from_slice(&out.stdout).unwrap();
     let of =
@@ -685,8 +690,12 @@ print(json.dumps(out))
     assert_eq!(of("teal"), [0x12 * 257, 0xa4 * 257, 0xc8 * 257], "a marker's own color, exactly");
 
     // through the OpenTimelineIO AAF adapter: the same marker colors as our OTIO export
-    let adapter =
-        std::process::Command::new(&py).args(["-c", "import otio_aaf_adapter"]).output().map(|o| o.status.success()).unwrap_or(false);
+    let adapter = std::process::Command::new(&py)
+        .env("PYTHONUTF8", "1")
+        .args(["-c", "import otio_aaf_adapter"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     if !adapter {
         eprintln!("SKIPPED (adapter part): the OpenTimelineIO AAF adapter isn't installed");
         return;
@@ -700,7 +709,7 @@ ms = [m for item in [t.tracks] + list(t.find_children()) for m in getattr(item, 
 print(json.dumps(sorted({((m.name or '') + ' ' + (m.comment or ''), m.color + ' ' + str(round(m.marked_range.duration.to_seconds(), 6))) for m in ms})))
 "#;
     let read = |f: &Path| {
-        let out = std::process::Command::new(&py).args(["-c", names]).arg(f).output().unwrap();
+        let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").args(["-c", names]).arg(f).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let v: Vec<(String, String)> = serde_json::from_slice(&out.stdout).unwrap();
         v
