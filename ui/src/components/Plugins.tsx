@@ -154,90 +154,131 @@ export function InsertRack({ eng, ownerId, inserts, compact }: { eng: EngineHook
 // ---------------------------------------------------------------- browser
 
 /** Installed effects: search, rescan, extra folders. With `onPick`, choosing one inserts it. */
+/** Plugin manager (☰ › Plugins) and insert picker (an insert slot's "+"): search, filter by
+ *  format and vendor, rescan, folders, and what failed to load. */
 export function PluginBrowser({ onPick, onClose }: { onPick?: (p: PluginInfo) => void; onClose: () => void }) {
   const { catalog: c, busy } = useCatalog();
   const [q, setQ] = useState("");
   const [fmt, setFmt] = useState("all");
-  const [showFolders, setShowFolders] = useState(false);
-  const [showFailed, setShowFailed] = useState(false);
+  const [vendor, setVendor] = useState("all");
+  const [view, setView] = useState<"installed" | "failed" | "folders">("installed");
   const [folders, setFolders] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const run = (p: Promise<unknown>) => { setErr(null); p.catch((e) => setErr(String(e?.message ?? e))); };
+  const vendorOf = (p: PluginInfo) => p.vendor || "Unknown vendor";
 
+  const all = c?.plugins ?? [];
   const groups = useMemo(() => {
     const words = q.toLowerCase().split(/\s+/).filter(Boolean);
-    const list = (c?.plugins ?? []).filter((p) => (fmt === "all" || p.format === fmt) && words.every((w) => `${p.name} ${p.vendor} ${p.category}`.toLowerCase().includes(w)));
+    const list = all.filter((p) => (fmt === "all" || p.format === fmt) && (vendor === "all" || vendorOf(p) === vendor) && words.every((w) => `${p.name} ${p.vendor} ${p.category}`.toLowerCase().includes(w)));
     const m = new Map<string, PluginInfo[]>();
-    for (const p of list) m.set(p.vendor || "Unknown vendor", [...(m.get(p.vendor || "Unknown vendor") ?? []), p]);
+    for (const p of list) m.set(vendorOf(p), [...(m.get(vendorOf(p)) ?? []), p]);
     return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [c, q, fmt]);
+  }, [c, q, fmt, vendor]); // eslint-disable-line react-hooks/exhaustive-deps
   const count = groups.reduce((n, g) => n + g[1].length, 0);
+  const vendors = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const p of all) if (fmt === "all" || p.format === fmt) m.set(vendorOf(p), (m.get(vendorOf(p)) ?? 0) + 1);
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [c, fmt]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return (
-    <div className="modal-bg" onMouseDown={onClose}>
-      <div className="modal plugin-browser" onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-        <div className="panel-title">{onPick ? "Insert plugin" : "Plugins"}</div>
-        <div className="row">
-          <input autoFocus placeholder="Search name, vendor or type (eq, reverb…)" value={q} onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && onPick && count === 1) onPick(groups[0][1][0]); if (e.key === "Escape") onClose(); }} />
-          {(c?.formats.length ?? 0) > 1 && (
-            <select value={fmt} onChange={(e) => setFmt(e.target.value)}>
-              <option value="all">All formats</option>
-              {c!.formats.map((f) => <option key={f} value={f}>{f.toUpperCase()}</option>)}
-            </select>
-          )}
+  const list = (
+    <div className="plugin-list" role="listbox" aria-label="Plugins">
+      {!c && busy && <div className="dim pad">Scanning plugins… (each new plugin is opened once, in a separate process)</div>}
+      {c && count === 0 && (
+        <div className="dim pad">
+          {all.length ? "Nothing matches." : "No effect plugins found. Install VST3 plugins in the standard folder, or add the folder they're in under Folders."}
         </div>
-        <div className="plugin-list">
-          {!c && busy && <div className="muted pad">Scanning plugins… (each new plugin is opened once, in a separate process)</div>}
-          {c && count === 0 && (
-            <div className="muted pad">
-              {c.plugins.length ? "Nothing matches." : "No effect plugins found. Install VST3 plugins in the standard folder, or add the folder they're in below."}
-            </div>
-          )}
-          {groups.map(([vendor, ps]) => (
-            <div key={vendor}>
-              <div className="plugin-vendor">{vendor}</div>
-              {ps.map((p) => (
-                <div key={p.id} className={"plugin-item" + (onPick ? " pickable" : "")} onClick={() => onPick?.(p)} title={p.path || p.id}>
-                  <span className="ellipsis">{p.name}</span>
-                  <span className="small muted ellipsis">{p.category.replace(/^Fx\|?/, "").replace(/\|/g, " · ")}</span>
-                  <span className="badge">{p.format.toUpperCase()}</span>
-                </div>
-              ))}
+      )}
+      {groups.map(([v, ps]) => (
+        <div key={v}>
+          <div className="plugin-vendor">{v}</div>
+          {ps.map((p) => (
+            <div key={p.id} role="option" aria-selected={false} tabIndex={onPick ? 0 : -1} className={"plugin-item" + (onPick ? " pickable" : "")}
+              onClick={() => onPick?.(p)} onKeyDown={(e) => e.key === "Enter" && onPick?.(p)} title={p.path || p.id}>
+              <span className="ellipsis pl-name">{p.name}</span>
+              <span className="small dim ellipsis">{p.category.replace(/^Fx\|?/, "").replace(/\|/g, " · ") || "Effect"}</span>
+              <span className="badge">{p.format.toUpperCase()}</span>
             </div>
           ))}
         </div>
-        {c && (
-          <div className="small muted">
-            {c.plugins.length} effects in {c.bundles} bundle{c.bundles === 1 ? "" : "s"}
-            {c.instruments ? ` · ${c.instruments} instruments hidden` : ""}
-            {c.failed.length > 0 && <> · <a onClick={() => setShowFailed(!showFailed)}>{c.failed.length} failed to load</a></>}
-          </div>
-        )}
-        {showFailed && c && (
-          <div className="plugin-failed small">
-            {c.failed.map((f) => <div key={f.path}><span className="mono">{f.path}</span> — {f.error}</div>)}
-          </div>
-        )}
-        {showFolders && c && (
-          <div className="plugin-folders small">
-            <div className="muted">Always searched:</div>
-            {c.folders.standard.map((f) => <div key={f} className="mono ellipsis">{f}</div>)}
-            <div className="muted">Also search (one folder per line):</div>
-            <textarea rows={3} value={folders ?? c.folders.extra.join("\n")} onChange={(e) => setFolders(e.target.value)} />
-            <div className="btns">
-              <button disabled={busy || folders === null} onClick={() => run(loadCatalog("plugins.folders", { folders: (folders ?? "").split("\n") }).then(() => setFolders(null)))}>Save & scan</button>
+      ))}
+    </div>
+  );
+  const search = (
+    <div className="pl-search">
+      <input autoFocus aria-label="Search plugins" placeholder="Search name, vendor or type (eq, reverb…)" value={q} onChange={(e) => setQ(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && onPick && count === 1) onPick(groups[0][1][0]); if (e.key === "Escape") onClose(); }} />
+      <span className="small dim">{count} shown</span>
+    </div>
+  );
+
+  return (
+    <div className="modal-bg" onMouseDown={onClose}>
+      <div className={"modal plugin-browser" + (onPick ? " picker" : " manager")} role="dialog" aria-label={onPick ? "Insert plugin" : "Plugins"} onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+        {onPick ? (
+          <>
+            <div className="panel-title">Insert plugin</div>
+            {search}
+            {list}
+            <div className="btns"><span className="small dim">{all.length} effects</span><span className="spacer" /><button onClick={onClose}>Cancel</button></div>
+          </>
+        ) : (
+          <div className="pl-manager">
+            <nav className="pl-side" aria-label="Plugin views">
+              <div className="panel-title">Plugins</div>
+              {([["installed", `Installed · ${all.length}`], ["failed", `Failed · ${c?.failed.length ?? 0}`], ["folders", "Folders"]] as const).map(([id, label]) => (
+                <button key={id} className={"prefs-tab" + (view === id ? " active" : "")} aria-pressed={view === id} onClick={() => setView(id)}>{label}</button>
+              ))}
+              {view === "installed" && (
+                <>
+                  <h4>Format</h4>
+                  {["all", ...(c?.formats ?? [])].map((f) => (
+                    <button key={f} className={"pl-filter" + (fmt === f ? " on" : "")} aria-pressed={fmt === f} onClick={() => { setFmt(f); setVendor("all"); }}>
+                      {f === "all" ? "All formats" : f.toUpperCase()}<span className="dim">{f === "all" ? all.length : all.filter((p) => p.format === f).length}</span>
+                    </button>
+                  ))}
+                  <h4>Vendor</h4>
+                  <div className="pl-vendors">
+                    <button className={"pl-filter" + (vendor === "all" ? " on" : "")} aria-pressed={vendor === "all"} onClick={() => setVendor("all")}>All vendors</button>
+                    {vendors.map(([v, n]) => (
+                      <button key={v} className={"pl-filter" + (vendor === v ? " on" : "")} aria-pressed={vendor === v} onClick={() => setVendor(v)}><span className="ellipsis">{v}</span><span className="dim">{n}</span></button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </nav>
+            <div className="pl-main">
+              {view === "installed" && <>{search}{list}</>}
+              {view === "failed" && (
+                <div className="plugin-failed">
+                  {!c?.failed.length ? <div className="dim">Every plugin found loaded.</div> : c.failed.map((f) => (
+                    <div key={f.path} className="pl-fail"><span className="sym" aria-hidden>✕</span><div><div className="mono small">{f.path}</div><div className="small dim">{f.error}</div></div></div>
+                  ))}
+                </div>
+              )}
+              {view === "folders" && c && (
+                <div className="plugin-folders">
+                  <h4>Always searched</h4>
+                  {c.folders.standard.map((f) => <div key={f} className="mono small ellipsis">{f}</div>)}
+                  <h4>Also search (one folder per line)</h4>
+                  <textarea aria-label="Extra plugin folders" rows={5} value={folders ?? c.folders.extra.join("\n")} onChange={(e) => setFolders(e.target.value)} />
+                  <div className="btns">
+                    <button className="primary" disabled={busy || folders === null} onClick={() => run(loadCatalog("plugins.folders", { folders: (folders ?? "").split("\n") }).then(() => setFolders(null)))}>Save & scan</button>
+                  </div>
+                </div>
+              )}
+              {err && <div className="small" style={{ color: "var(--error-text)" }}>{err}</div>}
+              <div className="btns pl-foot">
+                <span className="small dim">{c ? `${all.length} effects in ${c.bundles} bundle${c.bundles === 1 ? "" : "s"}${c.instruments ? ` · ${c.instruments} instruments hidden` : ""}` : ""}</span>
+                <span className="spacer" />
+                <button disabled={busy} title="Look for new or updated plugins" onClick={() => run(loadCatalog("plugins.scan"))}>{busy ? "Scanning…" : "Rescan"}</button>
+                <button disabled={busy} title="Open every plugin again (after a plugin update that didn't change its files' dates)" onClick={() => run(loadCatalog("plugins.scan", { force: true }))}>Full rescan</button>
+                <button className="primary" onClick={onClose}>Done</button>
+              </div>
             </div>
           </div>
         )}
-        {err && <div className="err small">{err}</div>}
-        <div className="btns">
-          <button disabled={busy} title="Look for new or updated plugins" onClick={() => run(loadCatalog("plugins.scan"))}>{busy ? "Scanning…" : "Rescan"}</button>
-          <button disabled={busy} title="Open every plugin again (after a plugin update that didn't change its files' dates)" onClick={() => run(loadCatalog("plugins.scan", { force: true }))}>Full rescan</button>
-          <button className={showFolders ? "on" : ""} onClick={() => setShowFolders(!showFolders)}>Folders…</button>
-          <span className="spacer" />
-          <button onClick={onClose}>{onPick ? "Cancel" : "Close"}</button>
-        </div>
       </div>
     </div>
   );

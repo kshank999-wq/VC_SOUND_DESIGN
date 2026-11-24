@@ -24,8 +24,12 @@ const SCENES = 20;
 /** Marker lane height per mode (spec v2.1: full 26, folded 10-px minimap strips); hidden
  *  leaves one summary row. */
 const LANE_H = { full: 26, folded: 10, hidden: 0 } as const;
+const LANE_FULL_COMPACT = 22;
 const HIDDEN_ROW = 18;
-const TRACK = 56; // spec v2.1: track lane default 56 px
+/** Track row height: 56 px, or 48 px at compact density (spec v2.1 tokens). Set per render by
+ *  the timeline (one timeline per window). */
+let TRACK = 56;
+export const TRACK_H = { comfortable: 56, compact: 48 } as const;
 const HEAD_W = 252;
 
 type Hit = { x: number; y: number; w: number; h: number; kind: "clip" | "marker" | "auto"; id: string };
@@ -166,6 +170,8 @@ interface Props {
   onLaneMode?: (m: LaneMode) => void;
   /** The edit tool (toolbar). */
   tool?: Tool;
+  /** Compact density (Preferences › Appearance): shorter track rows and marker lanes. */
+  compact?: boolean;
   /** Restored vertical scroll for this project, and a callback to persist it. */
   initialScrollY?: number;
   onScrollY?: (y: number) => void;
@@ -191,8 +197,9 @@ interface Drag {
   preview?: ClipEdit;
 }
 
-export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full", onLaneMode, tool = "select", initialScrollY = 0, onScrollY }: Props) {
-  const LANE = LANE_H[laneMode];
+export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full", onLaneMode, tool = "select", compact = false, initialScrollY = 0, onScrollY }: Props) {
+  TRACK = compact ? TRACK_H.compact : TRACK_H.comfortable;
+  const LANE = laneMode === "full" && compact ? LANE_FULL_COMPACT : LANE_H[laneMode];
   const { view, tx, rate, run, livePosition } = eng;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);

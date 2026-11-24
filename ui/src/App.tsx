@@ -310,7 +310,7 @@ export function App() {
           <div className="center-body">
             {center === "timeline" && (
               <Timeline key={view.root} eng={eng} vp={vp} setVp={setVp} sel={sel} setSel={setSel} snapOn={snapOn}
-                laneMode={lay.lanes} onLaneMode={(m) => setLay({ lanes: m })} tool={tool}
+                laneMode={lay.lanes} onLaneMode={(m) => setLay({ lanes: m })} tool={tool} compact={thm.density === "compact"}
                 initialScrollY={(view.root && getLayout().projects?.[view.root]?.scrollY) || 0}
                 onScrollY={(y) => view.root && saveLayout({ projects: { [view.root]: { scrollY: y } } })} />
             )}
