@@ -513,7 +513,7 @@ It has not yet been tested with files from Media Composer, Pro Tools or Resolve.
    automation) on each OS, and sample-accurate Audio Unit automation
    (`AudioUnitScheduleParameters`).
 2. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
-3. **Distribution:** cloud-HSM Windows signing (`signCommand`), a beta update channel, and delta updates.
+3. **Distribution:** a beta update channel and delta updates. (Windows signing goes through Azure Trusted Signing: see RELEASING.md.)
 4. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).
 5. **Interchange:** open the AAF export in a pinned Resolve/Fairlight version (and Pro Tools), import AAFs exported by Media Composer, Premiere, Resolve and Pro Tools (with real AES3/D-10 and multitrack OP1a MXF), record the feature matrix (volume and pan automation especially: hosts differ in whether they
 read track-level gain/pan operations, and in their pan laws), and the OTIO export in Resolve and an OTIO-based conform tool.
