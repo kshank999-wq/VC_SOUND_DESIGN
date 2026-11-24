@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { call } from "../api";
 import type { EngineHook } from "../store";
-import { catColor, catKey, type Bus, type Clip, type Marker, type Selection, type Track } from "../types";
+import { catColor, laneColor, catKey, type Bus, type Clip, type Marker, type Selection, type Track } from "../types";
 import { frameAtSample, sampleAtFrame, snap, tcAt, type Rate } from "../tc";
 import { applyClipDrag, clipZone, type ClipEdit, type ClipZone } from "../clipEdit";
 import { AUTO_OPEN_KEY, formatValue, hidePluginLane, isPluginParam, LANES_EVENT, neutral, pluginParamId, posToValue, showPluginLane, shownPluginLanes, valueAt, valueToPos, type AutoPoint, type Param } from "../automation";
@@ -323,7 +323,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         const w = Math.max(3, X(b) - x0);
         const selected = sel?.kind === "marker" && sel.id === m.id || (sel?.kind === "cue" && m.cue_id === sel.id);
         ctx.globalAlpha = ghost ? 0.5 : m.cue_id ? 1 : 0.75;
-        ctx.fillStyle = m.color || lane.color || catColor(lane.category);
+        ctx.fillStyle = m.color || laneColor(lane);
         if (m.kind === "point") {
           ctx.fillRect(x0 - 1, ly + 2, 3, LANE - 5);
           ctx.beginPath();
@@ -939,7 +939,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
             const keys = Object.entries(view.bindings).filter(([, b]) => b.lane_id === l.id).map(([k]) => k.replace("key:Key", "").replace("key:", "").replace(/^midi:\d+:/, "♪"));
             return (
               <div key={l.id} className="lane-head" style={{ height: LANE }}>
-                <span className="swatch" style={{ background: l.color }} />
+                <span className="swatch" style={{ background: laneColor(l) }} />
                 <span className="ellipsis">{l.name}</span>
                 {keys.length > 0 && <span className="keyhint">{keys.join(" ")}</span>}
               </div>

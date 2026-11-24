@@ -8,15 +8,16 @@ use crate::state::ProjectState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// The default marker lanes, in the UI's category colors (docs/spec/ui/tokens.css).
 pub fn create_default_lanes(s: &mut ProjectState) {
     let lanes = [
-        ("Foley • Footsteps", Category::Footsteps, "#4e9a06"),
-        ("Foley • Props", Category::Props, "#73d216"),
-        ("Hard FX", Category::HardFx, "#cc0000"),
-        ("Backgrounds / Atmos", Category::Background, "#3465a4"),
-        ("Design FX", Category::DesignFx, "#75507b"),
-        ("Dialogue notes", Category::Dialogue, "#c4a000"),
-        ("Music", Category::Music, "#ce5c00"),
+        ("Foley • Footsteps", Category::Footsteps, "#4ade80"),
+        ("Foley • Props", Category::Props, "#bef264"),
+        ("Hard FX", Category::HardFx, "#fb923c"),
+        ("Backgrounds / Atmos", Category::Background, "#2dd4bf"),
+        ("Design FX", Category::DesignFx, "#a78bfa"),
+        ("Dialogue notes", Category::Dialogue, "#e2e8f0"),
+        ("Music", Category::Music, "#f472b6"),
     ];
     for (i, (name, cat, color)) in lanes.into_iter().enumerate() {
         add_lane(s, name, cat, color, i as u32);

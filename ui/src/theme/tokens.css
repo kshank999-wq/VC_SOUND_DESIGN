@@ -1,0 +1,156 @@
+/* VC Sound Design — design tokens v2 ("modern console")
+   Fixes from the v1 review (Nov 23, 2026):
+   1. Accent-derived values are computed from --accent, so the accent theme switches everything.
+   2. No two status / category colors share a value; mute no longer reads as a lit key.
+   3. --text-faint passes 4.5:1 on panels and lanes.
+   4. The chassis carries a faint glow + grid so the panel blur has something to blur.
+   5. Stage-specific layout defaults (see the bottom block) replace the single fixed split.
+   v2.1 (Nov 24, 2026): measured fixes. Every pair of colors that shares a surface is at least
+   ΔE2000 15 apart (status keys 20), and text passes 4.5:1 on every surface. See SPEC.md ›
+   Changes in v2.1 for the table. Accent options are limited to ones that pass. */
+
+:root {
+  /* ---- Themeable ---- */
+  --accent: #5B8CFF;                     /* blue (default); themes: [data-accent] at the bottom */
+  --on-accent: #05070A;                  /* legend on a filled accent key */
+  --accent-glow: color-mix(in srgb, var(--accent) 45%, transparent);
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --accent-lit-top: color-mix(in srgb, var(--accent) 24%, transparent);
+  --accent-lit-bottom: color-mix(in srgb, var(--accent) 8%, transparent);
+  --readout: #7CF5D8;                    /* options: #9BF07A green, #FFC266 amber, #C7D2FE ice */
+  --readout-glow: color-mix(in srgb, var(--readout) 35%, transparent);
+
+  /* ---- Surfaces ---- */
+  --chassis: #07080B;
+  --chassis-fx:
+    radial-gradient(900px 520px at 18% -8%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 70%),
+    radial-gradient(800px 480px at 102% 108%, rgba(45, 212, 191, .07), transparent 70%),
+    repeating-linear-gradient(0deg, rgba(255,255,255,.018) 0 1px, transparent 1px 28px),
+    repeating-linear-gradient(90deg, rgba(255,255,255,.018) 0 1px, transparent 1px 28px),
+    var(--chassis);
+  --surface-0: #0D0F14;
+  --surface-1: rgba(22, 25, 33, .72);    /* panels, over 14px blur + 140% saturate */
+  --surface-1-opaque: #161921;           /* "Reduce transparency" */
+  --surface-2: rgba(32, 36, 47, .9);
+  --surface-3: #2A2F3D;
+  --hairline: rgba(255, 255, 255, .07);
+  --hairline-strong: rgba(255, 255, 255, .13);
+  --edge-light: linear-gradient(90deg, transparent, rgba(255,255,255,.18), transparent);
+  --readout-bg: #04070A;
+
+  /* ---- Text ---- */
+  --text: #D6DCE6;
+  --text-bright: #F4F7FB;
+  --text-dim: #9AA4B5;                   /* labels; ≥5.3:1 on every surface, hover included */
+  --text-faint: #949EB0;                 /* ≥4.9:1 on every surface (v2's #7B8597 failed on keys and hover) */
+
+  /* ---- Status (each value unique) ---- */
+  --meter-green: #16A34A;                /* = --ok; ΔE 16 from Footsteps (v2's #34D399 was 7) */
+  --meter-amber: #FEF08A;                /* = --warn; lemon, ΔE 15.7 from Solo (v2 used Solo's value) */
+  --meter-red: #DC2626;                  /* = --error; ΔE 12.9 from --rec */
+  --rec: #F43F5E;
+  --solo: #FBBF24;
+  --mute: #A1A1AA;                       /* zinc + dark legend; ΔE 17.9 from Dialogue (v2's #CBD5E1 was 4.9) */
+  --ok: #16A34A;                         /* icons, meter segments */
+  --warn: #FEF08A;
+  --error: #DC2626;                      /* icons, meter segments only: 3.7:1, too low for text */
+  --ok-text: #86EFAC;                    /* "passed" labels (≥7:1) */
+  --error-text: #F87171;                 /* error labels, Delete (≥4.8:1 on every surface) */
+  --playhead: #F0ABFC;                   /* ≥15.6 from every category (the mint readout was 8.9 from Backgrounds) */
+  --playhead-glow: color-mix(in srgb, var(--playhead) 45%, transparent);
+  --marker-flag: #FDE047;
+  --ai: #22D3EE;                         /* dashed ring + badge; fixed (cyan is no longer an accent option) */
+  --placeholder: #94A3B8;
+
+  /* ---- Spotting categories (distinct hue AND lightness) ---- */
+  --cat-footsteps: #4ADE80;
+  --cat-props: #BEF264;
+  --cat-hardfx: #FB923C;                 /* was #F43F5E (= --rec) */
+  --cat-background: #2DD4BF;             /* was #60A5FA (≈ accent, mute) */
+  --cat-designfx: #A78BFA;               /* was #C084FC (= --ai) */
+  --cat-dialogue: #E2E8F0;               /* was #FACC15 (≈ solo/warn) */
+  --cat-music: #F472B6;
+  --cat-custom: #D6C7A1;
+
+  /* ---- Type ---- */
+  --font-label: 'Barlow Condensed', sans-serif;
+  --font-ui: 'Inter', system-ui, sans-serif;
+  --font-readout: 'JetBrains Mono', 'Share Tech Mono', monospace;
+
+  /* ---- Shape, depth, motion ---- */
+  --r-panel: 12px;
+  --r-key: 8px;
+  --r-readout: 6px;
+  --r-pill: 999px;
+  --gap-panel: 6px;
+  --pad-page: 8px;
+  --blur: 14px;
+  --shadow-panel: 0 1px 0 rgba(255,255,255,.05) inset, 0 8px 24px rgba(0,0,0,.45);
+  --shadow-key: 0 1px 0 rgba(255,255,255,.08) inset, 0 1px 2px rgba(0,0,0,.5);
+  --shadow-key-on: 0 0 0 1px var(--accent) inset, 0 0 14px var(--accent-glow);
+  --shadow-readout: 0 1px 6px rgba(0,0,0,.9) inset, 0 0 0 1px rgba(255,255,255,.04);
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --t-fast: 120ms;
+  --t-med: 200ms;
+
+  /* ---- Geometry (reference 1680 × 1050) ---- */
+  --top-deck: 84px;
+  --toolbar: 44px;
+  --toolbar-key: 22px;                   /* label 10 + gap 3 + key 22 fits 44 */
+  --left-rack: 264px;
+  --inspector: 300px;
+  --track-header: 232px;
+  --lane-marker: 26px;
+  --lane-marker-folded: 10px;            /* minimap strip outside Spot */
+  --lane-track: 56px;                    /* default is now the old "compact" */
+  --lane-track-tall: 88px;
+  --lane-folder: 22px;
+  --lane-auto: 44px;
+  --lane-bus: 22px;
+  --ruler: 66px;
+  --status: 20px;
+}
+
+/* Stage layout defaults: picture height · marker lanes · bottom deck.
+   Set data-stage on the app root; users can still drag the splits (layout.set persists them). */
+[data-stage="prep"]    { --picture: 300px; --bottom-deck: 200px; }  /* lanes folded, folders collapsed */
+[data-stage="spot"]    { --picture: 320px; --bottom-deck: 150px; }  /* all 7 lanes at 26px, folders collapsed */
+[data-stage="build"]   { --picture: 170px; --bottom-deck: 200px; }  /* lanes folded, FOLEY + FX open */
+[data-stage="perform"] { --picture: 300px; --bottom-deck: 170px; }  /* lanes folded, FOLEY open */
+[data-stage="mix"]     { --picture: 0px;   --bottom-deck: 250px; }  /* picture + lanes hidden, buses shown */
+[data-stage="deliver"] { --picture: 0px;   --bottom-deck: 28px;  }  /* center = QA & Export, deck collapsed */
+
+/* Accent themes (on the app root). Each keeps ΔE ≥ 14 from every category and ≥ 20 from Mute
+   and Solo. Cyan, violet and amber are not offered: cyan is the AI ring, violet equals Design
+   FX, and amber is Solo. */
+[data-accent="blue"]    { --accent: #5B8CFF; --on-accent: #05070A; }   /* legend 6.4:1 */
+[data-accent="indigo"]  { --accent: #6366F1; --on-accent: #05070A; }   /* legend 4.5:1 */
+[data-accent="magenta"] { --accent: #C026D3; --on-accent: #FFFFFF; }   /* legend 4.7:1 */
+
+[data-density="compact"] {
+  --lane-track: 48px;
+  --lane-marker: 22px;
+  --track-header: 208px;
+}
+
+[data-reduce-transparency] { --surface-1: var(--surface-1-opaque); --blur: 0px; }
+
+/* Component recipes */
+.app     { background: var(--chassis-fx); }
+.panel   { background: var(--surface-1); backdrop-filter: blur(var(--blur)) saturate(140%); border: 1px solid var(--hairline); border-radius: var(--r-panel); box-shadow: var(--shadow-panel); position: relative; }
+.panel::before { content: ""; position: absolute; left: 14px; right: 14px; top: 0; height: 1px; background: var(--edge-light); }
+.label   { font: 600 10px/1 var(--font-label); letter-spacing: .14em; text-transform: uppercase; color: var(--text-dim); }
+.readout { background: var(--readout-bg); border-radius: var(--r-readout); box-shadow: var(--shadow-readout); color: var(--readout); font-family: var(--font-readout); font-variant-numeric: tabular-nums; text-shadow: 0 0 8px var(--readout-glow); }
+.key     { background: var(--surface-2); border: 1px solid var(--hairline-strong); border-radius: var(--r-key); box-shadow: var(--shadow-key); color: var(--text); font: 600 11.5px/1 var(--font-label); letter-spacing: .07em; text-transform: uppercase; transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease); }
+.key:hover { background: var(--surface-3); }
+.key[aria-pressed="true"] { background: linear-gradient(180deg, var(--accent-lit-top), var(--accent-lit-bottom)); box-shadow: var(--shadow-key-on); color: var(--text-bright); }
+.key.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; box-shadow: 0 0 16px var(--accent-glow); }
+.key.mute[aria-pressed="true"] { background: var(--mute); color: #05070A; box-shadow: none; }
+.key.solo[aria-pressed="true"] { background: var(--solo); color: #05070A; box-shadow: none; }
+.key:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.led     { width: 6px; height: 6px; border-radius: 50%; background: #262B36; }
+.led.on  { background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+.pill    { border-radius: var(--r-pill); padding: 2px 8px; font: 600 10.5px/1.4 var(--font-ui); }
+.ai-proposal { border: 1px dashed var(--ai); background: color-mix(in srgb, var(--ai) 6%, transparent); }
+
+@media (prefers-reduced-motion: reduce) { * { transition-duration: 0ms !important; } }

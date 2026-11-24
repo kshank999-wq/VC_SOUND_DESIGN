@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { call } from "../api";
 import { allFolders } from "../folders";
 import type { EngineHook } from "../store";
-import { catColor, catLabel, type Asset, type Marker, type Selection } from "../types";
+import { catColor, laneColor, catLabel, type Asset, type Marker, type Selection } from "../types";
 import { sampleAtTc, secs, tcAt } from "../tc";
 
 const STATUSES = ["spotted", "placeholder", "replaced", "needs_recording", "recorded", "approved", "missing", "omitted"];
@@ -78,7 +78,7 @@ export function Inspector({ eng, sel, setSel, libSel, onPerform }: Props) {
 
   const laneColorOf = (m: Marker) => {
     const l = view.lanes.find((x) => x.id === m.lane_id);
-    return l?.color || catColor(l?.category);
+    return l ? laneColor(l) : catColor(undefined);
   };
 
   let body: React.ReactNode = <div className="muted small pad">Select a cue, marker, clip or track.</div>;
