@@ -138,12 +138,19 @@ fn browser_mode_server_api_and_media_ranges() {
     assert_eq!(v["ok"]["project"]["name"], "Gravel Road");
     let (_, b) = http(port, "POST /api/bogus HTTP/1.0\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     assert!(serde_json::from_slice::<Value>(&b).unwrap()["error"].is_string());
-    let (h, b) = http(
-        port,
-        &format!("GET /media?path={} HTTP/1.0\r\nHost: x\r\nRange: bytes=100-199\r\nConnection: close\r\n\r\n", pic.replace(' ', "%20")),
-    );
-    assert!(h.starts_with("HTTP/1.0 206"), "{h}");
-    assert_eq!(b.len(), 100);
+    // the picture is a real video with ffmpeg, else a short placeholder file: ranges inside it
+    let whole = std::fs::read(&pic).unwrap();
+    let range = |r: &str| {
+        http(
+            port,
+            &format!("GET /media?path={} HTTP/1.0\r\nHost: x\r\nRange: bytes={r}\r\nConnection: close\r\n\r\n", pic.replace(' ', "%20")),
+        )
+    };
+    let (h, b) = range("10-29");
+    assert!(h.starts_with("HTTP/1.0 206") && h.contains(&format!("bytes 10-29/{}", whole.len())), "{h}");
+    assert_eq!(b, whole[10..30]);
+    let (h, _) = range(&format!("{}-", whole.len()));
+    assert!(h.starts_with("HTTP/1.0 416") && h.contains(&format!("bytes */{}", whole.len())), "a range past the end: {h}");
     let (h, _) = http(port, "GET /media?path=/etc/passwd HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n");
     assert!(h.starts_with("HTTP/1.0 403"), "only project media is served: {h}");
     let (h, b) = http(port, "GET /anything HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n");
