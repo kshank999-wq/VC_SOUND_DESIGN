@@ -590,7 +590,10 @@ mod editor {
             let win = xlib::XCreateSimpleWindow(dpy, parent as xlib::Window, 0, 0, w as u32, h as u32, 0, 0, 0x20_28_30);
             xlib::XSelectInput(dpy, win, xlib::ExposureMask | xlib::ButtonPressMask | xlib::Button1MotionMask);
             xlib::XMapWindow(dpy, win);
-            xlib::XFlush(dpy);
+            // Wait until the server has made the window: the host looks at it on its own
+            // connection once attached() returns, and XFlush only sends the requests.
+            // (Events this reads in wait in Xlib's queue; the timer drains them.)
+            xlib::XSync(dpy, 0);
             let run_loop = frame.cast::<IRunLoop>();
             let fd = ComWrapper::new(Fd(self.0.clone()));
             let timer = ComWrapper::new(Timer(self.0.clone()));
