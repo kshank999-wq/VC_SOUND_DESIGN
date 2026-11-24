@@ -29,10 +29,11 @@
   position (minus output latency) is exact. The render thread renders at project rate and
   resamples to the device rate.
 - **A device that does not run.** With no output device, a software clock consumes audio in real
-  time so the transport still keeps time. A device can also open and then never call back (a
-  virtual device on a headless Mac, for example). If an opened device hasn't called back within
-  500 ms, the software clock stands in and the transport reports a device warning. When the device
-  starts, it takes over and the warning clears.
+  time so the transport still keeps time. A device can also open and then never call back, call
+  back only now and then (a virtual device on a headless Mac, for example), or stall mid-session.
+  If the open device goes 500 ms without a callback, the software clock stands in and the transport
+  reports a device warning. The device gets the transport back only once it calls back steadily
+  (three 100 ms checks in a row), so a stray callback can't hand it back. The warning then clears.
 - **Automation writing.** In Touch/Latch/Write, control moves go to the engine, which stamps
   them with the heard position, monitors them live through mixer overrides (synced to the render
   thread only when they change), and on release/stop commits the pass as one undoable edit:

@@ -473,25 +473,37 @@ impl Consumer {
     }
 }
 
-/// How long an opened device may stay silent (no callbacks) before the
-/// software clock stands in for it.
+/// How long an open device may go without calling back before the software
+/// clock stands in for it.
 const STANDIN_AFTER: Duration = Duration::from_millis(500);
+/// How many output-thread ticks (100 ms) in a row the device must call back in
+/// before it gets the transport back: a stray callback from a device that is not
+/// really running must not hand it back.
+const HANDBACK_TICKS: u32 = 3;
 
-/// What the output thread does about a device that has not called back yet.
+/// What the output thread does about the open device's callbacks.
 #[derive(Debug, PartialEq)]
 enum Standin {
     Keep,
-    /// The device has not started: drive the transport with the software clock.
+    /// The device is not running: drive the transport with the software clock.
     Start,
-    /// The device started: hand back to it.
+    /// The device runs steadily again: hand back to it.
     Stop,
 }
 
-fn standin(device_started: bool, standing_in: bool, since_open: Duration) -> Standin {
-    match (device_started, standing_in) {
-        (true, true) => Standin::Stop,
-        (false, false) if since_open >= STANDIN_AFTER => Standin::Start,
-        _ => Standin::Keep,
+/// `ticks_running`: ticks in a row with device callbacks; `since_callback`: time since
+/// the last tick that saw one (or since the device opened).
+fn standin(standing_in: bool, ticks_running: u32, since_callback: Duration) -> Standin {
+    if standing_in {
+        if ticks_running >= HANDBACK_TICKS {
+            Standin::Stop
+        } else {
+            Standin::Keep
+        }
+    } else if since_callback >= STANDIN_AFTER {
+        Standin::Start
+    } else {
+        Standin::Keep
     }
 }
 
@@ -503,8 +515,9 @@ fn output_thread(sh: Arc<Shared>, consumer: Arc<Mutex<Consumer>>, rx: mpsc::Rece
         let (sh2, c2, run) = (sh.clone(), consumer.clone(), run.clone());
         thread::spawn(move || null_device(sh2, c2, run));
     };
-    // the open device: when, callbacks at that moment, and the warning it had
-    let mut opened: Option<(Instant, u64, Option<String>)> = None;
+    // the open device: callbacks counted so far, when the count last moved, ticks
+    // in a row it moved, and the device's own warning
+    let mut opened: Option<(u64, Instant, u32, Option<String>)> = None;
     let mut standing_in = false;
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
@@ -518,7 +531,7 @@ fn output_thread(sh: Arc<Shared>, consumer: Arc<Mutex<Consumer>>, rx: mpsc::Rece
                 match open_device(&sh, &consumer, rate) {
                     Ok(s) => {
                         _stream = Some(s);
-                        opened = Some((Instant::now(), sh.callbacks.load(SeqCst), sh.device_warning.lock().unwrap().clone()));
+                        opened = Some((sh.callbacks.load(SeqCst), Instant::now(), 0, sh.device_warning.lock().unwrap().clone()));
                     }
                     Err(e) => {
                         *sh.device_name.lock().unwrap() = format!("null (no audio device: {e})");
@@ -530,16 +543,25 @@ fn output_thread(sh: Arc<Shared>, consumer: Arc<Mutex<Consumer>>, rx: mpsc::Rece
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        // A device can open and then never call back (e.g. a virtual device on a
-        // headless machine): the software clock keeps the transport moving, and
-        // the device takes over as soon as it starts.
-        if let Some((at, cb0, warning)) = &opened {
-            match standin(sh.callbacks.load(SeqCst) > *cb0, standing_in, at.elapsed()) {
+        // A device can open and then never call back, or call back now and then
+        // (a virtual device on a headless machine), or stall mid-session: the
+        // software clock keeps the transport moving, and the device takes over
+        // again once it runs steadily.
+        if let Some((seen, last, ticks, warning)) = &mut opened {
+            let now = sh.callbacks.load(SeqCst);
+            if now > *seen {
+                *seen = now;
+                *last = Instant::now();
+                *ticks += 1;
+            } else {
+                *ticks = 0;
+            }
+            match standin(standing_in, *ticks, last.elapsed()) {
                 Standin::Keep => {}
                 Standin::Start => {
                     standing_in = true;
                     let name = sh.device_name.lock().unwrap().clone();
-                    let w = format!("{name} is not running: the transport keeps time without sound until it starts");
+                    let w = format!("{name} is not running: the transport keeps time without sound until it does");
                     *sh.device_warning.lock().unwrap() = Some(match warning {
                         Some(x) => format!("{x}; {w}"),
                         None => w,
@@ -668,12 +690,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_software_clock_stands_in_for_a_device_that_does_not_start_and_hands_back() {
+    fn the_software_clock_stands_in_for_a_stalled_device_and_hands_back_when_it_runs_steadily() {
         let ms = Duration::from_millis;
-        assert_eq!(standin(false, false, ms(100)), Standin::Keep, "a device gets time to start");
-        assert_eq!(standin(false, false, STANDIN_AFTER), Standin::Start, "silent too long: stand in");
-        assert_eq!(standin(false, true, ms(5000)), Standin::Keep, "still silent: keep standing in");
-        assert_eq!(standin(true, true, ms(5000)), Standin::Stop, "the device started: hand back");
-        assert_eq!(standin(true, false, ms(5000)), Standin::Keep, "a running device is left alone");
+        assert_eq!(standin(false, 0, ms(100)), Standin::Keep, "a device gets time to start");
+        assert_eq!(standin(false, 0, STANDIN_AFTER), Standin::Start, "no callbacks for too long: stand in");
+        assert_eq!(standin(false, 1, ms(5)), Standin::Keep, "a running device is left alone");
+        assert_eq!(standin(true, 0, ms(5000)), Standin::Keep, "still silent: keep standing in");
+        assert_eq!(standin(true, 1, ms(0)), Standin::Keep, "one stray callback does not hand back");
+        assert_eq!(standin(true, HANDBACK_TICKS - 1, ms(0)), Standin::Keep);
+        assert_eq!(standin(true, HANDBACK_TICKS, ms(0)), Standin::Stop, "running steadily: hand back");
     }
 }
