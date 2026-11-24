@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { LaneMode } from "../stage";
+import { Knob, fmtGain, fmtPan } from "./Knob";
+import { SegMeter } from "./Shell";
 import { call } from "../api";
 import type { EngineHook } from "../store";
 import { catColor, laneColor, catKey, type Bus, type Clip, type Marker, type Selection, type Track } from "../types";
@@ -22,7 +24,7 @@ const SCENES = 20;
  *  leaves one summary row. */
 const LANE_H = { full: 26, folded: 10, hidden: 0 } as const;
 const HIDDEN_ROW = 18;
-const TRACK = 54;
+const TRACK = 56; // spec v2.1: track lane default 56 px
 const HEAD_W = 252;
 
 type Hit = { x: number; y: number; w: number; h: number; kind: "clip" | "marker" | "auto"; id: string };
@@ -1126,12 +1128,14 @@ function FolderHead({ row, eng, selected, onSelect, onToggle }: { row: Extract<R
 function TrackHead({ t, depth, eng, selected, onSelect, autoOpen, hasAuto, onToggleAuto }: { t: Track; depth: number; eng: EngineHook; selected: boolean; onSelect: () => void; autoOpen: boolean; hasAuto: boolean; onToggleAuto: () => void }) {
   const meter = eng.tx?.meters[t.id] ?? 0;
   const db = meter > 0 ? 20 * Math.log10(meter) : -90;
-  const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
   const upd = (a: object) => eng.run("track.update", { id: t.id, ...a });
+  const color = t.color ?? catColor(t.category);
+  const num = (eng.view?.tracks.indexOf(t) ?? -1) + 1;
+  const bus = eng.view?.buses.find((b) => b.id === t.bus_id)?.name;
   return (
     <div
       className={"track-head" + (selected ? " selected" : "")}
-      style={{ height: TRACK, paddingLeft: 6 + depth * INDENT }}
+      style={{ height: TRACK, paddingLeft: 8 + depth * INDENT, "--trk": color } as React.CSSProperties}
       onMouseDown={onSelect}
       onDragOver={(e) => e.dataTransfer.types.includes(DRAG_TYPE) && e.preventDefault()}
       onDrop={(e) => {
@@ -1140,51 +1144,49 @@ function TrackHead({ t, depth, eng, selected, onSelect, autoOpen, hasAuto, onTog
         if (id && id !== t.id) eng.run("folder.move", { track_ids: [id], folder: t.folder });
       }}
     >
-      <div className="th-row">
-        <label
-          className="swatch track-color"
-          style={{ background: t.color ?? catColor(t.category) }}
-          title={t.color ? `Track color ${t.color} (click to change, Alt-click for the category's)` : "Track color: the category's (click to choose one)"}
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            if (e.altKey) {
-              e.preventDefault();
-              if (t.color) upd({ color: null });
-            }
-          }}
-        >
-          <input type="color" value={t.color ?? "#808080"} onChange={(e) => upd({ color: e.target.value })} />
-        </label>
-        <span
-          className="ellipsis th-name drag-grip"
-          title={`${t.name}\n${t.folder || "(top level)"}\nDrag onto a folder or track to move it`}
-          draggable
-          onDragStart={(e) => {
-            e.dataTransfer.setData(DRAG_TYPE, t.id);
-            e.dataTransfer.effectAllowed = "move";
-          }}
-        >
-          {t.name}
-        </span>
-        <button className={"tiny" + (t.mute ? " on-mute" : "")} title="Mute" onClick={() => upd({ mute: !t.mute })}>M</button>
-        <button className={"tiny" + (t.solo ? " on-solo" : "")} title="Solo" onClick={() => upd({ solo: !t.solo })}>S</button>
-        <button className={"tiny" + (t.armed ? " on-rec" : "")} title="Arm for recording" onClick={() => upd({ armed: !t.armed })}>●</button>
-        <button className={"tiny" + (autoOpen ? " on" : "") + (hasAuto ? " has-auto" : "")} title={(autoOpen ? "Hide" : "Show") + " automation lanes" + (hasAuto ? " (has automation)" : "")} onClick={onToggleAuto}>A</button>
-        <ModeButton eng={eng} ownerId={t.id} mode={(t.automation_mode ?? "read") as AutoMode} />
+      <div className="th-main">
+        <div className="th-row">
+          <label
+            className="swatch track-color"
+            style={{ background: color }}
+            title={t.color ? `Track color ${t.color} (click to change, Alt-click for the category's)` : "Track color: the category's (click to choose one)"}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              if (e.altKey) {
+                e.preventDefault();
+                if (t.color) upd({ color: null });
+              }
+            }}
+          >
+            <input type="color" value={t.color ?? "#808080"} aria-label="Track color" onChange={(e) => upd({ color: e.target.value })} />
+          </label>
+          <span className="th-num">{String(num).padStart(2, "0")}</span>
+          <span
+            className="ellipsis th-name drag-grip"
+            title={`${t.name}\n${t.folder || "(top level)"}\nDrag onto a folder or track to move it`}
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData(DRAG_TYPE, t.id);
+              e.dataTransfer.effectAllowed = "move";
+            }}
+          >
+            {t.name}
+          </span>
+          {bus && <span className="th-bus ellipsis">{bus}</span>}
+        </div>
+        <div className="th-row">
+          <button className="key th-key mute" aria-pressed={t.mute} title="Mute" onClick={() => upd({ mute: !t.mute })}>M</button>
+          <button className="key th-key solo" aria-pressed={t.solo} title="Solo" onClick={() => upd({ solo: !t.solo })}>S</button>
+          <button className="key th-key rec" aria-pressed={t.armed} title="Arm for recording" onClick={() => upd({ armed: !t.armed })}>●</button>
+          <button className={"key th-key" + (hasAuto ? " has-auto" : "")} aria-pressed={autoOpen} title={(autoOpen ? "Hide" : "Show") + " automation lanes" + (hasAuto ? " (has automation)" : "")} onClick={onToggleAuto}>A</button>
+          <ModeButton eng={eng} ownerId={t.id} mode={(t.automation_mode ?? "read") as AutoMode} />
+          <span className="spacer" />
+          <Knob value={t.gain_db} min={-48} max={12} reset={0} step={0.5} label={`${t.name} gain`} format={fmtGain} onCommit={(v) => upd({ gain_db: v })} />
+          <Knob value={t.pan} min={-1} max={1} reset={0} step={0.01} bipolar label={`${t.name} pan`} format={fmtPan} onCommit={(v) => upd({ pan: v })} />
+          <span className="th-db">{t.gain_db > 0 ? "+" : ""}{t.gain_db.toFixed(1)}</span>
+        </div>
       </div>
-      <div className="th-row">
-        <input
-          className="fader-h"
-          type="range" min={-48} max={12} step={0.5}
-          defaultValue={t.gain_db}
-          key={t.gain_db}
-          title={`${t.gain_db.toFixed(1)} dB`}
-          onMouseUp={(e) => upd({ gain_db: Number((e.target as HTMLInputElement).value) })}
-          onKeyUp={(e) => upd({ gain_db: Number((e.target as HTMLInputElement).value) })}
-        />
-        <span className="small mono">{t.gain_db > 0 ? "+" : ""}{t.gain_db.toFixed(1)}</span>
-        <div className="meter-h"><div style={{ width: pct + "%" }} className={db > -1 ? "hot" : ""} /></div>
-      </div>
+      <SegMeter db={db} n={12} vertical />
     </div>
   );
 }

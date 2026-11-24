@@ -1,7 +1,8 @@
 import { useRef, useState } from "react";
 import type { EngineHook } from "../store";
 import { catColor, type Bus, type Track } from "../types";
-import { ModeSelect, useAutoControl, type AutoMode } from "./AutoControl";
+import { ModeButton, useAutoControl, type AutoMode } from "./AutoControl";
+import { Knob, fmtPan } from "./Knob";
 import { InsertRack } from "./Plugins";
 
 function Meter({ v }: { v: number }) {
@@ -60,25 +61,10 @@ function Fader({ db, onBegin, onMove, onEnd }: { db: number; onBegin: (v: number
   );
 }
 
-/** Horizontal pan/balance control with touch begin/move/end. */
-function PanKnob({ value, onBegin, onMove, onEnd, title }: { value: number; onBegin: (v: number) => void; onMove: (v: number) => void; onEnd: (v: number) => void; title: string }) {
-  const held = useRef(false);
-  const [live, setLive] = useState<number | null>(null);
-  const v = live ?? value;
-  const read = (e: React.SyntheticEvent) => Number((e.target as HTMLInputElement).value);
-  return (
-    <input className="pan" type="range" min={-1} max={1} step={0.01} value={v} title={`${title} ${v === 0 ? "C" : (v < 0 ? "L " : "R ") + Math.round(Math.abs(v) * 100)}`}
-      onPointerDown={(e) => { held.current = true; const nv = read(e); setLive(nv); onBegin(nv); }}
-      onChange={(e) => { const nv = read(e); setLive(nv); if (held.current) onMove(nv); }}
-      onPointerUp={(e) => { held.current = false; const nv = read(e); setLive(null); onEnd(nv); }}
-      onDoubleClick={() => onEnd(0)} />
-  );
-}
-
 /** Shown when a strip's level/pan is driven by automation (the fader alone doesn't tell you). */
 function AutoBadge({ eng, id }: { eng: EngineHook; id: string }) {
   const pts = (eng.view?.automation ?? []).filter((p) => p.owner_id === id);
-  if (!pts.length) return <div className="auto-badge off">&nbsp;</div>;
+  if (!pts.length) return null;
   const kinds = [...new Set(pts.map((p) => (p.param === "pan" ? "pan" : "vol")))].join("+");
   return <div className="auto-badge" title={`${pts.length} automation points (${kinds})`}>A {kinds}</div>;
 }
@@ -88,27 +74,24 @@ function Strip({ t, eng }: { t: Track; eng: EngineHook }) {
   const mode = (t.automation_mode ?? "read") as AutoMode;
   const vol = useAutoControl(eng, t.id, "volume_db", mode, t.gain_db, true);
   const pan = useAutoControl(eng, t.id, "pan", mode, t.pan, true);
+  const color = t.color ?? catColor(t.category);
   return (
-    <div className={"strip" + (vol.writing || pan.writing ? " is-writing" : "")}>
-      <div className="strip-color" style={{ background: catColor(t.category) }} />
-      <div className="strip-name" title={t.name}>{t.name.split(" • ").slice(1).join(" • ") || t.name}</div>
-      <AutoBadge eng={eng} id={t.id} />
-      <div className="small muted ellipsis">{t.folder.split("/")[0]}</div>
+    <div className={"strip" + (vol.writing || pan.writing ? " is-writing" : "")} style={{ "--trk": color } as React.CSSProperties}>
+      <div className="strip-plate" title={`${t.name}\n${t.folder}`}>{t.name.split(" • ").slice(1).join(" • ") || t.name}</div>
       <InsertRack eng={eng} ownerId={t.id} inserts={t.inserts} compact />
-      <PanKnob value={pan.display} onBegin={pan.begin} onMove={pan.move} onEnd={pan.end} title="pan" />
+      <Knob value={pan.display} min={-1} max={1} reset={0} step={0.01} bipolar size={26} label={`${t.name} pan`} format={fmtPan}
+        onBegin={pan.begin} onMove={pan.move} onCommit={pan.end} />
       <div className="strip-mid">
         <Fader db={vol.display} onBegin={vol.begin} onMove={vol.move} onEnd={vol.end} />
         <Meter v={eng.tx?.meters[t.id] ?? 0} />
       </div>
-      <div className="mono small">{vol.display.toFixed(1)}</div>
-      <div className="btns tight">
-        <button className={"tiny" + (t.mute ? " on-mute" : "")} onClick={() => upd({ mute: !t.mute })}>M</button>
-        <button className={"tiny" + (t.solo ? " on-solo" : "")} onClick={() => upd({ solo: !t.solo })}>S</button>
+      <div className="strip-db">{vol.display > 0 ? "+" : ""}{vol.display.toFixed(1)}</div>
+      <div className="strip-keys">
+        <button className="key th-key mute" aria-pressed={t.mute} title="Mute" onClick={() => upd({ mute: !t.mute })}>M</button>
+        <button className="key th-key solo" aria-pressed={t.solo} title="Solo" onClick={() => upd({ solo: !t.solo })}>S</button>
+        <ModeButton eng={eng} ownerId={t.id} mode={mode} />
+        <AutoBadge eng={eng} id={t.id} />
       </div>
-      <ModeSelect eng={eng} ownerId={t.id} mode={mode} />
-      <select className="small" value={t.bus_id} onChange={(e) => upd({ bus_id: e.target.value })}>
-        {eng.view!.buses.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-      </select>
     </div>
   );
 }
@@ -120,18 +103,20 @@ function BusStrip({ b, eng }: { b: Bus; eng: EngineHook }) {
   const bal = useAutoControl(eng, b.id, "pan", mode, 0, false);
   return (
     <div className={"strip bus" + (b.parent_id ? "" : " master") + (vol.writing || bal.writing ? " is-writing" : "")}>
-      <div className="strip-name">{b.name}</div>
-      <AutoBadge eng={eng} id={b.id} />
-      <div className="small muted">{b.parent_id ? "stem bus" : "master"}</div>
+      <div className="strip-plate" title={b.parent_id ? "Stem bus" : "Master"}>{b.name}</div>
       <InsertRack eng={eng} ownerId={b.id} inserts={b.inserts ?? []} compact />
-      <PanKnob value={bal.display} onBegin={bal.begin} onMove={bal.move} onEnd={bal.end} title="balance (automation only)" />
+      <Knob value={bal.display} min={-1} max={1} reset={0} step={0.01} bipolar size={26} label={`${b.name} balance (automation only)`} format={fmtPan}
+        onBegin={bal.begin} onMove={bal.move} onCommit={bal.end} />
       <div className="strip-mid">
         <Fader db={vol.display} onBegin={vol.begin} onMove={vol.move} onEnd={vol.end} />
         <Meter v={b.parent_id ? eng.tx?.meters[b.id] ?? 0 : eng.tx?.master_peak ?? 0} />
       </div>
-      <div className="mono small">{vol.display.toFixed(1)}</div>
-      <button className={"tiny" + (b.mute ? " on-mute" : "")} onClick={() => upd({ mute: !b.mute })}>M</button>
-      <ModeSelect eng={eng} ownerId={b.id} mode={mode} />
+      <div className="strip-db">{vol.display > 0 ? "+" : ""}{vol.display.toFixed(1)}</div>
+      <div className="strip-keys">
+        <button className="key th-key mute" aria-pressed={b.mute} title="Mute" onClick={() => upd({ mute: !b.mute })}>M</button>
+        <ModeButton eng={eng} ownerId={b.id} mode={mode} />
+        <AutoBadge eng={eng} id={b.id} />
+      </div>
     </div>
   );
 }
