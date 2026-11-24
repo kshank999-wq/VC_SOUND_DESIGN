@@ -155,7 +155,8 @@ fn an_editors_otio_imports_clips_transitions_nesting_media_and_markers() {
     assert_eq!((d[1].timeline_start, d[1].source_offset, d[1].length, d[1].fade_in), (70 * f, 65 * f, 30 * f, 10 * f));
     assert!(d[2].muted && d[2].timeline_start == 110 * f, "the disabled clip, muted");
     let a = &st.assets[&d[0].asset_id];
-    assert!(Path::new(&a.path).starts_with(&dir), "the WAV used where it is (relative URL)");
+    // media paths are canonical (on macOS the temp folder /var/… is really /private/var/…)
+    assert!(Path::new(&a.path).starts_with(dir.canonicalize().unwrap()), "the WAV used where it is (relative URL)");
 
     // MX: the moved AIFF found by name and converted; the nested stack trimmed to its range
     let mx = track("MX");
