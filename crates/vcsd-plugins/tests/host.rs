@@ -101,14 +101,16 @@ fn loads_a_real_bundle_and_reports_broken_ones() {
     std::fs::write(dir.join("Broken.vst3"), b"not a library").unwrap();
 
     let mut cache = scan::Cache::default();
+    // the bundles found in the folder (on macOS the scan also lists the system's Audio Units)
+    let vst3 = |r: &scan::Report| r.plugins.iter().filter(|p| p.format == "vst3").count();
     let rep = scan::scan(std::slice::from_ref(&dir), &mut cache, &scan::Runner::InProcess, false);
     assert_eq!(rep.bundles, 2, "nested vendor folders are searched");
-    assert_eq!(rep.plugins.len(), 2);
+    assert_eq!(vst3(&rep), 2, "{:?}", rep.plugins.iter().map(|p| (&p.format, &p.name)).collect::<Vec<_>>());
     assert_eq!(rep.failed.len(), 1);
     assert!(rep.failed[0].path.ends_with("Broken.vst3"));
     // unchanged bundles come from the cache
     let again = scan::scan(std::slice::from_ref(&dir), &mut cache, &scan::Runner::InProcess, false);
-    assert_eq!((again.scanned, again.plugins.len()), (0, 2));
+    assert_eq!((again.scanned, vst3(&again)), (0, 2));
 
     let delay = rep.plugins.iter().find(|p| p.name == "VCSD Test Delay").unwrap();
     let inst = vcsd_plugins::instantiate(delay, Setup::default()).unwrap();
