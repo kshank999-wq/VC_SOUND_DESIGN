@@ -158,3 +158,18 @@ body.resizing-h, body.resizing-h * { cursor: row-resize !important; }
 
 /* the detached mixer window */
 .mixer-window { padding: 8px; }
+
+/* timeline: header column and marker lanes */
+.tl-heads { background: var(--surface-1-opaque); border-right: 1px solid var(--hairline); }
+.tl-corner { display: flex; align-items: flex-end; justify-content: space-between; gap: 6px; background: #10131A; border-bottom: 1px solid var(--hairline); }
+.lanes-key { height: 18px; padding: 0 7px; font-size: 10px; margin-bottom: 3px; }
+.lane-head { border-bottom: 1px solid rgba(255,255,255,.035); color: var(--text); }
+.lane-head.folded { padding: 0 8px; border-bottom: 0; }
+.lane-strip { display: block; width: 100%; height: 4px; border-radius: 2px; opacity: .75; }
+.lanes-summary { width: 100%; background: none; border: 0; border-bottom: 1px solid var(--hairline); cursor: pointer; text-align: left;
+  font: 600 10px/1 var(--font-label); letter-spacing: .12em; text-transform: uppercase; color: var(--text-dim); }
+.lanes-summary:hover { color: var(--text); }
+.keyhint { color: var(--text-dim); font-family: var(--font-readout); }
+.track-head.selected { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.folder-head { background: #141823; }
+.folder-head.selected { background: color-mix(in srgb, var(--accent) 12%, #141823); }

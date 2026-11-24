@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { LaneMode } from "../stage";
 import { call } from "../api";
 import type { EngineHook } from "../store";
 import { catColor, laneColor, catKey, type Bus, type Clip, type Marker, type Selection, type Track } from "../types";
@@ -17,7 +18,10 @@ export interface Viewport {
 
 const RULER = 26;
 const SCENES = 20;
-const LANE = 24;
+/** Marker lane height per mode (spec v2.1: full 26, folded 10-px minimap strips); hidden
+ *  leaves one summary row. */
+const LANE_H = { full: 26, folded: 10, hidden: 0 } as const;
+const HIDDEN_ROW = 18;
 const TRACK = 54;
 const HEAD_W = 252;
 
@@ -154,6 +158,9 @@ interface Props {
   sel: Selection;
   setSel: (s: Selection) => void;
   snapOn: boolean;
+  /** Marker lanes: full (Spot), folded strips, or hidden behind one row (Mix). */
+  laneMode?: LaneMode;
+  onLaneMode?: (m: LaneMode) => void;
   /** Restored vertical scroll for this project, and a callback to persist it. */
   initialScrollY?: number;
   onScrollY?: (y: number) => void;
@@ -174,7 +181,8 @@ interface Drag {
   preview?: ClipEdit;
 }
 
-export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY = 0, onScrollY }: Props) {
+export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full", onLaneMode, initialScrollY = 0, onScrollY }: Props) {
+  const LANE = LANE_H[laneMode];
   const { view, tx, rate, run, livePosition } = eng;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -230,7 +238,8 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
     current: (slot, id) => paramsOf(slot)?.find((p) => p.id === id)?.value ?? 0.5,
   });
   const rowsH = rows.reduce((a, r) => a + r.h, 0);
-  const contentH = RULER + SCENES + lanes.length * LANE + rowsH + 40;
+  const lanesH = laneMode === "hidden" ? HIDDEN_ROW : lanes.length * LANE;
+  const contentH = RULER + SCENES + lanesH + rowsH + 40;
   const stateRef = useRef({ view, tx, vp, sel, scrollY, size, rate, livePosition, rows });
   stateRef.current = { view, tx, vp, sel, scrollY, size, rate, livePosition, rows };
 
@@ -307,14 +316,22 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
       const laneY = new Map<string, number>();
       for (const l of view.lanes) {
         laneY.set(l.id, y);
-        ctx.fillStyle = C("--lane-bg");
-        ctx.fillRect(0, y, W, LANE - 1);
+        if (LANE) {
+          ctx.fillStyle = C("--lane-bg");
+          ctx.fillRect(0, y, W, LANE - 1);
+        }
         y += LANE;
       }
+      if (laneMode === "hidden") {
+        ctx.fillStyle = C("--lane-bg");
+        ctx.fillRect(0, y, W, HIDDEN_ROW - 1);
+        y += HIDDEN_ROW;
+      }
+      const small = LANE < 16;
       const oneF = sampleAtFrame(rate, 1);
       const drawMarker = (m: Marker, dx: number, ghost: boolean) => {
         const ly = laneY.get(m.lane_id);
-        if (ly === undefined) return;
+        if (ly === undefined || !LANE) return;
         const lane = view.lanes.find((l) => l.id === m.lane_id)!;
         const a = m.start_sample + dx;
         const b = Math.max(m.end_sample + dx, a + oneF);
@@ -324,7 +341,10 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         const selected = sel?.kind === "marker" && sel.id === m.id || (sel?.kind === "cue" && m.cue_id === sel.id);
         ctx.globalAlpha = ghost ? 0.5 : m.cue_id ? 1 : 0.75;
         ctx.fillStyle = m.color || laneColor(lane);
-        if (m.kind === "point") {
+        if (small) {
+          // folded: a minimap strip, no labels
+          ctx.fillRect(m.kind === "point" ? x0 - 1 : x0, ly + 1, m.kind === "point" ? 2 : w, LANE - 2);
+        } else if (m.kind === "point") {
           ctx.fillRect(x0 - 1, ly + 2, 3, LANE - 5);
           ctx.beginPath();
           ctx.moveTo(x0 - 5, ly + 2);
@@ -334,8 +354,8 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         } else {
           ctx.fillRect(x0, ly + 3, w, LANE - 7);
         }
-        ctx.fillStyle = "#000";
-        for (const e of m.sub_events) {
+        ctx.fillStyle = "#05070A";
+        if (!small) for (const e of m.sub_events) {
           const ex = X(e + dx);
           ctx.fillRect(ex, ly + LANE - 9, 1.5, 5);
         }
@@ -345,6 +365,10 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
           ctx.strokeRect(x0 - 2, ly + 1, (m.kind === "point" ? 4 : w) + 4, LANE - 3);
         }
         ctx.globalAlpha = 1;
+        if (small) {
+          if (!ghost) newHits.push({ x: x0 - 3, y: ly - scrollY, w: (m.kind === "point" ? 6 : w) + 3, h: LANE, kind: "marker", id: m.id });
+          return;
+        }
         ctx.fillStyle = C("--tl-text");
         ctx.font = "11px var(--font)";
         const cue = m.cue_id ? view.cues.find((c) => c.id === m.cue_id) : null;
@@ -353,7 +377,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         ctx.beginPath();
         ctx.rect(x0 + (m.kind === "point" ? 8 : 3), ly, m.kind === "point" ? 240 : Math.max(0, w - 5), LANE);
         ctx.clip();
-        ctx.fillStyle = m.kind === "point" ? C("--tl-text") : "#0b0b0b";
+        ctx.fillStyle = m.kind === "point" ? C("--tl-text") : "#05070A";
         ctx.fillText(label, x0 + (m.kind === "point" ? 8 : 4), ly + 15);
         ctx.restore();
         if (!ghost) newHits.push({ x: x0 - 4, y: ly - scrollY, w: (m.kind === "point" ? 8 : w) + 4, h: LANE, kind: "marker", id: m.id });
@@ -363,17 +387,19 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
       for (const p of view.proposals.filter((p) => p.status === "pending")) {
         const cue = view.cues.find((c) => c.id === p.cue_id);
         const ly = cue?.lane_id ? laneY.get(cue.lane_id) : undefined;
-        if (ly === undefined) continue;
+        if (ly === undefined || !LANE) continue;
         ctx.setLineDash([4, 3]);
-        ctx.strokeStyle = "#ffd966";
+        ctx.strokeStyle = C("--ai");
         const a = X(p.start_sample);
         const w = Math.max(4, X(Math.max(p.end_sample, p.start_sample + oneF)) - a);
         ctx.strokeRect(a, ly + 2, w, LANE - 5);
         ctx.setLineDash([]);
-        ctx.fillStyle = "#ffd966";
-        for (const e of p.sub_events) ctx.fillRect(X(e), ly + 3, 1.5, LANE - 7);
-        ctx.font = "10px var(--font)";
-        ctx.fillText(`AI ${(p.confidence * 100).toFixed(0)}%`, a + 3, ly - 1 + LANE);
+        ctx.fillStyle = C("--ai");
+        if (!small) {
+          for (const e of p.sub_events) ctx.fillRect(X(e), ly + 3, 1.5, LANE - 7);
+          ctx.font = "10px var(--font)";
+          ctx.fillText(`AI ${(p.confidence * 100).toFixed(0)}%`, a + 3, ly - 1 + LANE);
+        }
       }
       // new range being drawn
       if (d?.kind === "newRange" && d.laneId && laneY.has(d.laneId)) {
@@ -704,9 +730,9 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
   };
   /** Track/automation row under canvas y, with its top in canvas coordinates. */
   const rowAt = (y: number) => {
-    const cy = y + scrollY - RULER - SCENES - lanes.length * LANE;
+    const cy = y + scrollY - RULER - SCENES - lanesH;
     const r = rows.find((r) => cy >= r.y && cy < r.y + r.h);
-    return r ? { row: r, top: RULER + SCENES + lanes.length * LANE + r.y - scrollY } : null;
+    return r ? { row: r, top: RULER + SCENES + lanesH + r.y - scrollY } : null;
   };
   const autoPoints = (ownerId: string, param: Param) => ((view?.automation ?? []) as AutoPoint[]).filter((p) => p.owner_id === ownerId && p.param === param);
 
@@ -729,6 +755,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
     return best;
   };
   const laneAt = (y: number) => {
+    if (!LANE) return null;
     const cy = y + scrollY - RULER - SCENES;
     const i = Math.floor(cy / LANE);
     return i >= 0 && i < lanes.length ? lanes[i] : null;
@@ -934,8 +961,22 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         <div style={{ transform: `translateY(${-scrollY}px)` }}>
           <div className="tl-corner" style={{ height: RULER + SCENES }}>
             <span className="muted small">{frameLabel(rate, vp)}</span>
+            {onLaneMode && (
+              <button className="key lanes-key" title="Marker lanes: full, folded strips, or hidden"
+                onClick={() => onLaneMode(laneMode === "full" ? "folded" : laneMode === "folded" ? "hidden" : "full")}>
+                Lanes · {laneMode}
+              </button>
+            )}
           </div>
-          {lanes.map((l) => {
+          {laneMode === "hidden" ? (
+            <button className="lane-head lanes-summary" style={{ height: HIDDEN_ROW }} title="Show the marker lanes as strips" onClick={() => onLaneMode?.("folded")}>
+              ▸ Marker lanes · {lanes.length} folded
+            </button>
+          ) : laneMode === "folded" ? lanes.map((l) => (
+            <div key={l.id} className="lane-head folded" style={{ height: LANE }} title={l.name}>
+              <span className="lane-strip" style={{ background: laneColor(l) }} />
+            </div>
+          )) : lanes.map((l) => {
             const keys = Object.entries(view.bindings).filter(([, b]) => b.lane_id === l.id).map(([k]) => k.replace("key:Key", "").replace("key:", "").replace(/^midi:\d+:/, "♪"));
             return (
               <div key={l.id} className="lane-head" style={{ height: LANE }}>
