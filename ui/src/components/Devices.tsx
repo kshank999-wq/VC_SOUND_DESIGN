@@ -21,8 +21,20 @@ function describeMidi(b: number[]): string {
   }
 }
 
-/** Audio & MIDI preferences (per computer, saved across projects). */
+/** Audio & MIDI preferences in a dialog of their own (status strip, welcome screen). */
 export function DevicesDialog({ eng, onClose }: { eng: EngineHook; onClose: () => void }) {
+  return (
+    <div className="modal-bg" onMouseDown={onClose}>
+      <div className="modal devices" role="dialog" aria-label="Audio & MIDI" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="panel-title">Audio & MIDI</div>
+        <DevicesPanel eng={eng} onDone={onClose} />
+      </div>
+    </div>
+  );
+}
+
+/** Audio & MIDI preferences (per computer, saved across projects). */
+export function DevicesPanel({ eng, onDone }: { eng: EngineHook; onDone?: () => void }) {
   const [d, setD] = useState<Devices | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false);
@@ -58,9 +70,7 @@ export function DevicesDialog({ eng, onClose }: { eng: EngineHook; onClose: () =
   const out = d?.outputs.find((o) => o.name === (d.prefs.output_device ?? ""));
   const midiLive = a?.midi_last && a.midi_last.ms_ago < 350;
   return (
-    <div className="modal-bg" onMouseDown={onClose}>
-      <div className="modal devices" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="panel-title">Audio & MIDI</div>
+    <div className="devices">
         {!d ? <div className="muted pad">Scanning devices…</div> : (
           <>
             <section>
@@ -111,11 +121,10 @@ export function DevicesDialog({ eng, onClose }: { eng: EngineHook; onClose: () =
               <button onClick={refresh}>Refresh</button>
               <span className="spacer" />
               <span className="small muted" title={d.prefs_path ?? ""}>Saved for this computer, all projects</span>
-              <button className="primary" onClick={onClose}>Done</button>
+              {onDone && <button className="primary" onClick={onDone}>Done</button>}
             </div>
           </>
         )}
-      </div>
     </div>
   );
 }

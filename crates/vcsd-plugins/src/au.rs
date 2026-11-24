@@ -279,8 +279,9 @@ unsafe extern "C" fn input_cb(
     let feed = &*(refcon as *const Mutex<Feed>);
     let Ok(f) = feed.try_lock() else { return -1 };
     let abl = &mut *data;
-    for b in 0..(abl.mNumberBuffers as usize).min(MAX_CH) {
-        let dst = abl.mBuffers[b].mData as *mut f32;
+    let used = (abl.mNumberBuffers as usize).min(MAX_CH);
+    for (b, buf) in abl.mBuffers.iter().enumerate().take(used) {
+        let dst = buf.mData as *mut f32;
         if dst.is_null() {
             continue;
         }

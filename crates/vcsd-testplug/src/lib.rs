@@ -553,7 +553,12 @@ mod editor {
     }
     impl ITimerHandlerTrait for Timer {
         unsafe fn onTimer(&self) {
-            self.0.paint(); // shows changes made by the host (automation, its own sliders)
+            // Drain events and repaint (the repaint shows changes the host made: automation,
+            // its own sliders). Xlib reads whatever is waiting on the socket into its own queue
+            // during any call, the drawing in paint() included, and an event queued that way
+            // leaves the socket empty, so onFDIsSet never fires for it. Real plugins drain on
+            // their timer for the same reason.
+            self.0.events();
         }
     }
 
@@ -585,7 +590,10 @@ mod editor {
             let win = xlib::XCreateSimpleWindow(dpy, parent as xlib::Window, 0, 0, w as u32, h as u32, 0, 0, 0x20_28_30);
             xlib::XSelectInput(dpy, win, xlib::ExposureMask | xlib::ButtonPressMask | xlib::Button1MotionMask);
             xlib::XMapWindow(dpy, win);
-            xlib::XFlush(dpy);
+            // Wait until the server has made the window: the host looks at it on its own
+            // connection once attached() returns, and XFlush only sends the requests.
+            // (Events this reads in wait in Xlib's queue; the timer drains them.)
+            xlib::XSync(dpy, 0);
             let run_loop = frame.cast::<IRunLoop>();
             let fd = ComWrapper::new(Fd(self.0.clone()));
             let timer = ComWrapper::new(Timer(self.0.clone()));

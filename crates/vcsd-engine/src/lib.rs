@@ -1144,6 +1144,15 @@ impl Engine {
                 })?;
                 Ok(json!({"id": id}))
             }
+            // the pencil: one stroke replaces the lane under it, as one undo step
+            "automation.draw" => {
+                let points: Vec<(i64, f32)> =
+                    a.get("points").and_then(|v| serde_json::from_value(v.clone()).ok()).ok_or("points: [[sample, value], …] required")?;
+                let n = self.edit(g, "draw automation", |st| {
+                    editing::draw_automation(st, auto_owner(a).map_err(Error::Invalid)?, auto_param(a), &points)
+                })?;
+                Ok(json!({"points": n}))
+            }
             "automation.mode" => {
                 let mode: AutoMode = serde_json::from_value(a.get("mode").cloned().unwrap_or(json!("read"))).map_err(e)?;
                 let owner = auto_owner(a)?.to_string();

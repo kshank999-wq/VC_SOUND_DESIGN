@@ -25,6 +25,16 @@ test("pubkey without private key: updater on but no artifacts; custom endpoint; 
   assert.equal(config.bundle.windows.digestAlgorithm, "sha256");
 });
 
+test("Azure Trusted Signing: every Windows file goes through the sign script", () => {
+  const script = "D:\\a\\repo\\scripts\\windows\\sign.ps1";
+  const { config, notes } = releaseConfig({ WINDOWS_SIGN_SCRIPT: script, WINDOWS_CERTIFICATE_THUMBPRINT: "AB12" });
+  const sc = config.bundle.windows.signCommand;
+  assert.equal(sc.cmd, "pwsh");
+  assert.deepEqual(sc.args.slice(-3), ["-File", script, "%1"], "the file is one argument, spaces and all");
+  assert.equal(config.bundle.windows.certificateThumbprint, undefined, "one signing route at a time");
+  assert.ok(notes.some((n) => n.includes("Azure Trusted Signing") && n.includes("ignored")));
+});
+
 test("pubkey but nowhere to fetch updates from is an error", () => {
   assert.throws(() => releaseConfig({ TAURI_UPDATER_PUBKEY: "PUB" }));
 });

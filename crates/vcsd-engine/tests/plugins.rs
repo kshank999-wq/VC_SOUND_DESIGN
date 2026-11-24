@@ -21,6 +21,7 @@ fn plugins_end_to_end() {
     vcsd_engine::demo::run(&proj).unwrap();
 
     let e = Engine::with_prefs(Some(root.join("cfg/prefs.json")));
+    e.player.use_software_clock(); // real-time logic, not the machine's audio hardware (see devices.rs)
     *e.plugin_scanner.lock().unwrap() = vcsd_plugins::scan::Runner::InProcess;
     // ---- scan: an added folder is remembered and searched
     let l = call(&e, "plugins.folders", json!({"folders": [plugdir]}));
@@ -130,6 +131,7 @@ fn plugin_parameter_automation() {
     let proj = root.join("proj");
     vcsd_engine::demo::run(&proj).unwrap();
     let e = Engine::with_prefs(Some(root.join("cfg/prefs.json")));
+    e.player.use_software_clock(); // real-time logic, not the machine's audio hardware (see devices.rs)
     *e.plugin_scanner.lock().unwrap() = vcsd_plugins::scan::Runner::InProcess;
     let l = call(&e, "plugins.folders", json!({"folders": [root.join("plugs")]}));
     let gain = l["plugins"].as_array().unwrap().iter().find(|p| p["name"] == "VCSD Test Gain").unwrap()["id"].clone();

@@ -39,6 +39,7 @@ fn call(e: &Arc<Engine>, cmd: &str, a: Value) -> Value {
 #[test]
 fn transport_runs_in_realtime_and_spotting_uses_heard_position() {
     let e = Engine::with_prefs(None);
+    e.player.use_software_clock(); // real-time logic, not the machine's audio hardware (see devices.rs)
     call(&e, "project.open", json!({"dir": copy_demo()}));
     let st = call(&e, "state.get", json!({}));
     assert!(st["cues"].as_array().unwrap().len() >= 9);
@@ -75,6 +76,7 @@ fn transport_runs_in_realtime_and_spotting_uses_heard_position() {
 #[test]
 fn perform_record_and_errors() {
     let e = Engine::with_prefs(None);
+    e.player.use_software_clock(); // real-time logic, not the machine's audio hardware (see devices.rs)
     call(&e, "project.open", json!({"dir": copy_demo()}));
     let st = call(&e, "state.get", json!({}));
     let cue =
@@ -94,9 +96,20 @@ fn perform_record_and_errors() {
     let clips: Vec<&Value> =
         st["clips"].as_array().unwrap().iter().filter(|c| c["cue_id"] == cue.as_str() && c["muted"] == false).collect();
     assert_eq!(clips.len(), 3);
-    // no input device in CI: recording fails cleanly, state unchanged
-    let err = e.call("record.start", json!({"cue_id": cue})).unwrap_err();
-    assert!(err.contains("input") || err.contains("device"), "{err}");
+    // Without an input device recording fails cleanly. Some CI machines have a virtual one (macOS):
+    // there it starts and stops cleanly, with a take or "no audio captured" if the device is silent.
+    match e.call("record.start", json!({"cue_id": cue})) {
+        Err(err) => assert!(err.contains("input") || err.contains("device"), "{err}"),
+        Ok(r) => {
+            assert!(r["device"].is_string(), "{r}");
+            assert!(e.call("record.start", json!({"cue_id": cue})).unwrap_err().contains("already recording"));
+            std::thread::sleep(Duration::from_millis(200));
+            if let Err(err) = e.call("record.stop", json!({})) {
+                assert!(err.contains("no audio captured"), "{err}");
+            }
+            assert!(e.call("record.stop", json!({})).unwrap_err().contains("not recording"));
+        }
+    }
     assert!(!call(&e, "transport.state", json!({}))["playing"].as_bool().unwrap());
     assert!(e.call("nope", json!({})).unwrap_err().contains("unknown command"));
     // audition a library sound on top of a stopped transport
@@ -119,6 +132,7 @@ fn http(port: u16, req: &str) -> (String, Vec<u8>) {
 #[test]
 fn browser_mode_server_api_and_media_ranges() {
     let e = Engine::with_prefs(None);
+    e.player.use_software_clock(); // real-time logic, not the machine's audio hardware (see devices.rs)
     call(&e, "project.open", json!({"dir": copy_demo()}));
     let pic = call(&e, "state.get", json!({}))["picture"]["path"].as_str().unwrap().to_string();
     let ui = tmp("ui");
@@ -138,12 +152,19 @@ fn browser_mode_server_api_and_media_ranges() {
     assert_eq!(v["ok"]["project"]["name"], "Gravel Road");
     let (_, b) = http(port, "POST /api/bogus HTTP/1.0\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     assert!(serde_json::from_slice::<Value>(&b).unwrap()["error"].is_string());
-    let (h, b) = http(
-        port,
-        &format!("GET /media?path={} HTTP/1.0\r\nHost: x\r\nRange: bytes=100-199\r\nConnection: close\r\n\r\n", pic.replace(' ', "%20")),
-    );
-    assert!(h.starts_with("HTTP/1.0 206"), "{h}");
-    assert_eq!(b.len(), 100);
+    // the picture is a real video with ffmpeg, else a short placeholder file: ranges inside it
+    let whole = std::fs::read(&pic).unwrap();
+    let range = |r: &str| {
+        http(
+            port,
+            &format!("GET /media?path={} HTTP/1.0\r\nHost: x\r\nRange: bytes={r}\r\nConnection: close\r\n\r\n", pic.replace(' ', "%20")),
+        )
+    };
+    let (h, b) = range("10-29");
+    assert!(h.starts_with("HTTP/1.0 206") && h.contains(&format!("bytes 10-29/{}", whole.len())), "{h}");
+    assert_eq!(b, whole[10..30]);
+    let (h, _) = range(&format!("{}-", whole.len()));
+    assert!(h.starts_with("HTTP/1.0 416") && h.contains(&format!("bytes */{}", whole.len())), "a range past the end: {h}");
     let (h, _) = http(port, "GET /media?path=/etc/passwd HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n");
     assert!(h.starts_with("HTTP/1.0 403"), "only project media is served: {h}");
     let (h, b) = http(port, "GET /anything HTTP/1.0\r\nHost: x\r\nConnection: close\r\n\r\n");

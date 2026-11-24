@@ -13,7 +13,12 @@ use vcsd_core::*;
 
 fn python() -> Option<String> {
     let py = std::env::var("VCSD_AAF_PYTHON").unwrap_or_else(|_| "python3".into());
-    let ok = std::process::Command::new(&py).args(["-c", "import aaf2"]).output().map(|o| o.status.success()).unwrap_or(false);
+    let ok = std::process::Command::new(&py)
+        .env("PYTHONUTF8", "1")
+        .args(["-c", "import aaf2"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     ok.then_some(py)
 }
 
@@ -145,7 +150,7 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     };
     let dir = tmp("aaffixture");
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/aaf/make_fixture.py");
-    let out = std::process::Command::new(&py).arg(script).arg(&dir).output().unwrap();
+    let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").arg(script).arg(&dir).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let aaf = dir.join("fixture.aaf");
 
@@ -179,7 +184,7 @@ fn an_editors_aaf_imports_clips_fades_gain_media_and_markers() {
     assert_eq!(a.channels, 1, "a mono extract of channel 1");
     let (_, extract) = wav::read_raw(Path::new(&a.path)).unwrap();
     let (_, orig) = wav::read_raw(&dir.join("dialog.wav")).unwrap();
-    let left: Vec<u8> = orig.chunks_exact(4).flat_map(|fr| fr[0..2].to_vec()).collect();
+    let left: Vec<u8> = orig.as_chunks::<4>().0.iter().flat_map(|fr| fr[0..2].to_vec()).collect();
     assert!(extract == left, "bit-exact left channel of the embedded essence");
 
     // MX: the linked music found by name next to the AAF; clip gain, volume curve and pan
@@ -386,7 +391,7 @@ fn buses_and_their_automation_come_back_from_our_aaf() {
                     f = aaf2.open(sys.argv[1], 'r')\n\
                     m = next(f.content.compositionmobs())\n\
                     print(json.dumps(json.loads(dict(m.comments.items())['VCSD'])['buses']))";
-        let out = std::process::Command::new(&py).args(["-c", code]).arg(&aaf).output().unwrap();
+        let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").args(["-c", code]).arg(&aaf).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let buses: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert!(buses.as_array().unwrap().iter().any(|b| b["name"] == "FX Sub" && b["gain_db"] == 1.5), "{buses}");
@@ -778,7 +783,7 @@ for sl in m.slots:
         if ps and hasattr(ps[0], 'value') and float(ps[0].value) == 0.0:
             print(sl.name)
 "#;
-        let out = std::process::Command::new(&py).args(["-c", code]).arg(&aaf).output().unwrap();
+        let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").args(["-c", code]).arg(&aaf).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let silent = String::from_utf8_lossy(&out.stdout).to_string();
         assert!(silent.lines().any(|l| l == gname), "the muted track silenced: {silent}");
@@ -1091,7 +1096,7 @@ with aaf2.open(sys.argv[1], 'rw') as f:
                 c['Position'].value = c['Position'].value + int(sys.argv[2])
                 c['CommentMarkerColor'].value = {'red': 65535, 'green': 0, 'blue': 0}
 "#;
-    let out = std::process::Command::new(&py).args(["-c", code]).arg(&file).arg("24").output().unwrap(); // one second: 24 frames
+    let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").args(["-c", code]).arg(&file).arg("24").output().unwrap(); // one second: 24 frames
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let (mut s3, root3) = session("aafspotpart3", "24", "01:00:00:00");
     let rep = s3.edit("i", |st| import(st, &file, &opts(&root3))).unwrap();
@@ -1135,7 +1140,7 @@ fn markers_in_frames_at_23_976_come_back_exact() {
         return;
     };
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/aaf/inspect.py");
-    let out = std::process::Command::new(&py).arg(script).arg(&file).output().unwrap();
+    let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").arg(script).arg(&file).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let mk = v["markers"].as_array().unwrap();

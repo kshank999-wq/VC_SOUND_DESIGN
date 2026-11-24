@@ -28,6 +28,15 @@
   seek epoch and per-frame timeline positions, so stale audio is discarded on locate and the heard
   position (minus output latency) is exact. The render thread renders at project rate and
   resamples to the device rate.
+- **A device that does not run.** With no output device, a software clock consumes audio in real
+  time so the transport still keeps time. A device can also open and then never call back, call
+  back only now and then (a virtual device on a headless Mac, for example), or stall mid-session.
+  If the open device goes 500 ms without a callback, the software clock stands in and the transport
+  reports a device warning. The device gets the transport back only once it calls back steadily
+  (three 100 ms checks in a row), so a stray callback can't hand it back. The warning then clears.
+  The tests of real-time behaviour (automation writing, plugins, transport) call
+  `Player::use_software_clock`, so they don't depend on the machine's audio hardware. A CI
+  runner's virtual device can stall. `tests/devices.rs` covers real devices.
 - **Automation writing.** In Touch/Latch/Write, control moves go to the engine, which stamps
   them with the heard position, monitors them live through mixer overrides (synced to the render
   thread only when they change), and on release/stop commits the pass as one undoable edit:
@@ -504,7 +513,7 @@ It has not yet been tested with files from Media Composer, Pro Tools or Resolve.
    automation) on each OS, and sample-accurate Audio Unit automation
    (`AudioUnitScheduleParameters`).
 2. **Hardware validation:** test the device matrix (ASIO on Windows via a cpal feature, aggregate devices on macOS) and measure round-trip latency for recording compensation. Add punch-in/out and multi-input recording.
-3. **Distribution:** cloud-HSM Windows signing (`signCommand`), a beta update channel, and delta updates.
+3. **Distribution:** a beta update channel and delta updates. (Windows signing goes through Azure Trusted Signing: see RELEASING.md.)
 4. **Performance:** streaming disk reads instead of full decode, a waveform/peak cache, and CPU/RAM/disk/dropout meters (`transport::perf_probe` is the starting point).
 5. **Interchange:** open the AAF export in a pinned Resolve/Fairlight version (and Pro Tools), import AAFs exported by Media Composer, Premiere, Resolve and Pro Tools (with real AES3/D-10 and multitrack OP1a MXF), record the feature matrix (volume and pan automation especially: hosts differ in whether they
 read track-level gain/pan operations, and in their pan laws), and the OTIO export in Resolve and an OTIO-based conform tool.

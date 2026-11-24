@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import type { LaneMode } from "../stage";
+import { TOOL_CURSOR, clipAction, thinStroke, type Tool } from "../tools";
+import { Knob, fmtGain, fmtPan } from "./Knob";
+import { SegMeter } from "./Shell";
 import { call } from "../api";
 import type { EngineHook } from "../store";
-import { catColor, catKey, type Bus, type Clip, type Marker, type Selection, type Track } from "../types";
+import { catColor, laneColor, catKey, type Bus, type Clip, type Marker, type Selection, type Track } from "../types";
 import { frameAtSample, sampleAtFrame, snap, tcAt, type Rate } from "../tc";
 import { applyClipDrag, clipZone, type ClipEdit, type ClipZone } from "../clipEdit";
 import { AUTO_OPEN_KEY, formatValue, hidePluginLane, isPluginParam, LANES_EVENT, neutral, pluginParamId, posToValue, showPluginLane, shownPluginLanes, valueAt, valueToPos, type AutoPoint, type Param } from "../automation";
@@ -17,8 +21,15 @@ export interface Viewport {
 
 const RULER = 26;
 const SCENES = 20;
-const LANE = 24;
-const TRACK = 54;
+/** Marker lane height per mode (spec v2.1: full 26, folded 10-px minimap strips); hidden
+ *  leaves one summary row. */
+const LANE_H = { full: 26, folded: 10, hidden: 0 } as const;
+const LANE_FULL_COMPACT = 22;
+const HIDDEN_ROW = 18;
+/** Track row height: 56 px, or 48 px at compact density (spec v2.1 tokens). Set per render by
+ *  the timeline (one timeline per window). */
+let TRACK = 56;
+export const TRACK_H = { comfortable: 56, compact: 48 } as const;
 const HEAD_W = 252;
 
 type Hit = { x: number; y: number; w: number; h: number; kind: "clip" | "marker" | "auto"; id: string };
@@ -96,7 +107,7 @@ function buildRows(tracks: Track[], buses: Bus[], open: Set<string>, collapsed: 
   ordered.forEach((b, i) => {
     rows.push({ kind: "bus", b, first: i === 0, y, h: BUS_H });
     y += BUS_H;
-    lanes({ id: b.id, name: b.name, color: b.parent_id ? "#9aa7b8" : "#e6c86e", pan: 0 }, b.inserts ?? []);
+    lanes({ id: b.id, name: b.name, color: b.parent_id ? "#9AA4B5" : "#F4F7FB", pan: 0 }, b.inserts ?? []);
   });
   return rows;
 }
@@ -154,13 +165,25 @@ interface Props {
   sel: Selection;
   setSel: (s: Selection) => void;
   snapOn: boolean;
+  /** Marker lanes: full (Spot), folded strips, or hidden behind one row (Mix). */
+  laneMode?: LaneMode;
+  onLaneMode?: (m: LaneMode) => void;
+  /** The edit tool (toolbar). */
+  tool?: Tool;
+  /** Compact density (Preferences › Appearance): shorter track rows and marker lanes. */
+  compact?: boolean;
   /** Restored vertical scroll for this project, and a callback to persist it. */
   initialScrollY?: number;
   onScrollY?: (y: number) => void;
 }
 
 interface Drag {
-  kind: "clip" | "marker" | "ruler" | "loop" | "newRange" | "auto";
+  kind: "clip" | "marker" | "ruler" | "loop" | "newRange" | "auto" | "pan" | "draw";
+  /** Hand: where the pan started. */
+  pan0?: { y: number; start: number; scroll: number };
+  /** Pencil: the stroke so far (canvas x/y and lane values) and its lane. */
+  stroke?: { x: number; y: number; sample: number; value: number }[];
+  drawLane?: { lane: string; param: Param; rowY: number };
   autoPreview?: { sample: number; value: number };
   autoTop?: number;
   zone?: ClipZone;
@@ -174,7 +197,9 @@ interface Drag {
   preview?: ClipEdit;
 }
 
-export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY = 0, onScrollY }: Props) {
+export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full", onLaneMode, tool = "select", compact = false, initialScrollY = 0, onScrollY }: Props) {
+  TRACK = compact ? TRACK_H.compact : TRACK_H.comfortable;
+  const LANE = laneMode === "full" && compact ? LANE_FULL_COMPACT : LANE_H[laneMode];
   const { view, tx, rate, run, livePosition } = eng;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -230,7 +255,8 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
     current: (slot, id) => paramsOf(slot)?.find((p) => p.id === id)?.value ?? 0.5,
   });
   const rowsH = rows.reduce((a, r) => a + r.h, 0);
-  const contentH = RULER + SCENES + lanes.length * LANE + rowsH + 40;
+  const lanesH = laneMode === "hidden" ? HIDDEN_ROW : lanes.length * LANE;
+  const contentH = RULER + SCENES + lanesH + rowsH + 40;
   const stateRef = useRef({ view, tx, vp, sel, scrollY, size, rate, livePosition, rows });
   stateRef.current = { view, tx, vp, sel, scrollY, size, rate, livePosition, rows };
 
@@ -300,21 +326,31 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
       // loop range
       const lr = st.tx?.loop_range;
       if (lr) {
-        ctx.fillStyle = "rgba(255, 200, 60, 0.07)";
+        ctx.fillStyle = C("--accent");
+        ctx.globalAlpha = 0.07;
         ctx.fillRect(X(lr[0]), 0, X(lr[1]) - X(lr[0]), contentH + RULER);
+        ctx.globalAlpha = 1;
       }
       // marker lanes
       const laneY = new Map<string, number>();
       for (const l of view.lanes) {
         laneY.set(l.id, y);
-        ctx.fillStyle = C("--lane-bg");
-        ctx.fillRect(0, y, W, LANE - 1);
+        if (LANE) {
+          ctx.fillStyle = C("--lane-bg");
+          ctx.fillRect(0, y, W, LANE - 1);
+        }
         y += LANE;
       }
+      if (laneMode === "hidden") {
+        ctx.fillStyle = C("--lane-bg");
+        ctx.fillRect(0, y, W, HIDDEN_ROW - 1);
+        y += HIDDEN_ROW;
+      }
+      const small = LANE < 16;
       const oneF = sampleAtFrame(rate, 1);
       const drawMarker = (m: Marker, dx: number, ghost: boolean) => {
         const ly = laneY.get(m.lane_id);
-        if (ly === undefined) return;
+        if (ly === undefined || !LANE) return;
         const lane = view.lanes.find((l) => l.id === m.lane_id)!;
         const a = m.start_sample + dx;
         const b = Math.max(m.end_sample + dx, a + oneF);
@@ -323,8 +359,11 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         const w = Math.max(3, X(b) - x0);
         const selected = sel?.kind === "marker" && sel.id === m.id || (sel?.kind === "cue" && m.cue_id === sel.id);
         ctx.globalAlpha = ghost ? 0.5 : m.cue_id ? 1 : 0.75;
-        ctx.fillStyle = m.color || lane.color || catColor(lane.category);
-        if (m.kind === "point") {
+        ctx.fillStyle = m.color || laneColor(lane);
+        if (small) {
+          // folded: a minimap strip, no labels
+          ctx.fillRect(m.kind === "point" ? x0 - 1 : x0, ly + 1, m.kind === "point" ? 2 : w, LANE - 2);
+        } else if (m.kind === "point") {
           ctx.fillRect(x0 - 1, ly + 2, 3, LANE - 5);
           ctx.beginPath();
           ctx.moveTo(x0 - 5, ly + 2);
@@ -334,8 +373,8 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         } else {
           ctx.fillRect(x0, ly + 3, w, LANE - 7);
         }
-        ctx.fillStyle = "#000";
-        for (const e of m.sub_events) {
+        ctx.fillStyle = "#05070A";
+        if (!small) for (const e of m.sub_events) {
           const ex = X(e + dx);
           ctx.fillRect(ex, ly + LANE - 9, 1.5, 5);
         }
@@ -345,6 +384,10 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
           ctx.strokeRect(x0 - 2, ly + 1, (m.kind === "point" ? 4 : w) + 4, LANE - 3);
         }
         ctx.globalAlpha = 1;
+        if (small) {
+          if (!ghost) newHits.push({ x: x0 - 3, y: ly - scrollY, w: (m.kind === "point" ? 6 : w) + 3, h: LANE, kind: "marker", id: m.id });
+          return;
+        }
         ctx.fillStyle = C("--tl-text");
         ctx.font = "11px var(--font)";
         const cue = m.cue_id ? view.cues.find((c) => c.id === m.cue_id) : null;
@@ -353,7 +396,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         ctx.beginPath();
         ctx.rect(x0 + (m.kind === "point" ? 8 : 3), ly, m.kind === "point" ? 240 : Math.max(0, w - 5), LANE);
         ctx.clip();
-        ctx.fillStyle = m.kind === "point" ? C("--tl-text") : "#0b0b0b";
+        ctx.fillStyle = m.kind === "point" ? C("--tl-text") : "#05070A";
         ctx.fillText(label, x0 + (m.kind === "point" ? 8 : 4), ly + 15);
         ctx.restore();
         if (!ghost) newHits.push({ x: x0 - 4, y: ly - scrollY, w: (m.kind === "point" ? 8 : w) + 4, h: LANE, kind: "marker", id: m.id });
@@ -363,17 +406,27 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
       for (const p of view.proposals.filter((p) => p.status === "pending")) {
         const cue = view.cues.find((c) => c.id === p.cue_id);
         const ly = cue?.lane_id ? laneY.get(cue.lane_id) : undefined;
-        if (ly === undefined) continue;
+        if (ly === undefined || !LANE) continue;
         ctx.setLineDash([4, 3]);
-        ctx.strokeStyle = "#ffd966";
+        ctx.strokeStyle = C("--ai");
         const a = X(p.start_sample);
         const w = Math.max(4, X(Math.max(p.end_sample, p.start_sample + oneF)) - a);
         ctx.strokeRect(a, ly + 2, w, LANE - 5);
         ctx.setLineDash([]);
-        ctx.fillStyle = "#ffd966";
-        for (const e of p.sub_events) ctx.fillRect(X(e), ly + 3, 1.5, LANE - 7);
-        ctx.font = "10px var(--font)";
-        ctx.fillText(`AI ${(p.confidence * 100).toFixed(0)}%`, a + 3, ly - 1 + LANE);
+        ctx.fillStyle = C("--ai");
+        if (!small) {
+          for (const e of p.sub_events) ctx.fillRect(X(e), ly + 3, 1.5, LANE - 7);
+          ctx.font = "10px var(--font)";
+          ctx.fillText(`AI ${(p.confidence * 100).toFixed(0)}%`, a + 3, ly - 1 + LANE);
+        }
+      }
+      // pencil stroke being drawn (canvas coordinates; content is translated by scrollY)
+      if (d?.kind === "draw" && d.stroke && d.stroke.length > 1) {
+        ctx.strokeStyle = C("--accent");
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        d.stroke.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y + scrollY) : ctx.moveTo(p.x, p.y + scrollY)));
+        ctx.stroke();
       }
       // new range being drawn
       if (d?.kind === "newRange" && d.laneId && laneY.has(d.laneId)) {
@@ -503,14 +556,14 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         const active = pv ? d!.zone : hv;
         if (w > 14 && (hv || pv || (sel?.kind === "clip" && sel.id === c.id))) {
           const handle = (hx: number, on: boolean) => {
-            ctx.fillStyle = on ? "#ffd24a" : "rgba(255,255,255,0.85)";
+            ctx.fillStyle = on ? C("--accent") : "rgba(255,255,255,0.85)";
             ctx.fillRect(hx - 3.5, top, 7, 7);
           };
           handle(X(a + geo.fade_in), active === "fadeIn");
           handle(X(b - geo.fade_out), active === "fadeOut");
         }
         if (active === "trimL" || active === "trimR") {
-          ctx.fillStyle = "#ffd24a";
+          ctx.fillStyle = C("--accent");
           ctx.fillRect(active === "trimL" ? x0 : x0 + w - 3, top, 3, bot - top);
         }
         if (pv && d!.zone !== "move") {
@@ -525,7 +578,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
           const lx = Math.min(Math.max(2, X(d!.cur) + 10), W - tw - 2);
           ctx.fillStyle = "rgba(10,10,12,0.9)";
           ctx.fillRect(lx, ty - 16, tw, 16);
-          ctx.fillStyle = "#ffd24a";
+          ctx.fillStyle = C("--accent");
           ctx.fillText(label, lx + 5, ty - 4);
         }
         if (selected) {
@@ -540,7 +593,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
           ctx.beginPath();
           ctx.rect(x0, ty, w - 2, TRACK);
           ctx.clip();
-          ctx.fillStyle = "#101010";
+          ctx.fillStyle = "#05070A";
           ctx.font = "10px var(--font)";
           const tag = c.performance_event_id ? "♪ " : c.take_id ? "● " : c.is_placeholder ? "◌ " : "";
           ctx.fillText(tag + (asset?.name ?? "?") + (asset?.missing ? " [MISSING]" : ""), x0 + 4, ty + 14);
@@ -597,7 +650,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
             if (px < -8 || px > W + 8) continue;
             const py = autoY(r.param, p.value, top);
             const active = d?.kind === "auto" && d.id === p.id;
-            ctx.fillStyle = active ? "#ffd24a" : "#f2f4f7";
+            ctx.fillStyle = active ? C("--accent") : "#F4F7FB";
             ctx.beginPath();
             ctx.arc(px, py, active ? 5 : 3.5, 0, Math.PI * 2);
             ctx.fill();
@@ -612,9 +665,11 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
           // being written right now: live value at the playhead
           const wx = X(st.livePosition());
           const wy = autoY(r.param, wr.value, top);
-          ctx.fillStyle = "rgba(229,83,75,0.25)";
+          ctx.fillStyle = C("--rec");
+          ctx.globalAlpha = 0.22;
           ctx.fillRect(0, top, W, AUTO - 1);
-          ctx.fillStyle = "#ff5a4f";
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = C("--rec");
           ctx.beginPath();
           ctx.arc(wx, wy, 5, 0, Math.PI * 2);
           ctx.fill();
@@ -628,7 +683,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
           const lx = Math.min(Math.max(2, X(d.autoPreview.sample) + 10), W - tw - 2);
           ctx.fillStyle = "rgba(10,10,12,0.9)";
           ctx.fillRect(lx, top + 2, tw, 16);
-          ctx.fillStyle = "#ffd24a";
+          ctx.fillStyle = C("--accent");
           ctx.fillText(label, lx + 5, top + 14);
         }
       }
@@ -678,7 +733,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         ctx.restore();
       }
       if (lr) {
-        ctx.fillStyle = "rgba(255, 200, 60, 0.8)";
+        ctx.fillStyle = C("--accent");
         ctx.fillRect(X(lr[0]), RULER - 4, X(lr[1]) - X(lr[0]), 4);
       }
       // ---- playhead
@@ -704,9 +759,9 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
   };
   /** Track/automation row under canvas y, with its top in canvas coordinates. */
   const rowAt = (y: number) => {
-    const cy = y + scrollY - RULER - SCENES - lanes.length * LANE;
+    const cy = y + scrollY - RULER - SCENES - lanesH;
     const r = rows.find((r) => cy >= r.y && cy < r.y + r.h);
-    return r ? { row: r, top: RULER + SCENES + lanes.length * LANE + r.y - scrollY } : null;
+    return r ? { row: r, top: RULER + SCENES + lanesH + r.y - scrollY } : null;
   };
   const autoPoints = (ownerId: string, param: Param) => ((view?.automation ?? []) as AutoPoint[]).filter((p) => p.owner_id === ownerId && p.param === param);
 
@@ -729,6 +784,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
     return best;
   };
   const laneAt = (y: number) => {
+    if (!LANE) return null;
     const cy = y + scrollY - RULER - SCENES;
     const i = Math.floor(cy / LANE);
     return i >= 0 && i < lanes.length ? lanes[i] : null;
@@ -744,6 +800,16 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         drag.current = { kind: "ruler", x0: x, s0: s, moved: false, delta: 0, cur: s };
         call("transport.locate", { sample: snapS(s) });
       }
+    } else if (tool === "hand") {
+      drag.current = { kind: "pan", x0: x, s0: s, moved: false, delta: 0, cur: s, pan0: { y, start: vp.start, scroll: scrollY } };
+    } else if (tool === "pencil" && rowAt(y)?.row.kind === "auto") {
+      const ra = rowAt(y)!;
+      const row = ra.row as Extract<Row, { kind: "auto" }>;
+      drag.current = {
+        kind: "draw", x0: x, s0: s, moved: false, delta: 0, cur: s,
+        drawLane: { lane: row.lane, param: row.param, rowY: row.y },
+        stroke: [{ x, y, sample: Math.max(0, Math.round(s)), value: autoVal(row.param, y, ra.top) }],
+      };
     } else if (hitAt(x, y, "auto") || rowAt(y)?.row.kind === "auto") {
       const ra = rowAt(y)!;
       const row = ra.row as Extract<Row, { kind: "auto" }>;
@@ -769,8 +835,15 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         let zone: ClipZone | undefined;
         if (h.kind === "clip") {
           const c = view.clips.find((c) => c.id === h.id)!;
-          zone = clipZone(h, c, x, y, vp.spp);
           setSel({ kind: "clip", id: c.id });
+          const act = clipAction(tool, clipZone(h, c, x, y, vp.spp), (x - h.x) / Math.max(1, h.w));
+          if (!act) return;
+          if ("split" in act) {
+            const at = e.altKey ? Math.round(s) : snapS(s);
+            if (at > c.timeline_start && at < c.timeline_start + c.length) run("clip.split", { id: c.id, at });
+            return;
+          }
+          zone = act.zone;
         } else {
           const m = view.markers.find((m) => m.id === h.id)!;
           setSel(m.cue_id ? { kind: "cue", id: m.cue_id } : { kind: "marker", id: m.id });
@@ -796,6 +869,15 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
       const fade = dd.zone === "fadeIn" || dd.zone === "fadeOut";
       dd.cur = dd.kind === "ruler" || fade || ev.altKey ? Math.round(cs) : snapS(cs);
       if (dd.kind === "ruler") call("transport.locate", { sample: snapS(cs) });
+      if (dd.kind === "pan" && dd.pan0) {
+        setVp({ ...stateRef.current.vp, start: dd.pan0.start - (p.x - dd.x0) * stateRef.current.vp.spp });
+        setScrollY(Math.max(0, Math.min(Math.max(0, contentH - size.h), dd.pan0.scroll - (p.y - dd.pan0.y))));
+      }
+      if (dd.kind === "draw" && dd.stroke && dd.drawLane) {
+        const top = RULER + SCENES + lanesH + dd.drawLane.rowY - scrollY;
+        const py = Math.max(top, Math.min(top + AUTO - 1, p.y));
+        dd.stroke.push({ x: p.x, y: py, sample: Math.max(0, Math.round(cs)), value: autoVal(dd.drawLane.param, py, top) });
+      }
       if (dd.kind === "clip" || dd.kind === "marker") {
         const base = dd.kind === "clip" ? view.clips.find((c) => c.id === dd.id)!.timeline_start : view.markers.find((m) => m.id === dd.id)!.start_sample;
         const tgt = base + (cs - dd.s0);
@@ -806,7 +888,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         const p = ((cur.view?.automation ?? []) as AutoPoint[]).find((q) => q.id === dd.id);
         const row = cur.rows.find((r) => r.kind === "auto" && r.y === dd.autoTop) as Extract<Row, { kind: "auto" }> | undefined;
         if (p && row) {
-          const top = RULER + SCENES + lanes.length * LANE + row.y - scrollY;
+          const top = RULER + SCENES + lanesH + row.y - scrollY;
           const sample = ev.shiftKey ? p.sample : Math.max(0, ev.altKey ? Math.round(cs) : snapS(cs));
           dd.autoPreview = { sample, value: autoVal(row.param, localXY(ev).y, top) };
         }
@@ -827,6 +909,11 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
       drag.current = null;
       if (!dd) return;
       if (dd.kind === "loop" && !dd.moved) call("transport.loop", {});
+      if (dd.kind === "draw" && dd.stroke && dd.drawLane) {
+        const pts = thinStroke(dd.stroke);
+        if (pts.length === 1) await run("automation.set", { owner_id: dd.drawLane.lane, param: dd.drawLane.param, sample: pts[0][0], value: pts[0][1] });
+        else await run("automation.draw", { owner_id: dd.drawLane.lane, param: dd.drawLane.param, points: pts });
+      }
       if (dd.kind === "auto" && dd.moved && dd.id && dd.autoPreview) {
         await run("automation.update", { id: dd.id, sample: dd.autoPreview.sample, value: dd.autoPreview.value });
       }
@@ -849,6 +936,10 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
           const lane = lanes.find((l) => l.id === dd.laneId)!;
           const kind = catKey(lane.category) === "footsteps" ? "repeated" : "range";
           const r = await run<{ id: string }>("marker.add", { lane: lane.id, kind, start: Math.min(dd.s0, dd.cur), end: Math.max(dd.s0, dd.cur), label: lane.name.split("•").pop()!.trim().toLowerCase() });
+          if (r) setSel({ kind: "marker", id: r.id });
+        } else if (tool === "pencil") {
+          const lane = lanes.find((l) => l.id === dd.laneId)!;
+          const r = await run<{ id: string }>("marker.add", { lane: lane.id, kind: "point", start: dd.s0, end: dd.s0, label: lane.name.split("•").pop()!.trim().toLowerCase() });
           if (r) setSel({ kind: "marker", id: r.id });
         } else {
           call("transport.locate", { sample: dd.s0 });
@@ -889,6 +980,13 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
   const onHover = (e: React.MouseEvent) => {
     if (drag.current || !view) return;
     const { x, y } = localXY(e);
+    if (tool !== "select" && y >= RULER + SCENES) {
+      // other tools: their own cursor, and no Select-tool handles lit under the pointer
+      hover.current = null;
+      const cur = tool === "pencil" && rowAt(y)?.row.kind !== "auto" && !laneAt(y) ? "not-allowed" : TOOL_CURSOR[tool];
+      if (canvasRef.current && canvasRef.current.style.cursor !== cur) canvasRef.current.style.cursor = cur;
+      return;
+    }
     if (hitAt(x, y, "auto")) {
       hover.current = null;
       if (canvasRef.current) canvasRef.current.style.cursor = "pointer";
@@ -934,12 +1032,26 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, initialScrollY =
         <div style={{ transform: `translateY(${-scrollY}px)` }}>
           <div className="tl-corner" style={{ height: RULER + SCENES }}>
             <span className="muted small">{frameLabel(rate, vp)}</span>
+            {onLaneMode && (
+              <button className="key lanes-key" title="Marker lanes: full, folded strips, or hidden"
+                onClick={() => onLaneMode(laneMode === "full" ? "folded" : laneMode === "folded" ? "hidden" : "full")}>
+                Lanes · {laneMode}
+              </button>
+            )}
           </div>
-          {lanes.map((l) => {
+          {laneMode === "hidden" ? (
+            <button className="lane-head lanes-summary" style={{ height: HIDDEN_ROW }} title="Show the marker lanes as strips" onClick={() => onLaneMode?.("folded")}>
+              ▸ Marker lanes · {lanes.length} folded
+            </button>
+          ) : laneMode === "folded" ? lanes.map((l) => (
+            <div key={l.id} className="lane-head folded" style={{ height: LANE }} title={l.name}>
+              <span className="lane-strip" style={{ background: laneColor(l) }} />
+            </div>
+          )) : lanes.map((l) => {
             const keys = Object.entries(view.bindings).filter(([, b]) => b.lane_id === l.id).map(([k]) => k.replace("key:Key", "").replace("key:", "").replace(/^midi:\d+:/, "♪"));
             return (
               <div key={l.id} className="lane-head" style={{ height: LANE }}>
-                <span className="swatch" style={{ background: l.color }} />
+                <span className="swatch" style={{ background: laneColor(l) }} />
                 <span className="ellipsis">{l.name}</span>
                 {keys.length > 0 && <span className="keyhint">{keys.join(" ")}</span>}
               </div>
@@ -1085,12 +1197,14 @@ function FolderHead({ row, eng, selected, onSelect, onToggle }: { row: Extract<R
 function TrackHead({ t, depth, eng, selected, onSelect, autoOpen, hasAuto, onToggleAuto }: { t: Track; depth: number; eng: EngineHook; selected: boolean; onSelect: () => void; autoOpen: boolean; hasAuto: boolean; onToggleAuto: () => void }) {
   const meter = eng.tx?.meters[t.id] ?? 0;
   const db = meter > 0 ? 20 * Math.log10(meter) : -90;
-  const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
   const upd = (a: object) => eng.run("track.update", { id: t.id, ...a });
+  const color = t.color ?? catColor(t.category);
+  const num = (eng.view?.tracks.indexOf(t) ?? -1) + 1;
+  const bus = eng.view?.buses.find((b) => b.id === t.bus_id)?.name;
   return (
     <div
       className={"track-head" + (selected ? " selected" : "")}
-      style={{ height: TRACK, paddingLeft: 6 + depth * INDENT }}
+      style={{ height: TRACK, paddingLeft: 8 + depth * INDENT, "--trk": color } as React.CSSProperties}
       onMouseDown={onSelect}
       onDragOver={(e) => e.dataTransfer.types.includes(DRAG_TYPE) && e.preventDefault()}
       onDrop={(e) => {
@@ -1099,51 +1213,49 @@ function TrackHead({ t, depth, eng, selected, onSelect, autoOpen, hasAuto, onTog
         if (id && id !== t.id) eng.run("folder.move", { track_ids: [id], folder: t.folder });
       }}
     >
-      <div className="th-row">
-        <label
-          className="swatch track-color"
-          style={{ background: t.color ?? catColor(t.category) }}
-          title={t.color ? `Track color ${t.color} (click to change, Alt-click for the category's)` : "Track color: the category's (click to choose one)"}
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            if (e.altKey) {
-              e.preventDefault();
-              if (t.color) upd({ color: null });
-            }
-          }}
-        >
-          <input type="color" value={t.color ?? "#808080"} onChange={(e) => upd({ color: e.target.value })} />
-        </label>
-        <span
-          className="ellipsis th-name drag-grip"
-          title={`${t.name}\n${t.folder || "(top level)"}\nDrag onto a folder or track to move it`}
-          draggable
-          onDragStart={(e) => {
-            e.dataTransfer.setData(DRAG_TYPE, t.id);
-            e.dataTransfer.effectAllowed = "move";
-          }}
-        >
-          {t.name}
-        </span>
-        <button className={"tiny" + (t.mute ? " on-mute" : "")} title="Mute" onClick={() => upd({ mute: !t.mute })}>M</button>
-        <button className={"tiny" + (t.solo ? " on-solo" : "")} title="Solo" onClick={() => upd({ solo: !t.solo })}>S</button>
-        <button className={"tiny" + (t.armed ? " on-rec" : "")} title="Arm for recording" onClick={() => upd({ armed: !t.armed })}>●</button>
-        <button className={"tiny" + (autoOpen ? " on" : "") + (hasAuto ? " has-auto" : "")} title={(autoOpen ? "Hide" : "Show") + " automation lanes" + (hasAuto ? " (has automation)" : "")} onClick={onToggleAuto}>A</button>
-        <ModeButton eng={eng} ownerId={t.id} mode={(t.automation_mode ?? "read") as AutoMode} />
+      <div className="th-main">
+        <div className="th-row">
+          <label
+            className="swatch track-color"
+            style={{ background: color }}
+            title={t.color ? `Track color ${t.color} (click to change, Alt-click for the category's)` : "Track color: the category's (click to choose one)"}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              if (e.altKey) {
+                e.preventDefault();
+                if (t.color) upd({ color: null });
+              }
+            }}
+          >
+            <input type="color" value={t.color ?? "#808080"} aria-label="Track color" onChange={(e) => upd({ color: e.target.value })} />
+          </label>
+          <span className="th-num">{String(num).padStart(2, "0")}</span>
+          <span
+            className="ellipsis th-name drag-grip"
+            title={`${t.name}\n${t.folder || "(top level)"}\nDrag onto a folder or track to move it`}
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData(DRAG_TYPE, t.id);
+              e.dataTransfer.effectAllowed = "move";
+            }}
+          >
+            {t.name}
+          </span>
+          {bus && <span className="th-bus ellipsis">{bus}</span>}
+        </div>
+        <div className="th-row">
+          <button className="key th-key mute" aria-pressed={t.mute} title="Mute" onClick={() => upd({ mute: !t.mute })}>M</button>
+          <button className="key th-key solo" aria-pressed={t.solo} title="Solo" onClick={() => upd({ solo: !t.solo })}>S</button>
+          <button className="key th-key rec" aria-pressed={t.armed} title="Arm for recording" onClick={() => upd({ armed: !t.armed })}>●</button>
+          <button className={"key th-key" + (hasAuto ? " has-auto" : "")} aria-pressed={autoOpen} title={(autoOpen ? "Hide" : "Show") + " automation lanes" + (hasAuto ? " (has automation)" : "")} onClick={onToggleAuto}>A</button>
+          <ModeButton eng={eng} ownerId={t.id} mode={(t.automation_mode ?? "read") as AutoMode} />
+          <span className="spacer" />
+          <Knob value={t.gain_db} min={-48} max={12} reset={0} step={0.5} label={`${t.name} gain`} format={fmtGain} onCommit={(v) => upd({ gain_db: v })} />
+          <Knob value={t.pan} min={-1} max={1} reset={0} step={0.01} bipolar label={`${t.name} pan`} format={fmtPan} onCommit={(v) => upd({ pan: v })} />
+          <span className="th-db">{t.gain_db > 0 ? "+" : ""}{t.gain_db.toFixed(1)}</span>
+        </div>
       </div>
-      <div className="th-row">
-        <input
-          className="fader-h"
-          type="range" min={-48} max={12} step={0.5}
-          defaultValue={t.gain_db}
-          key={t.gain_db}
-          title={`${t.gain_db.toFixed(1)} dB`}
-          onMouseUp={(e) => upd({ gain_db: Number((e.target as HTMLInputElement).value) })}
-          onKeyUp={(e) => upd({ gain_db: Number((e.target as HTMLInputElement).value) })}
-        />
-        <span className="small mono">{t.gain_db > 0 ? "+" : ""}{t.gain_db.toFixed(1)}</span>
-        <div className="meter-h"><div style={{ width: pct + "%" }} className={db > -1 ? "hot" : ""} /></div>
-      </div>
+      <SegMeter db={db} n={12} vertical />
     </div>
   );
 }

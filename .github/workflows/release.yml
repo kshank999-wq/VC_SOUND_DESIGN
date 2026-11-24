@@ -27,6 +27,9 @@ jobs:
             args: ""
             rust_targets: ""
     runs-on: ${{ matrix.platform }}
+    env:
+      # Azure Trusted Signing is set up (RELEASING.md); the signing step checks all six.
+      HAS_AZURE_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -58,15 +61,16 @@ jobs:
         run: node scripts/check-version.mjs ${{ github.ref_name }}
 
       # Secrets are exported only when set, so an empty secret never switches a
-      # signing path on with a blank value.
+      # signing path on with a blank value. The Apple secrets have the same names as in
+      # VC Composer's workflow; the Tauri CLI reads them as APPLE_*.
       - name: Signing environment
         shell: bash
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -83,6 +87,58 @@ jobs:
           # an unencrypted key still needs the variable to exist
           if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" >> "$GITHUB_ENV"; fi
 
+      # Windows: Azure Trusted Signing (now "Artifact Signing"), the same account and the
+      # same six secrets as VC Composer. Tauri signs each file through
+      # scripts/windows/sign.ps1 while it builds, so the update bundles are signed for the
+      # updater after their Windows signature, not before.
+      - name: .NET runtime for the Azure signing client
+        if: runner.os == 'Windows' && env.HAS_AZURE_SIGNING == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Windows signing (Azure Trusted Signing)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+        run: |
+          $names = 'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT', 'AZURE_SIGNING_PROFILE'
+          $missing = @($names | Where-Object { -not ([Environment]::GetEnvironmentVariable($_)) })
+          if ($missing.Count -eq $names.Count) { Write-Host "no AZURE_* secrets: not using Azure Trusted Signing"; exit 0 }
+          # Half set up would build unsigned without saying why: stop and name what's missing.
+          if ($missing.Count -gt 0) { Write-Error "Azure Trusted Signing is partly set up. Missing secrets: $($missing -join ', ') (RELEASING.md)"; exit 1 }
+          $dir = Join-Path $env:RUNNER_TEMP 'artifact-signing'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          # Microsoft's signing client (the dlib signtool loads); pinned.
+          $zip = Join-Path $dir 'client.zip'
+          Invoke-WebRequest 'https://www.nuget.org/api/v2/package/Microsoft.ArtifactSigning.Client/1.0.151' -OutFile $zip
+          Expand-Archive $zip -DestinationPath (Join-Path $dir 'client')
+          $dlib = Join-Path $dir 'client\bin\x64\Azure.CodeSigning.Dlib.dll'
+          if (-not (Test-Path $dlib)) { Write-Error "the signing client has no $dlib"; exit 1 }
+          $meta = Join-Path $dir 'metadata.json'
+          @{ Endpoint = $env:AZURE_SIGNING_ENDPOINT.Trim(); CodeSigningAccountName = $env:AZURE_SIGNING_ACCOUNT.Trim(); CertificateProfileName = $env:AZURE_SIGNING_PROFILE.Trim() } |
+            ConvertTo-Json | Set-Content -Encoding utf8 $meta
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { Write-Error "no x64 signtool.exe in the Windows SDK"; exit 1 }
+          Write-Host "signtool: $($signtool.FullName)"
+          Write-Host "endpoint region: $(([Uri]$env:AZURE_SIGNING_ENDPOINT.Trim()).Host.Split('.')[0]) (must match the signing account's Overview > Account URI)"
+          @(
+            "VCSD_SIGNTOOL=$($signtool.FullName)",
+            "VCSD_SIGN_DLIB=$dlib",
+            "VCSD_SIGN_METADATA=$meta",
+            "WINDOWS_SIGN_SCRIPT=$env:GITHUB_WORKSPACE\scripts\windows\sign.ps1",
+            "AZURE_TENANT_ID=$env:AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID=$env:AZURE_CLIENT_ID",
+            "AZURE_CLIENT_SECRET=$env:AZURE_CLIENT_SECRET",
+            "VCSD_AZURE_SIGNING=1"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Windows code-signing certificate
         if: runner.os == 'Windows'
         shell: pwsh
@@ -90,6 +146,7 @@ jobs:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
+          if ($env:VCSD_AZURE_SIGNING) { Write-Host "signing with Azure Trusted Signing; WINDOWS_CERTIFICATE not used"; exit 0 }
           if (-not $env:WINDOWS_CERTIFICATE) { Write-Host "no WINDOWS_CERTIFICATE: installers will be unsigned"; exit 0 }
           $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
@@ -118,6 +175,25 @@ jobs:
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
+
+      # Check each installer the way a customer's PC will. When signing was set up, an
+      # installer without a valid signature fails the job (the release stays a draft).
+      - name: Check the Windows signatures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem target -Recurse -File -Include *.msi, *.exe | Where-Object { $_.FullName -match '\\bundle\\(msi|nsis)\\' })
+          if ($files.Count -eq 0) { Write-Warning "no installers found to check"; exit 0 }
+          $bad = @()
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            Write-Host "$($sig.Status)  $($f.Name)  $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { $bad += $f.Name }
+          }
+          if ($bad.Count -gt 0) {
+            if ($env:VCSD_AZURE_SIGNING -or $env:WINDOWS_CERTIFICATE_THUMBPRINT) { Write-Error "signing is set up but these are not validly signed: $($bad -join ', ')"; exit 1 }
+            Write-Warning "unsigned installers: Windows SmartScreen will warn (RELEASING.md)"
+          }
 
       # manual runs (no tag) don't create a release; keep the installers as run artifacts
       - name: Upload installers (manual run)

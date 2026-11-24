@@ -152,14 +152,21 @@ const CAT_LABEL: Record<string, string> = {
   dialogue: "Dialogue notes",
   music: "Music",
 };
+// Category colors: the design tokens' --cat-* (docs/spec/ui/tokens.css, v2.1).
 const CAT_COLOR: Record<string, string> = {
-  footsteps: "#6aa84f",
-  props: "#93c47d",
-  hard_fx: "#e06666",
-  background: "#6fa8dc",
-  design_fx: "#8e7cc3",
-  dialogue: "#f1c232",
-  music: "#e69138",
+  footsteps: "#4ADE80",
+  props: "#BEF264",
+  hard_fx: "#FB923C",
+  background: "#2DD4BF",
+  design_fx: "#A78BFA",
+  dialogue: "#E2E8F0",
+  music: "#F472B6",
+  custom: "#D6C7A1",
+};
+/** The lane colors projects were created with before the v2.1 palette: shown as the palette's. */
+const LEGACY_LANE: Record<string, string> = {
+  "#4e9a06": "footsteps", "#73d216": "props", "#cc0000": "hard_fx", "#3465a4": "background",
+  "#75507b": "design_fx", "#c4a000": "dialogue", "#ce5c00": "music",
 };
 export const CATEGORIES = CAT_KEYS;
 export function catKey(c: Category | null | undefined): string {
@@ -171,5 +178,13 @@ export function catLabel(c: Category | null | undefined): string {
   return typeof c === "string" ? CAT_LABEL[c] ?? c : c.custom;
 }
 export function catColor(c: Category | null | undefined): string {
-  return CAT_COLOR[catKey(c)] ?? "#999999";
+  return CAT_COLOR[catKey(c)] ?? CAT_COLOR.custom;
+}
+/** A lane's display color: its own, unless it's still its category's original default
+ *  (then the palette's current color for that category). */
+export function laneColor(l: { color?: string | null; category: Category }): string {
+  const c = (l.color ?? "").toLowerCase();
+  if (!c) return catColor(l.category);
+  const legacy = LEGACY_LANE[c];
+  return legacy && legacy === catKey(l.category) ? catColor(l.category) : (l.color as string);
 }

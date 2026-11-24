@@ -1,4 +1,6 @@
 // Persisted window layout: shape, defaults, limits and merging (pure; unit-tested).
+import { isStage, sanitizeStageLayout, type Stage, type StageLayout } from "./stage.ts";
+import { sanitizeRecent, sanitizeTheme, type RecentProject, type Theme } from "./theme.ts";
 
 export interface ProjectView {
   vp?: { start: number; spp: number };
@@ -15,6 +17,13 @@ export interface Layout {
   mixerOpen?: boolean;
   /** Check for app updates at startup (desktop release builds). */
   autoUpdateCheck?: boolean;
+  /** The workflow stage last used, and each stage's layout changes (picture and deck sizes, tabs). */
+  stage?: Stage;
+  stages?: Partial<Record<Stage, Partial<StageLayout>>>;
+  /** Appearance (Preferences › Appearance). */
+  theme?: Partial<Theme>;
+  /** Recently opened projects, newest first (Welcome screen). */
+  recent?: RecentProject[];
   projects?: Record<string, ProjectView>;
 }
 
@@ -42,6 +51,13 @@ export function sanitize(raw: unknown): Layout {
   if (typeof r.snap === "boolean") out.snap = r.snap;
   if (typeof r.mixerOpen === "boolean") out.mixerOpen = r.mixerOpen;
   if (typeof r.autoUpdateCheck === "boolean") out.autoUpdateCheck = r.autoUpdateCheck;
+  if (isStage(r.stage)) out.stage = r.stage;
+  if (r.theme !== undefined) out.theme = sanitizeTheme(r.theme);
+  if (r.recent !== undefined) out.recent = sanitizeRecent(r.recent);
+  if (r.stages && typeof r.stages === "object") {
+    out.stages = {};
+    for (const [k, v] of Object.entries(r.stages as Record<string, unknown>)) if (isStage(k)) out.stages[k] = sanitizeStageLayout(v);
+  }
   if (r.projects && typeof r.projects === "object") {
     out.projects = {};
     for (const [k, v] of Object.entries(r.projects as Record<string, Record<string, unknown>>)) {

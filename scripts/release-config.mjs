@@ -10,8 +10,10 @@
 //   TAURI_SIGNING_PRIVATE_KEY       its private key (read by the Tauri CLI) → signed update artifacts
 //   VCSD_UPDATE_ENDPOINT            where latest.json lives (default: this repo's latest GitHub release)
 //   GITHUB_REPOSITORY               owner/repo, for the default endpoint
+//   WINDOWS_SIGN_SCRIPT             absolute path of scripts/windows/sign.ps1 → signed .exe/.msi
+//                                   through Azure Trusted Signing (the workflow sets it up)
 //   WINDOWS_CERTIFICATE_THUMBPRINT  Authenticode cert in the runner's store → signed .msi/.exe
-//   WINDOWS_TIMESTAMP_URL           timestamp server (default DigiCert)
+//   WINDOWS_TIMESTAMP_URL           timestamp server for the certificate (default DigiCert)
 // macOS signing/notarisation needs no overlay: the Tauri CLI reads APPLE_CERTIFICATE,
 // APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID from the environment.
 import { writeFileSync } from "node:fs";
@@ -45,8 +47,18 @@ export function releaseConfig(env) {
   } else {
     notes.push("updater: off (no TAURI_UPDATER_PUBKEY)");
   }
+  const signScript = v("WINDOWS_SIGN_SCRIPT");
   const thumb = v("WINDOWS_CERTIFICATE_THUMBPRINT");
-  if (thumb) {
+  if (signScript) {
+    // Tauri runs this for every Windows file it signs: the app, the installers and the
+    // update bundles, before it signs the update artifacts. %1 is the file; the object
+    // form keeps paths with spaces ("VC Sound Design_0.2.0_x64_en-US.msi") whole.
+    cfg.bundle = {
+      ...(cfg.bundle ?? {}),
+      windows: { signCommand: { cmd: "pwsh", args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", signScript, "%1"] } },
+    };
+    notes.push(`windows: code signing on (Azure Trusted Signing)${thumb ? "; WINDOWS_CERTIFICATE_THUMBPRINT ignored" : ""}`);
+  } else if (thumb) {
     cfg.bundle = {
       ...(cfg.bundle ?? {}),
       windows: { certificateThumbprint: thumb, digestAlgorithm: "sha256", timestampUrl: v("WINDOWS_TIMESTAMP_URL") ?? "http://timestamp.digicert.com" },

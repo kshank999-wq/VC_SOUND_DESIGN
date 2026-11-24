@@ -12,13 +12,18 @@ use vcsd_core::*;
 
 fn python() -> Option<String> {
     let py = std::env::var("VCSD_OTIO_PYTHON").unwrap_or_else(|_| "python3".into());
-    let ok = std::process::Command::new(&py).args(["-c", "import opentimelineio"]).output().map(|o| o.status.success()).unwrap_or(false);
+    let ok = std::process::Command::new(&py)
+        .env("PYTHONUTF8", "1")
+        .args(["-c", "import opentimelineio"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     ok.then_some(py)
 }
 
 fn inspect(py: &str, file: &Path) -> serde_json::Value {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/otio/otio_summary.py");
-    let out = std::process::Command::new(py).arg(script).arg(file).output().unwrap();
+    let out = std::process::Command::new(py).env("PYTHONUTF8", "1").arg(script).arg(file).output().unwrap();
     assert!(out.status.success(), "OpenTimelineIO could not read the file:\n{}", String::from_utf8_lossy(&out.stderr));
     serde_json::from_slice(&out.stdout).unwrap()
 }
@@ -513,7 +518,7 @@ fn track_colors_go_out_as_otio_colors() {
                 "import sys, opentimelineio as o; t = o.adapters.read_from_file(sys.argv[1]); print([x.color.to_hex()[:7] for x in t.tracks if x.name == {:?}][0])",
                 gname
             );
-            let out = std::process::Command::new(&py).args(["-c", &code]).arg(&file).output().unwrap();
+            let out = std::process::Command::new(&py).env("PYTHONUTF8", "1").args(["-c", &code]).arg(&file).output().unwrap();
             assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), *c, "{}", String::from_utf8_lossy(&out.stderr));
         }
         // and by our import from OTIO's Color alone (our metadata stripped)

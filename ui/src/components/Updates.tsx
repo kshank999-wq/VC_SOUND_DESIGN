@@ -84,40 +84,55 @@ export function useUpdates(eng: EngineHook) {
 
 export type UpdatesHook = ReturnType<typeof useUpdates>;
 
+/** Software update sheet: what's installed, what's new, download, restart. */
 export function UpdatesDialog({ u, onClose }: { u: UpdatesHook; onClose: () => void }) {
   const [auto, setAuto] = useState(getLayout().autoUpdateCheck !== false);
   useEffect(() => {
     if (u.phase === "idle") u.check();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const pct = u.progress.total ? Math.min(100, (u.progress.got / u.progress.total) * 100) : null;
+  const head: Record<string, [string, string, string]> = {
+    idle: ["…", "", "Checking for updates…"],
+    checking: ["…", "", "Checking for updates…"],
+    none: ["✓", "ok", "You're up to date"],
+    available: ["↓", "accent", "A new version is available"],
+    downloading: ["↓", "accent", "Downloading the update…"],
+    ready: ["✓", "ok", "Ready to restart"],
+    error: ["✕", "bad", "The update check didn't work"],
+  };
+  const [sym, tone, title] = head[u.phase] ?? head.idle;
   return (
     <div className="modal-bg" onMouseDown={onClose}>
-      <div className="modal updates" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="modal updates" role="dialog" aria-label="Software update" onMouseDown={(e) => e.stopPropagation()}>
         <div className="panel-title">Software update</div>
-        <div className="small">Installed: <b>{u.info?.version ?? "?"}</b></div>
-        {u.phase === "checking" && <div className="muted">Checking for updates…</div>}
-        {u.phase === "none" && <div>You're up to date.</div>}
-        {(u.phase === "available" || u.phase === "downloading" || u.phase === "ready") && u.update && (
-          <>
-            <div>Version <b>{u.update.version}</b> is available{u.update.date ? ` (${u.update.date.slice(0, 10)})` : ""}.</div>
-            {u.update.body && <pre className="notes">{u.update.body}</pre>}
-          </>
+        <div className="up-head">
+          <span className={"up-sym " + tone} aria-hidden>{sym}</span>
+          <div>
+            <div className="up-title">{title}</div>
+            <div className="up-versions">
+              <span className="label">Installed</span><span className="readout sm">{u.info?.version ?? "?"}</span>
+              {u.update && <><span className="dim">→</span><span className="label">New</span><span className="readout sm">{u.update.version}</span>{u.update.date && <span className="small dim">{u.update.date.slice(0, 10)}</span>}</>}
+            </div>
+          </div>
+        </div>
+        {(u.phase === "available" || u.phase === "downloading" || u.phase === "ready") && u.update?.body && (
+          <section className="up-notes"><span className="label">What's new</span><pre className="notes">{u.update.body}</pre></section>
         )}
         {u.phase === "downloading" && (
-          <div className="dl">
+          <div className="dl" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct === null ? undefined : Math.round(pct)}>
             <div className="dl-bar"><div style={{ width: (pct ?? 30) + "%" }} className={pct === null ? "indeterminate" : ""} /></div>
             <span className="small mono">{(u.progress.got / 1048576).toFixed(1)}{u.progress.total ? ` / ${(u.progress.total / 1048576).toFixed(1)}` : ""} MB</span>
           </div>
         )}
-        {u.phase === "ready" && <div className="ok">Installed and verified. Restart to finish — your project is saved first.</div>}
-        {u.error && <div className="err small">{u.error}</div>}
-        <label className="small"><input type="checkbox" checked={auto} onChange={(e) => { setAuto(e.target.checked); saveLayout({ autoUpdateCheck: e.target.checked }); }} /> Check for updates when the app starts</label>
+        {u.phase === "ready" && <div className="small">Installed and verified. Restarting saves your project first.</div>}
+        {u.error && <div className="small" style={{ color: "var(--error-text)" }}>{u.error}</div>}
+        <label className="check"><input type="checkbox" checked={auto} onChange={(e) => { setAuto(e.target.checked); saveLayout({ autoUpdateCheck: e.target.checked }); }} /> Check for updates when the app starts</label>
         <div className="btns">
-          {u.phase === "available" && <button className="primary" onClick={u.install}>Download & install</button>}
-          {u.phase === "ready" && <button className="primary" onClick={u.restart}>Restart now</button>}
           {(u.phase === "none" || u.phase === "error") && <button onClick={() => u.check()}>Check again</button>}
           <span className="spacer" />
           <button onClick={onClose}>{u.phase === "ready" ? "Later" : "Close"}</button>
+          {u.phase === "available" && <button className="primary" onClick={u.install}>Download & install</button>}
+          {u.phase === "ready" && <button className="primary" onClick={u.restart}>Restart now</button>}
         </div>
       </div>
     </div>

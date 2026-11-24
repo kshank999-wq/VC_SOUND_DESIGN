@@ -8,7 +8,7 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering::*};
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct Captured {
     pub data: Vec<f32>,
@@ -103,19 +103,31 @@ pub fn start(
             }
             let _ = ready_tx.send(Ok(name.clone()));
             let mut data = Vec::with_capacity(rate as usize * ch as usize * 30);
-            loop {
-                while let Ok(v) = cons.pop() {
-                    data.push(v);
+            // A take holds at most real time's worth of audio (plus a second): a device
+            // with no clock of its own (ALSA's `null`, a broken driver) can deliver as
+            // fast as the CPU allows. Only what is waiting is drained each pass, so a
+            // stop is seen even then.
+            let began = Instant::now();
+            let per_sec = rate as f64 * ch as f64;
+            let take = |cons: &mut rtrb::Consumer<f32>, data: &mut Vec<f32>| {
+                // whole frames only
+                let room = ((began.elapsed().as_secs_f64() + 1.0) * per_sec) as usize / ch as usize * ch as usize;
+                for _ in 0..cons.slots() {
+                    let Ok(v) = cons.pop() else { break };
+                    if data.len() < room {
+                        data.push(v);
+                    }
                 }
+            };
+            loop {
+                take(&mut cons, &mut data);
                 if stop2.load(SeqCst) {
                     break;
                 }
                 thread::sleep(Duration::from_millis(10));
             }
             drop(stream);
-            while let Ok(v) = cons.pop() {
-                data.push(v);
-            }
+            take(&mut cons, &mut data);
             let sp = start_pos.load(SeqCst);
             Ok(Captured {
                 data,

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { call, isTauri, nativePick } from "../api";
 import { aafSummary, otioSummary, type AafReport, type OtioReport } from "../aafReport";
 import type { EngineHook } from "../store";
+import { getLayout } from "../layout";
 
 interface Entry { name: string; path: string; dir: boolean; project: boolean }
 
@@ -66,7 +67,8 @@ export function PathField({ value, onChange, directory, title, placeholder }: { 
   );
 }
 
-export function Welcome({ eng, onDevices }: { eng: EngineHook; onDevices: () => void }) {
+/** The Welcome screen (spec v2.1 › Screens › Welcome): start, open, recent projects. */
+export function Welcome({ eng, onDevices, onPrefs }: { eng: EngineHook; onDevices: () => void; onPrefs?: () => void }) {
   const [mode, setMode] = useState<"home" | "new" | "open" | "demo">("home");
   const [dir, setDir] = useState("");
   const [name, setName] = useState("My Film");
@@ -75,24 +77,41 @@ export function Welcome({ eng, onDevices }: { eng: EngineHook; onDevices: () => 
   const [startTc, setStartTc] = useState("01:00:00:00");
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string[]>([]);
+  const [version, setVersion] = useState("");
+  const recent = getLayout().recent ?? [];
   useEffect(() => {
-    call<{ home: string }>("app.info").then((i) => setDir((d) => d || i.home + "/VC_Sound_Projects/"));
+    call<{ home: string; version: string }>("app.info").then((i) => {
+      setDir((d) => d || i.home + "/VC_Sound_Projects/");
+      setVersion(i.version);
+    });
   }, []);
+  const ago = (t: number) => {
+    const m = Math.round((Date.now() - t) / 60000);
+    return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
+  };
   return (
     <div className="welcome">
-      <div className="welcome-card">
-        <h1>VC Sound Design</h1>
-        <div className="muted">Spot · populate · perform · record · mix · hand off</div>
+      <div className="panel welcome-main">
+        <div className="welcome-brand">
+          <div className="logo big" aria-hidden>
+            <svg viewBox="0 0 24 24" width="30" height="30"><path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 10v4M21 12h0" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" /></svg>
+          </div>
+          <div>
+            <span className="label">VC Sound Design</span>
+            <h1>Sound for picture</h1>
+            <div className="dim">Spot · build · perform · mix · deliver</div>
+          </div>
+        </div>
         {mode === "home" && (
           <div className="welcome-actions">
-            <button className="primary big" onClick={() => setMode("new")}>New project…</button>
-            <button className="big" onClick={() => setMode("open")}>Open project…</button>
-            <button className="big" onClick={() => { setMode("demo"); setDir((d) => d.replace(/\/?$/, "/") + "Gravel_Road_Demo"); }}>Create demo project…</button>
-            <div className="welcome-foot"><button className="link" onClick={onDevices}>Audio & MIDI devices…</button></div>
+            <button className="action primary" onClick={() => setMode("new")}><b>New project</b><span>Name, frame rate, sample rate and start timecode</span></button>
+            <button className="action" onClick={() => setMode("open")}><b>Open project…</b><span>A project folder (🎬)</span></button>
+            <button className="action" onClick={() => { setMode("demo"); setDir((d) => d.replace(/\/?$/, "/") + "Gravel_Road_Demo"); }}><b>Build the demo</b><span>“Gravel Road”: three scenes, cues, a performance, a take and exports</span></button>
           </div>
         )}
         {mode === "new" && (
           <div className="form">
+            <h4>New project</h4>
             <label className="field"><span>Project folder</span><PathField value={dir} onChange={setDir} directory title="Project folder" /></label>
             <label className="field"><span>Name</span><input value={name} onChange={(e) => setName(e.target.value)} /></label>
             <div className="row3">
@@ -102,13 +121,15 @@ export function Welcome({ eng, onDevices }: { eng: EngineHook; onDevices: () => 
                 </select>
               </label>
               <label className="field"><span>Sample rate</span>
-                <select value={sr} onChange={(e) => setSr(Number(e.target.value))}>{[44100, 48000, 96000].map((r) => <option key={r} value={r}>{r}</option>)}</select>
+                <select value={sr} onChange={(e) => setSr(Number(e.target.value))}>{[44100, 48000, 96000].map((r) => <option key={r} value={r}>{r / 1000} kHz</option>)}</select>
               </label>
               <label className="field"><span>Start TC</span><input className="mono" value={startTc} onChange={(e) => setStartTc(e.target.value)} /></label>
             </div>
+            <div className="small dim">Frame and sample rate can't change later: they set every timecode and every file.</div>
             <div className="btns">
-              <button className="primary" disabled={busy} onClick={async () => { setBusy(true); await eng.run("project.new", { dir, name, fps, sample_rate: sr, start_tc: startTc }); setBusy(false); }}>Create</button>
               <button onClick={() => setMode("home")}>Back</button>
+              <span className="spacer" />
+              <button className="primary" disabled={busy || !name.trim()} onClick={async () => { setBusy(true); await eng.run("project.new", { dir, name, fps, sample_rate: sr, start_tc: startTc }); setBusy(false); }}>Create project</button>
             </div>
           </div>
         )}
@@ -117,19 +138,46 @@ export function Welcome({ eng, onDevices }: { eng: EngineHook; onDevices: () => 
         )}
         {mode === "demo" && (
           <div className="form">
-            <div className="small muted">Builds a 3-scene project with generated picture, a procedural starter pack, spotted cues, a performance, a recorded take, a score and two export packages.</div>
+            <h4>Build the demo</h4>
+            <div className="small dim">Builds a 3-scene project with generated picture, a procedural starter pack, spotted cues, a performance, a recorded take, a score and two export packages.</div>
             <label className="field"><span>Folder (must not exist)</span><PathField value={dir} onChange={setDir} directory title="Demo folder" /></label>
             <div className="btns">
+              <button onClick={() => setMode("home")}>Back</button>
+              <span className="spacer" />
               <button className="primary" disabled={busy} onClick={async () => {
                 setBusy(true);
                 const r = await eng.run<{ log: string[] }>("project.demo", { dir });
                 if (r) setLog(r.log);
                 setBusy(false);
               }}>{busy ? "Building… (≈20 s)" : "Build demo"}</button>
-              <button onClick={() => setMode("home")}>Back</button>
             </div>
             {log.length > 0 && <pre className="log">{log.join("\n")}</pre>}
           </div>
+        )}
+        <div className="welcome-foot">
+          <button className="link" onClick={onDevices}>Audio & MIDI…</button>
+          {onPrefs && <button className="link" onClick={onPrefs}>Preferences…</button>}
+          <span className="spacer" />
+          <span className="dim small mono">{version && `v${version}`}</span>
+        </div>
+      </div>
+      <div className="panel welcome-recent">
+        <div className="panel-title">Recent projects</div>
+        {recent.length === 0 ? (
+          <div className="dim pad">Projects you open appear here.</div>
+        ) : (
+          <ul className="recent-list">
+            {recent.map((r) => (
+              <li key={r.path}>
+                <button className="recent" onClick={() => eng.run("project.open", { dir: r.path })} title={r.path}>
+                  <b>{r.name}</b>
+                  <span className="mono ellipsis">{r.path}</span>
+                  <span className="dim">{ago(r.at)}</span>
+                </button>
+                <button className="link small" title="Open the newer autosave instead (if there is one)" onClick={() => eng.run("project.recover", { dir: r.path }, "Recovered from autosave")}>Recover autosave</button>
+              </li>
+            ))}
+          </ul>
         )}
       </div>
     </div>
@@ -139,11 +187,59 @@ export function Welcome({ eng, onDevices }: { eng: EngineHook; onDevices: () => 
 export type ImportKind = "picture" | "aaf" | "otio" | "score" | "script" | "relink" | "take" | null;
 
 
-export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; eng: EngineHook; onClose: () => void; cueId?: string }) {
+/** What an AAF or OTIO import brought in (spec v2.1 › Screens › Import summary). */
+export function ImportSummary({ r, kind, onRelink, onClose }: { r: AafReport | OtioReport; kind: "aaf" | "otio"; onRelink: () => void; onClose: () => void }) {
+  const name = "timeline" in r ? r.timeline : r.composition;
+  const lines = kind === "otio" ? otioSummary(r as OtioReport) : aafSummary(r as AafReport);
+  const blank = lines.indexOf("");
+  const details = lines.slice(2, blank < 0 ? undefined : blank);
+  const tiles: [string, string | number, string?][] = [
+    ["Tracks", r.tracks.length, r.stereo_tracks ? `${r.stereo_tracks} stereo` : undefined],
+    ["Clips", r.clips],
+    ["Markers", r.markers],
+    ["Cues restored", r.cues ?? 0, r.linked_clips ? `${r.linked_clips} clips linked` : undefined],
+    ["Scenes added", r.scenes_added ?? 0],
+    ["Media", r.media_linked + r.media_written, `${r.media_linked} linked · ${r.media_written} written`],
+  ];
+  return (
+    <div className="import-summary">
+      <div className="is-head">
+        <span className="label">{kind === "aaf" ? "AAF" : "OTIO"} imported</span>
+        <div className="is-title">“{name}” <span className="readout sm">{r.start_tc}</span></div>
+      </div>
+      <div className="tiles">
+        {tiles.map(([k, v, sub]) => (
+          <div key={k} className="tile">
+            <span className="label">{k}</span>
+            <span className="tile-v">{v}</span>
+            {sub && <span className="tile-sub">{sub}</span>}
+          </div>
+        ))}
+      </div>
+      {details.length > 0 && <ul className="is-list">{details.map((d) => <li key={d}>{d}</li>)}</ul>}
+      {r.missing_media.length > 0 && (
+        <section className="is-section bad">
+          <div className="is-sec-head"><span className="label">Missing media · clips left out</span><button onClick={onRelink}>Relink…</button></div>
+          <ul className="is-list">{r.missing_media.map((m) => <li key={m}><span className="sym" aria-hidden>✕</span>{m}</li>)}</ul>
+        </section>
+      )}
+      {r.notes.length > 0 && (
+        <section className="is-section">
+          <div className="is-sec-head"><span className="label">Notes</span></div>
+          <ul className="is-list">{r.notes.map((n) => <li key={n}><span className="sym warn" aria-hidden>⚠</span>{n}</li>)}</ul>
+        </section>
+      )}
+      {!r.missing_media.length && !r.notes.length && <div className="is-ok"><span className="sym ok" aria-hidden>✓</span> Everything came in.</div>}
+      <div className="btns"><span className="spacer" /><button className="primary" onClick={onClose}>Done</button></div>
+    </div>
+  );
+}
+
+export function ImportDialog({ kind, eng, onClose, cueId, onRelink }: { kind: ImportKind; eng: EngineHook; onClose: () => void; cueId?: string; onRelink?: () => void }) {
   const [path, setPath] = useState("");
+  const [summary, setSummary] = useState<AafReport | OtioReport | null>(null);
   const [label, setLabel] = useState("v" + ((eng.view?.pictures.length ?? 0) + 1));
   const [tc, setTc] = useState("");
-  const [log, setLog] = useState<string[]>([]);
   const [buses, setBuses] = useState("auto");
   if (!kind) return null;
   const titles = { picture: "Import picture reference", aaf: "Import AAF (editor's timeline)", otio: "Import OpenTimelineIO (.otio)", score: "Import VC Composer score (.json)", script: "Import VC Film Studio breakdown (.json)", relink: "Relink missing media (search folder)", take: "Add a recorded take (.wav)" };
@@ -152,20 +248,11 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
     if (kind === "picture") ok = await eng.run("picture.import", { path, label, start_tc: tc || undefined }, "Picture imported");
     if (kind === "aaf") {
       const r = await eng.run<AafReport>("aaf.import", { path, at_tc: tc || undefined, buses });
-      if (r) {
-        eng.toast(`AAF imported: ${r.tracks.length} tracks, ${r.clips} clips`);
-        // keep the dialog open to show what was left out
-        if (r.missing_media.length || r.notes.length) return setLog(aafSummary(r));
-      }
-      ok = r;
+      if (r) return setSummary(r);
     }
     if (kind === "otio") {
       const r = await eng.run<OtioReport>("otio.import", { path, at_tc: tc || undefined, buses });
-      if (r) {
-        eng.toast(`OTIO imported: ${r.tracks.length} tracks, ${r.clips} clips`);
-        if (r.missing_media.length || r.notes.length) return setLog(otioSummary(r));
-      }
-      ok = r;
+      if (r) return setSummary(r);
     }
     if (kind === "score") ok = await eng.run("score.import", { path }, "Score imported");
     if (kind === "script") ok = await eng.run("script.import", { path }, "Breakdown imported");
@@ -177,9 +264,17 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
     }
     if (ok) onClose();
   };
+  if (summary && (kind === "aaf" || kind === "otio"))
+    return (
+      <div className="modal-bg" onMouseDown={() => { setSummary(null); onClose(); }}>
+        <div className="modal wide" role="dialog" aria-label="Import summary" onMouseDown={(e) => e.stopPropagation()}>
+          <ImportSummary r={summary} kind={kind} onClose={() => { setSummary(null); onClose(); }} onRelink={() => { setSummary(null); onRelink?.(); }} />
+        </div>
+      </div>
+    );
   return (
     <div className="modal-bg" onMouseDown={onClose}>
-      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="modal" role="dialog" aria-label={titles[kind]} onMouseDown={(e) => e.stopPropagation()}>
         <div className="panel-title">{titles[kind]}</div>
         <PathField value={path} onChange={setPath} directory={kind === "relink"} title={titles[kind]} />
         {kind === "picture" && (
@@ -201,26 +296,10 @@ export function ImportDialog({ kind, eng, onClose, cueId }: { kind: ImportKind; 
             </select>
           </label>
         )}
-        {(kind === "otio" || kind === "aaf") && (
-          <label className="field" title="For AAF and OTIO files from VC Sound Design, which describe their buses. Auto restores them when this project's matching buses are untouched.">
-            <span>Bus levels</span>
-            <select value={buses} onChange={(e) => setBuses(e.target.value)}>
-              <option value="auto">Auto</option>
-              <option value="buses">Restore buses and their automation</option>
-              <option value="fold">Fold into the tracks</option>
-            </select>
-          </label>
-        )}
-        {log.length > 0 && <pre className="log">{log.join("\n")}</pre>}
         <div className="btns">
-          {log.length > 0 ? (
-            <button className="primary" onClick={onClose}>Close</button>
-          ) : (
-            <>
-              <button className="primary" disabled={!path} onClick={go}>Import</button>
-              <button onClick={onClose}>Cancel</button>
-            </>
-          )}
+          <span className="spacer" />
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" disabled={!path} onClick={go}>Import</button>
         </div>
       </div>
     </div>

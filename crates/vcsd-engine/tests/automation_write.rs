@@ -38,6 +38,7 @@ fn lane_at(st: &Value, owner: &str, param: &str, t: i64) -> f64 {
 fn setup() -> (Arc<Engine>, String, String) {
     let dir = std::env::temp_dir().join(format!("vcsd_aw_{}_{}", std::process::id(), vcsd_core::ids::new_id("t")));
     let e = Engine::with_prefs(None);
+    e.player.use_software_clock(); // real-time logic, not the machine's audio hardware (see devices.rs)
     call(&e, "project.new", json!({"dir": dir, "name": "aw", "fps": "24", "start_tc": "01:00:00:00"}));
     let lib = dir.join("Audio/LibraryRefs/fx");
     std::fs::create_dir_all(&lib).unwrap();
@@ -58,6 +59,15 @@ fn setup() -> (Arc<Engine>, String, String) {
     assert_eq!(st["clips"].as_array().unwrap().len(), 1, "constant tone placed");
     let t = st["tracks"][0]["id"].as_str().unwrap().to_string();
     let master = st["buses"].as_array().unwrap().iter().find(|b| b["parent_id"].is_null()).unwrap()["id"].as_str().unwrap().to_string();
+    // Wait until playback keeps time: a device that opens but does not start (a
+    // virtual one on CI) is covered by the software clock only after a moment.
+    call(&e, "transport.play", json!({"from": 0}));
+    let t0 = std::time::Instant::now();
+    while pos(&e) <= 0 {
+        assert!(t0.elapsed() < Duration::from_secs(5), "the transport never moved: {}", call(&e, "transport.state", json!({})));
+        sleep(20);
+    }
+    call(&e, "transport.stop", json!({}));
     (e, t, master)
 }
 
@@ -92,7 +102,7 @@ fn latch_touch_write_and_read() {
     call(&e, "automation.mode", json!({"owner_id": t, "mode": "latch"}));
     call(&e, "transport.play", json!({"from": 0}));
     sleep(300);
-    call(&e, "automation.touch", json!({"owner_id": t, "param": "volume_db", "value": -6, "phase": "begin"}));
+    let touch_begin = call(&e, "automation.touch", json!({"owner_id": t, "param": "volume_db", "value": -6, "phase": "begin"}));
     let t_begin = pos(&e);
     sleep(250);
     call(&e, "automation.touch", json!({"owner_id": t, "param": "volume_db", "value": -12, "phase": "move"}));
@@ -100,7 +110,16 @@ fn latch_touch_write_and_read() {
     sleep(150);
     call(&e, "automation.touch", json!({"owner_id": t, "param": "volume_db", "value": -12, "phase": "end"}));
     let live = meter(&e);
-    assert!((20.0 * (live / full).log10() + 12.0).abs() < 1.0, "monitoring the latched value live: {live}");
+    let ts = call(&e, "transport.state", json!({}));
+    assert!(
+        (20.0 * (live / full).log10() + 12.0).abs() < 1.0,
+        "monitoring the latched value live: {live} (touch {touch_begin}; position {t_begin} → {t_move} → {}; device {}; playing {}; dropouts {}; load {})",
+        ts["position"],
+        ts["device"],
+        ts["playing"],
+        ts["dropouts"],
+        ts["load"],
+    );
     let writing = call(&e, "transport.state", json!({}))["writing"].clone();
     assert_eq!(writing.as_array().unwrap().len(), 1, "latch stays armed after release");
     sleep(300);
@@ -184,4 +203,35 @@ fn marker_colors_are_set_validated_reset_and_undone() {
     assert!(marker(&e)["color"].is_null(), "back to its lane's");
     call(&e, "undo", json!({}));
     assert_eq!(marker(&e)["color"], "#12a4c8", "undoable");
+}
+
+#[test]
+fn a_pencil_stroke_replaces_the_lane_under_it_as_one_undo_step() {
+    let (e, t, _) = setup();
+    let lane = |e: &Arc<Engine>| {
+        let st = call(e, "state.get", json!({}));
+        let mut v: Vec<(i64, f64)> = st["automation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["owner_id"] == t.as_str() && p["param"] == "volume_db")
+            .map(|p| (p["sample"].as_i64().unwrap(), p["value"].as_f64().unwrap()))
+            .collect();
+        v.sort_by_key(|p| p.0);
+        v
+    };
+    for (s, v) in [(0, 0.0), (48_000, -6.0), (96_000, -12.0), (240_000, -3.0)] {
+        call(&e, "automation.set", json!({"owner_id": t, "param": "volume_db", "sample": s, "value": v}));
+    }
+    // a stroke over 0.5 s – 3 s: the points at 1 s and 2 s go, the stroke's come in
+    let r = call(
+        &e,
+        "automation.draw",
+        json!({"owner_id": t, "param": "volume_db", "points": [[24_000, -1.0], [144_000, -20.0], [72_000, -10.0]]}),
+    );
+    assert_eq!(r["points"], 3);
+    assert_eq!(lane(&e), vec![(0, 0.0), (24_000, -1.0), (72_000, -10.0), (144_000, -20.0), (240_000, -3.0)]);
+    call(&e, "undo", json!({}));
+    assert_eq!(lane(&e).len(), 4, "one undo step");
+    assert!(e.call("automation.draw", json!({"owner_id": t, "param": "volume_db"})).is_err());
 }

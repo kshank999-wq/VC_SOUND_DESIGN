@@ -8,7 +8,8 @@ Design writes.
 """
 import json
 import sys
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import opentimelineio as otio
 
@@ -50,7 +51,8 @@ def main(path, sr):
                 d["name"] = item.name
                 d["source"] = s(item.source_range.start_time)
                 d["url"] = ref.target_url
-                d["file"] = unquote(urlparse(ref.target_url).path)
+                # url2pathname: file:///C:/x → C:\x on Windows, unquoted as it is elsewhere
+                d["file"] = url2pathname(urlparse(ref.target_url).path)
                 d["available"] = s(ref.available_range.duration)
                 d["metadata"] = json.loads(otio.core.serialize_json_to_string(item.metadata))
                 d["effects"] = effects(item)
