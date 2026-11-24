@@ -52,7 +52,7 @@ html, body, #root { height: 100%; margin: 0; background: var(--chassis); }
 .counter { gap: 12px !important; }
 .tc-main { font-size: 32px; letter-spacing: .03em; height: 44px; padding: 0 14px; cursor: text; }
 input.tc-main { width: 250px; outline: none; }
-.counter-sub { display: flex; flex-direction: column; gap: 4px; }
+.counter-sub { display: flex; flex-direction: column; gap: 4px; width: 226px; }
 .counter .fps { align-self: flex-start; color: var(--readout); background: color-mix(in srgb, var(--readout) 9%, transparent); font-family: var(--font-readout); }
 
 .session { display: grid !important; grid-template-columns: auto auto; column-gap: 10px; row-gap: 4px; align-content: center; }

@@ -102,7 +102,7 @@ function buildRows(tracks: Track[], buses: Bus[], open: Set<string>, collapsed: 
   ordered.forEach((b, i) => {
     rows.push({ kind: "bus", b, first: i === 0, y, h: BUS_H });
     y += BUS_H;
-    lanes({ id: b.id, name: b.name, color: b.parent_id ? "#9aa7b8" : "#e6c86e", pan: 0 }, b.inserts ?? []);
+    lanes({ id: b.id, name: b.name, color: b.parent_id ? "#9AA4B5" : "#F4F7FB", pan: 0 }, b.inserts ?? []);
   });
   return rows;
 }
@@ -311,8 +311,10 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
       // loop range
       const lr = st.tx?.loop_range;
       if (lr) {
-        ctx.fillStyle = "rgba(255, 200, 60, 0.07)";
+        ctx.fillStyle = C("--accent");
+        ctx.globalAlpha = 0.07;
         ctx.fillRect(X(lr[0]), 0, X(lr[1]) - X(lr[0]), contentH + RULER);
+        ctx.globalAlpha = 1;
       }
       // marker lanes
       const laneY = new Map<string, number>();
@@ -531,14 +533,14 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
         const active = pv ? d!.zone : hv;
         if (w > 14 && (hv || pv || (sel?.kind === "clip" && sel.id === c.id))) {
           const handle = (hx: number, on: boolean) => {
-            ctx.fillStyle = on ? "#ffd24a" : "rgba(255,255,255,0.85)";
+            ctx.fillStyle = on ? C("--accent") : "rgba(255,255,255,0.85)";
             ctx.fillRect(hx - 3.5, top, 7, 7);
           };
           handle(X(a + geo.fade_in), active === "fadeIn");
           handle(X(b - geo.fade_out), active === "fadeOut");
         }
         if (active === "trimL" || active === "trimR") {
-          ctx.fillStyle = "#ffd24a";
+          ctx.fillStyle = C("--accent");
           ctx.fillRect(active === "trimL" ? x0 : x0 + w - 3, top, 3, bot - top);
         }
         if (pv && d!.zone !== "move") {
@@ -553,7 +555,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
           const lx = Math.min(Math.max(2, X(d!.cur) + 10), W - tw - 2);
           ctx.fillStyle = "rgba(10,10,12,0.9)";
           ctx.fillRect(lx, ty - 16, tw, 16);
-          ctx.fillStyle = "#ffd24a";
+          ctx.fillStyle = C("--accent");
           ctx.fillText(label, lx + 5, ty - 4);
         }
         if (selected) {
@@ -568,7 +570,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
           ctx.beginPath();
           ctx.rect(x0, ty, w - 2, TRACK);
           ctx.clip();
-          ctx.fillStyle = "#101010";
+          ctx.fillStyle = "#05070A";
           ctx.font = "10px var(--font)";
           const tag = c.performance_event_id ? "♪ " : c.take_id ? "● " : c.is_placeholder ? "◌ " : "";
           ctx.fillText(tag + (asset?.name ?? "?") + (asset?.missing ? " [MISSING]" : ""), x0 + 4, ty + 14);
@@ -625,7 +627,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
             if (px < -8 || px > W + 8) continue;
             const py = autoY(r.param, p.value, top);
             const active = d?.kind === "auto" && d.id === p.id;
-            ctx.fillStyle = active ? "#ffd24a" : "#f2f4f7";
+            ctx.fillStyle = active ? C("--accent") : "#F4F7FB";
             ctx.beginPath();
             ctx.arc(px, py, active ? 5 : 3.5, 0, Math.PI * 2);
             ctx.fill();
@@ -640,9 +642,11 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
           // being written right now: live value at the playhead
           const wx = X(st.livePosition());
           const wy = autoY(r.param, wr.value, top);
-          ctx.fillStyle = "rgba(229,83,75,0.25)";
+          ctx.fillStyle = C("--rec");
+          ctx.globalAlpha = 0.22;
           ctx.fillRect(0, top, W, AUTO - 1);
-          ctx.fillStyle = "#ff5a4f";
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = C("--rec");
           ctx.beginPath();
           ctx.arc(wx, wy, 5, 0, Math.PI * 2);
           ctx.fill();
@@ -656,7 +660,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
           const lx = Math.min(Math.max(2, X(d.autoPreview.sample) + 10), W - tw - 2);
           ctx.fillStyle = "rgba(10,10,12,0.9)";
           ctx.fillRect(lx, top + 2, tw, 16);
-          ctx.fillStyle = "#ffd24a";
+          ctx.fillStyle = C("--accent");
           ctx.fillText(label, lx + 5, top + 14);
         }
       }
@@ -706,7 +710,7 @@ export function Timeline({ eng, vp, setVp, sel, setSel, snapOn, laneMode = "full
         ctx.restore();
       }
       if (lr) {
-        ctx.fillStyle = "rgba(255, 200, 60, 0.8)";
+        ctx.fillStyle = C("--accent");
         ctx.fillRect(X(lr[0]), RULER - 4, X(lr[1]) - X(lr[0]), 4);
       }
       // ---- playhead
