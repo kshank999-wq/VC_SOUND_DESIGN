@@ -553,7 +553,12 @@ mod editor {
     }
     impl ITimerHandlerTrait for Timer {
         unsafe fn onTimer(&self) {
-            self.0.paint(); // shows changes made by the host (automation, its own sliders)
+            // Drain events and repaint (the repaint shows changes the host made: automation,
+            // its own sliders). Xlib reads whatever is waiting on the socket into its own queue
+            // during any call, the drawing in paint() included, and an event queued that way
+            // leaves the socket empty, so onFDIsSet never fires for it. Real plugins drain on
+            // their timer for the same reason.
+            self.0.events();
         }
     }
 
